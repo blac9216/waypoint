@@ -123,6 +123,7 @@ describe("mapRunJobItem / mapRunListItem", () => {
 				job_count_completed: 0,
 				job_count_failed: 0,
 				job_count_blocked: 0,
+				coverage_incomplete: false,
 			},
 			jobs,
 		);

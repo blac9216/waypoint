@@ -155,6 +155,14 @@ export function ResultsScreen() {
 								<span className={`results__run-dot results__run-dot--${row.state}`} />
 								<span className="mono results__run-id">{row.id}</span>
 								<span className="results__run-kind">{row.run_type}</span>
+								{row.coverage_incomplete && (
+									<span
+										className="results__coverage-flag"
+										title="Coverage incomplete — no scan plan was recorded, the plan omitted a requested component, or at least one component evaluated zero controls. See the run detail below for specifics."
+									>
+										coverage incomplete
+									</span>
+								)}
 							</div>
 							<div className="results__run-row-meta">
 								{scopeSiteId(row.scope) ?? "—"} · {row.job_count} targets ·{" "}
@@ -175,7 +183,17 @@ export function ResultsScreen() {
 					<>
 						<div className="results__detail-header">
 							<div className="results__title-block">
-								<div className="mono results__run-title">{run.id}</div>
+								<div className="mono results__run-title">
+									{run.id}
+									{run.coverage_incomplete && (
+										<span
+											className="results__coverage-flag"
+											title="Coverage incomplete — no scan plan was recorded, the plan omitted a requested component, or at least one component evaluated zero controls."
+										>
+											coverage incomplete
+										</span>
+									)}
+								</div>
 								<div className="results__run-subtitle">
 									{scopeSiteId(run.scope) ?? "—"} · {run.job_count} targets · {run.run_type} ·{" "}
 									{run.completed_at ? `completed ${formatTimestamp(run.completed_at)}` : run.state} in{" "}

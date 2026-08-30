@@ -57,6 +57,18 @@ export interface RunListItem {
 	job_count_completed: number;
 	job_count_failed: number;
 	job_count_blocked: number;
+	/**
+	 * Issue #1140/#1300: true when the run's coverage cannot be trusted as
+	 * complete — no scan plan was recorded, the plan omitted a requested
+	 * component, or at least one component evaluated zero controls. Carried
+	 * on `GET /runs`, `GET /runs/{id}`, and `GET /runs/history` alike (one
+	 * bulk-query projection server-side, no N+1). `false` is NOT a claim that
+	 * every component evaluated at least one control in every shape — see
+	 * `RunResponse.CoverageIncomplete`'s doc comment (RunContracts.cs) for the
+	 * exact predicate. A reader of the run list/detail MUST treat this as a
+	 * qualifier on an otherwise-clean-looking run, never silently drop it.
+	 */
+	coverage_incomplete: boolean;
 }
 
 export interface RunListResult {
@@ -203,7 +215,18 @@ export const SEVERITIES: Severity[] = ["CAT I", "CAT II", "CAT III"];
  * `0`) — a consumer MUST check `counts_available` before trusting them, and
  * MUST NOT render an absent count as `0`, which would read as a
  * clean/compliant row instead of "could not count" (api-contract.md
- * "countability is explicit", #299 round-1 review blocker). */
+ * "countability is explicit", #299 round-1 review blocker).
+ *
+ * `controls_total`/`controls_evaluated` (issue #1132/#1140) and
+ * `controls_execution_error` (issue #1144/#1247) share the exact same
+ * `counts_available` gate as the CAT counts above — all four are `undefined`
+ * together when the HDF was absent/unparseable, never a fabricated `0`.
+ * `controls_evaluated < controls_total` (including `0`) means this target's
+ * `0/0/0` open CAT read is NOT a clean scan — it evaluated nothing (or not
+ * everything). `controls_execution_error` is a DIFFERENT signal: controls
+ * that produced no genuine compliance verdict at all (an error result, an
+ * unrecognized status) — it is not folded into the CAT open counts and must
+ * be surfaced distinctly from an open finding, never merged into it. */
 export interface RunArtifactRow {
 	job_id: string;
 	target: string;
@@ -212,6 +235,16 @@ export interface RunArtifactRow {
 	cat_i_open?: number;
 	cat_ii_open?: number;
 	cat_iii_open?: number;
+	/** Issue #1132: total controls this HDF describes. Compare against
+	 * `controls_evaluated` before reading an all-zero CAT row as clean. */
+	controls_total?: number;
+	/** Issue #1132: controls that produced a real pass/fail outcome (excludes
+	 * skipped/not-applicable/errored/absent). */
+	controls_evaluated?: number;
+	/** Issue #1144: controls that produced no genuine compliance verdict —
+	 * an error result or an unrecognized status/shape. Not an "open finding";
+	 * render it as its own signal, not folded into the CAT counts. */
+	controls_execution_error?: number;
 	/** Available artifact kinds for this target, e.g. `["ckl", "hdf"]` —
 	 * reflects file *presence* on disk, independent of `counts_available`
 	 * (a present-but-corrupt HDF still lists `"hdf"` here). */
@@ -221,6 +254,34 @@ export interface RunArtifactRow {
 	 * can report that) but the type stays a superset of what's possible so a
 	 * future real conflict isn't a breaking type change. */
 	upload_status: "uploaded" | "not-uploaded" | "conflict" | "pending";
+}
+
+/**
+ * `${controls_evaluated}/${controls_total}` denominator for a `RunArtifactRow`
+ * (issue #1132/#1140) — rendered next to the CAT severity pills so a reader
+ * cannot mistake an all-zero `0/0/0` open read for a clean scan without also
+ * checking how many controls were actually evaluated. `"n/a"` when
+ * `counts_available` is false or either count is missing — the same
+ * uncountable treatment `SeverityPill` gives the CAT counts, never a
+ * fabricated `0/0`.
+ */
+export function controlsEvaluatedLabel(row: Pick<RunArtifactRow, "counts_available" | "controls_total" | "controls_evaluated">): string {
+	if (!row.counts_available || row.controls_total == null || row.controls_evaluated == null) {
+		return "n/a";
+	}
+	return `${row.controls_evaluated}/${row.controls_total}`;
+}
+
+/**
+ * True when this row evaluated fewer controls than it had (including zero) —
+ * the all-skipped/all-errored false-clean shape issues #1132/#1140 guard
+ * against. An uncountable row (`counts_available:false`) never registers as
+ * a gap here — that is the separate, already-visible "n/a" case.
+ */
+export function controlsUnderEvaluated(row: Pick<RunArtifactRow, "counts_available" | "controls_total" | "controls_evaluated">): boolean {
+	return Boolean(
+		row.counts_available && row.controls_total != null && row.controls_evaluated != null && row.controls_evaluated < row.controls_total,
+	);
 }
 
 export function fetchRunArtifacts(runId: string): Promise<RunArtifactRow[]> {

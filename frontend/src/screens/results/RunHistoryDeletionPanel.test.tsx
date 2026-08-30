@@ -28,6 +28,7 @@ const TERMINAL_RUN: RunListItem = {
 	job_count_completed: 2,
 	job_count_failed: 0,
 	job_count_blocked: 0,
+	coverage_incomplete: false,
 };
 
 const NON_TERMINAL_RUN: RunListItem = { ...TERMINAL_RUN, id: "RUN-RUNNING", state: "running" };

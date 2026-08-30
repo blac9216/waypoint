@@ -204,6 +204,18 @@ function StatusBuckets({ rollup }: { rollup: ComponentResultRollup }) {
 				<div key={row.status} className={`results__cresult-status ${componentResultStatusClass(row.status)}`}>
 					<div className="results__cresult-status-label">{componentResultStatusLabel(row.status)}</div>
 					<div className="mono results__cresult-status-count">{row.component_count}</div>
+					{/* Issue #1144/#1247: execution_error_count is a FINDING count, not a
+					   component count -- shown as its own suffix line, distinguished from
+					   both component_count above and any open (CAT) finding count, never
+					   merged into either. */}
+					{row.execution_error_count > 0 && (
+						<div
+							className="results__cresult-status-suffix"
+							title="Controls that produced no genuine compliance verdict (execution error) -- distinct from an open finding."
+						>
+							{row.execution_error_count} control{row.execution_error_count === 1 ? "" : "s"} errored
+						</div>
+					)}
 				</div>
 			))}
 		</div>

@@ -9,7 +9,7 @@
  * abbreviated to a bare Roman numeral. See ResultsScreen.test.tsx for the
  * non-truncation assertion.
  */
-import { SEVERITIES, type RunArtifactRow, type RunJobItem, type Severity } from "./results";
+import { controlsEvaluatedLabel, controlsUnderEvaluated, SEVERITIES, type RunArtifactRow, type RunJobItem, type Severity } from "./results";
 
 const SEVERITY_CLASS: Record<Severity, string> = {
 	"CAT I": "results__severity--1",
@@ -44,6 +44,49 @@ export function UploadStatusPill({ status }: { status: RunArtifactRow["upload_st
 	return <span className={`results__upload-pill results__upload-pill--${status}`}>{label}</span>;
 }
 
+/** Evaluated-controls denominator (issue #1132/#1140) — rendered next to the
+ * CAT severity pills so a reader cannot mistake an all-zero `0/0/0` open row
+ * for a clean scan without checking how many controls were actually
+ * evaluated. `controlsEvaluatedLabel`/`controlsUnderEvaluated` already gate
+ * on `counts_available` and render "n/a" rather than a fabricated `0/0` —
+ * see results.ts for that logic. */
+export function EvaluatedDenominator({ row }: { row: RunArtifactRow }) {
+	const label = controlsEvaluatedLabel(row);
+	const underEvaluated = controlsUnderEvaluated(row);
+	const title = underEvaluated
+		? `Evaluated ${label} controls — this scan did not evaluate every control it reported, so an all-zero CAT count above is not necessarily clean.`
+		: label === "n/a"
+			? "Evaluated controls not available (could not count)."
+			: `Evaluated ${label} controls.`;
+	return (
+		<span className={`results__evaluated ${underEvaluated ? "results__evaluated--warn" : ""}`} title={title}>
+			{label}
+		</span>
+	);
+}
+
+/** `controls_execution_error` pill (issue #1144/#1247) — deliberately its own
+ * column, never merged into the CAT open-finding counts: an errored control
+ * never produced a genuine compliance verdict, so it is not "open". */
+export function ExecutionErrorCount({ row }: { row: RunArtifactRow }) {
+	if (!row.counts_available || row.controls_execution_error == null) {
+		return (
+			<span className="results__exec-err results__exec-err--na" title="Execution-error count not available (could not count).">
+				n/a
+			</span>
+		);
+	}
+	const count = row.controls_execution_error;
+	return (
+		<span
+			className={`results__exec-err ${count > 0 ? "results__exec-err--warn" : ""}`}
+			title={`${count} control${count === 1 ? "" : "s"} produced no genuine compliance verdict (execution error) — distinct from an open finding.`}
+		>
+			{count}
+		</span>
+	);
+}
+
 export function ArtifactsTable({
 	loading,
 	artifacts,
@@ -70,6 +113,8 @@ export function ArtifactsTable({
 						<th className="results__col-sev">{SEVERITIES[0]}</th>
 						<th className="results__col-sev">{SEVERITIES[1]}</th>
 						<th className="results__col-sev">{SEVERITIES[2]}</th>
+						<th className="results__col-evaluated">EVALUATED</th>
+						<th className="results__col-exec-err">EXEC ERR</th>
 						<th className="results__col-artifacts">ARTIFACTS</th>
 						<th className="results__col-stigman">STIG MANAGER</th>
 					</tr>
@@ -77,14 +122,14 @@ export function ArtifactsTable({
 				<tbody>
 					{loading && (
 						<tr>
-							<td colSpan={7} className="results__empty">
+							<td colSpan={9} className="results__empty">
 								Loading artifacts…
 							</td>
 						</tr>
 					)}
 					{!loading && unavailable && (
 						<tr>
-							<td colSpan={7} className="results__empty">
+							<td colSpan={9} className="results__empty">
 								Per-target artifacts could not be loaded for this run — GET /runs/{"{id}"}/artifacts failed or returned
 								no data.
 							</td>
@@ -105,6 +150,12 @@ export function ArtifactsTable({
 								<td className="results__col-sev">
 									<SeverityPill severity="CAT III" count={row.counts_available ? row.cat_iii_open : undefined} />
 								</td>
+								<td className="results__col-evaluated">
+									<EvaluatedDenominator row={row} />
+								</td>
+								<td className="results__col-exec-err">
+									<ExecutionErrorCount row={row} />
+								</td>
 								<td className="results__col-artifacts mono">{row.artifact_kinds.join(" · ").toUpperCase()}</td>
 								<td className="results__col-stigman">
 									<UploadStatusPill status={row.upload_status} />
@@ -113,7 +164,7 @@ export function ArtifactsTable({
 						))}
 					{!loading && !unavailable && artifacts?.length === 0 && (
 						<tr>
-							<td colSpan={7} className="results__empty">
+							<td colSpan={9} className="results__empty">
 								No artifacts for this run.
 							</td>
 						</tr>

@@ -971,6 +971,7 @@ describe("LiveRunScreen (issue #283)", () => {
 			job_count_completed: 0,
 			job_count_failed: 0,
 			job_count_blocked: 0,
+			coverage_incomplete: false,
 		};
 
 		const COMPLETED_RUN: RunListItem = {
