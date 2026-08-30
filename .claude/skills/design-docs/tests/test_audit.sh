@@ -714,6 +714,78 @@ case_repo_name_from_origin() {
 # line) surfaces as a "## Skipped checks" section in the report, not buried
 # as a NOTE inside Tier 1, and the Summary line counts it.
 # ---------------------------------------------------------------------------
+# Regression storage#227: ARCH_NO_DIAGRAM must be deterministic — the old
+# `sed | grep -q` pipeline raced SIGPIPE under pipefail and fired ~50% of runs.
+case_arch_diagram_deterministic() {
+  local dir; dir="$(make_fixture archdet)"
+  write_documentation_standard "$dir"
+  cat > "$dir/docs/explanation/architecture.md" <<'MD'
+# Architecture
+
+## Context
+
+```mermaid
+graph TD; u-->s
+```
+
+## Container
+
+```mermaid
+graph TD; a-->b
+```
+
+## Component
+
+```mermaid
+graph TD; c-->d
+```
+MD
+  local run
+  for run in $(seq 1 20); do
+    run_audit "$dir"
+    if grep -q "ARCH_NO_DIAGRAM" "$AU_REPORT" 2>/dev/null || printf '%s' "$AU_STDERR" | grep -q "ARCH_NO_DIAGRAM"; then
+      report "arch_deterministic: spurious ARCH_NO_DIAGRAM on run $run"
+      return
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Regression storage#235: ADR_NO_DATE must be deterministic (same SIGPIPE class
+# as storage#227, head|grep -q variant).
+case_adr_date_deterministic() {
+  local dir; dir="$(make_fixture datedet)"
+  write_documentation_standard "$dir"
+  cat > "$dir/docs/adr/0001-dated.md" <<'MD'
+# ADR-0001: Dated decision
+
+Status: Accepted
+Date: 2026-08-30
+
+## Context
+c
+## Decision Drivers
+d
+## Considered Options
+o
+## Decision
+x
+## Consequences
+q
+MD
+  local run
+  for run in $(seq 1 20); do
+    run_audit "$dir"
+    # match the finding line, not the gap-report template's C2 chore text
+    # which always contains the literal code list
+    if grep -q "ADR_NO_DATE no Date: line" "$AU_REPORT" 2>/dev/null || printf '%s' "$AU_STDERR" | grep -q "ADR_NO_DATE no Date: line"; then
+      report "adr_date_deterministic: spurious ADR_NO_DATE on run $run"
+      return
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 case_skipped_checks() {
   local dir; dir="$(make_fixture skipped)"
   write_documentation_standard "$dir"
@@ -746,11 +818,13 @@ run_case case_arch_missing_level
 run_case case_arch_level_order
 run_case case_repo_name_from_origin
 run_case case_skipped_checks
+run_case case_arch_diagram_deterministic
+run_case case_adr_date_deterministic
 
 if [ "$fail" -ne 0 ]; then
   echo "test_audit: FAILED" >&2
   exit 1
 fi
 
-echo "test_audit: PASS (15 cases)"
+echo "test_audit: PASS ($(grep -c "^run_case " "${BASH_SOURCE[0]}") cases)"
 exit 0

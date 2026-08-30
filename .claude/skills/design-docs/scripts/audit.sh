@@ -274,7 +274,9 @@ if [ -d "$ROOT/$ADR_DIR" ]; then
         add_finding "$rel" "" "ADR_MISSING_SECTION" "missing '$section' section"
       fi
     done
-    if ! head -n 15 "$adr" | grep -qE '^[[:space:]]*-?[[:space:]]*(\*\*Date:\*\*|Date:)'; then
+    # why-not-pipe: storage#227 — reader-exits-first SIGPIPE race under pipefail
+    adr_head15="$(head -n 15 "$adr")"
+    if ! grep -qE '^[[:space:]]*-?[[:space:]]*(\*\*Date:\*\*|Date:)' <<<"$adr_head15"; then
       add_finding "$rel" "" "ADR_NO_DATE" "no Date: line in header block"
     fi
   done
@@ -397,7 +399,7 @@ if [ -n "$GLOSSARY_PATH" ]; then
       else
         GLOSSARY_TERMS["$term"]=1
       fi
-      if printf '%s\n' "$content" | grep -qE '`[^`]*(/|\.cs|\.ts|\.sql)[^`]*`'; then
+      if grep -qE '`[^`]*(/|\.cs|\.ts|\.sql)[^`]*`' <<<"$content"; then
         add_finding "$GLOSSARY_PATH" "$lineno" "GLOSSARY_IMPLEMENTATION_DETAIL" "term '$term' entry contains an implementation-detail reference"
       fi
     done < <(awk '
@@ -467,7 +469,11 @@ if [ -n "$ARCHITECTURE_PATH" ]; then
           end="$other"
         fi
       done
-      if ! sed -n "${start},${end}p" "$arch_file" | grep -qE '^```mermaid'; then
+      # Capture the slice before grepping: `sed | grep -q` under pipefail can
+      # die 141 when grep exits first (SIGPIPE race) and fire a false finding.
+      # why-not-pipe: storage#227
+      section_slice="$(sed -n "${start},${end}p" "$arch_file")"
+      if ! grep -qE '^```mermaid' <<<"$section_slice"; then
         add_finding "$ARCHITECTURE_PATH" "$start" "ARCH_NO_DIAGRAM" "'$level' section has no mermaid diagram"
       fi
     done

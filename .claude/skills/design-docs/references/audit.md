@@ -25,6 +25,12 @@ against the shape in `docs/doc-manifest.md`, and writes the gap report scaffold
 and the Tier 2 tasks listed. If `doc-manifest.md` is missing it stops: audit a repository
 that has not adopted, and every finding is "not adopted".
 
+The report carries a `## Skipped checks` section right after the Summary (and a
+`Skipped checks: N` count on the Summary line): when the manifest lacks a section, the
+whole check category it configures is skipped, not failed — the section names each
+skipped category and the manifest section it needs. Treat a non-zero skip count as its
+own finding about the manifest before trusting the Tier 1 totals.
+
 ## 2. Tier 2 — cross-reference (agent, cheap model is fine)
 
 For each task the scaffold lists, check and record findings under it. These are lookups,
