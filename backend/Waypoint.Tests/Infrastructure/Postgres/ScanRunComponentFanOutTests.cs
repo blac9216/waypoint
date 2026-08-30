@@ -621,14 +621,20 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #1138's second, related hazard: the vendor ESX baseline interpolates
-	/// <c>selector_name</c> UNQUOTED into <c>Get-VMHost -Name #{vmhostName}</c>, so a
-	/// DisplayName containing whitespace or a quote character is unsafe to pass even
-	/// with no collision at all -- it is skipped with its own
-	/// <see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> reason.
+	/// Issue #1138's second, related hazard (round-1 review Spec #1/#2): the vendor ESX
+	/// baseline interpolates <c>selector_name</c> UNQUOTED into
+	/// <c>Get-VMHost -Name #{vmhostName}</c>, so anything outside
+	/// <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>'s <c>[A-Za-z0-9._-]</c>
+	/// allow-list is unsafe to pass even with no collision at all. This pins one
+	/// component per rejected class that actually changes behaviour on the wire -- a
+	/// PowerCLI WILDCARD (which would silently widen <c>-Name</c> to every matching
+	/// object), a PowerShell METACHARACTER subexpression (which would execute), a
+	/// QUOTE, and WHITESPACE (which would split the argument) -- each skipped with its
+	/// own <see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> reason whose detail
+	/// names the offending class.
 	/// </summary>
 	[Fact]
-	public async Task CreateScanRun_DisplayNameWithWhitespaceOrQuote_SkippedWithUnsafeSelectorNameReason()
+	public async Task CreateScanRun_DisplayNameUnsafeForUnquotedSelector_SkippedWithUnsafeSelectorNameReason()
 	{
 		Guid siteId = await CreateSiteAsync("fanout-vm-unsafe-name");
 		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
@@ -641,6 +647,15 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Guid quotedVm = await SeedComponentWithRequirementsAsync(
 			targetId, "vm-quoted", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Vm, displayName: "o'clock-vm.example.internal");
+		// The two classes the round-1 review found still open: a PowerCLI wildcard
+		// (Get-VM -Name web* matches EVERY vm starting with "web") and a PowerShell
+		// subexpression in an unquoted argument.
+		Guid wildcardVm = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-wildcard", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "web*");
+		Guid metacharacterVm = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-metacharacter", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "vm-$(hostname)");
 		Guid safeControl = await SeedComponentWithRequirementsAsync(
 			targetId, "esxi-safe-control", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Esxi);
@@ -660,10 +675,125 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 
 		using JsonDocument plan = await GetPlanAsync(runId);
 		List<JsonElement> skips = [.. plan.RootElement.GetProperty("skips").EnumerateArray()];
-		Assert.Equal(2, skips.Count);
+		Assert.Equal(4, skips.Count);
 		Assert.All(skips, skip => Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skip.GetProperty("reason").GetString()));
 		HashSet<Guid> skippedComponentIds = [.. skips.Select(skip => Guid.Parse(skip.GetProperty("component_id").GetString()!))];
-		Assert.Equal(new HashSet<Guid> { spacedEsxi, quotedVm }, skippedComponentIds);
+		Assert.Equal(new HashSet<Guid> { spacedEsxi, quotedVm, wildcardVm, metacharacterVm }, skippedComponentIds);
+
+		// The detail names the offending CHARACTER CLASS, so an operator can tell a
+		// scope-widening wildcard apart from a merely awkward name.
+		string DetailFor(Guid componentId) =>
+			skips.Single(skip => skip.GetProperty("component_id").GetString() == componentId.ToString())
+				.GetProperty("detail").GetString()!;
+		Assert.Contains("wildcard", DetailFor(wildcardVm), StringComparison.Ordinal);
+		Assert.Contains("metacharacter", DetailFor(metacharacterVm), StringComparison.Ordinal);
+		Assert.Contains("whitespace", DetailFor(spacedEsxi), StringComparison.Ordinal);
+		Assert.Contains("metacharacter", DetailFor(quotedVm), StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1138 round-1 review Spec #3 -- the collision key must include the SELECTOR
+	/// KIND. An ESXi host and a VM on one vCenter that happen to share a name are
+	/// resolved by DIFFERENT cmdlets (<c>Get-VMHost -Name</c> vs <c>Get-VM -Name</c>)
+	/// and are not ambiguous with each other, so demoting them would be a FALSE coverage
+	/// omission: the run would silently lose two components it can scan correctly. Both
+	/// must plan and fan out normally with no skip.
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_EsxiAndVmShareDisplayName_BothFanOutIndependently_NoAmbiguousSkip()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-esxi-vm-same-name");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		const string sharedName = "shared-name.example.internal";
+		Guid esxiComponent = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-shared-name", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi, displayName: sharedName);
+		Guid vmComponent = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-shared-name", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: sharedName);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		HashSet<Guid> linkedComponentIds = [.. await ReadLinkedComponentIdsAsync(runId)];
+		Assert.Equal(new HashSet<Guid> { esxiComponent, vmComponent }, linkedComponentIds);
+
+		using JsonDocument plan = await GetPlanAsync(runId);
+		Assert.Empty(plan.RootElement.GetProperty("skips").EnumerateArray());
+	}
+
+	/// <summary>
+	/// Issue #1275 (deferred from #1138's round-1 review): both new skip reasons must be
+	/// visible on <c>POST /runs/plan-preview</c> -- BEFORE the caller commits to
+	/// creating anything -- not only on <c>GET /runs/{id}/plan</c> afterwards. Correct
+	/// today because the post-pass lives inside <c>ScanPlannerService.CompileAsync</c>,
+	/// which preview also calls, but that placement is exactly what a future refactor
+	/// (the sibling credential post-pass lives OUTSIDE <c>CompileAsync</c>) could break
+	/// silently; this pins it, including the colliding sibling's component ids in the
+	/// detail.
+	/// </summary>
+	[Fact]
+	public async Task PlanPreview_CollidingAndUnsafeDisplayNames_ReportsBothSkipReasonsBeforeCreation()
+	{
+		Guid siteId = await CreateSiteAsync("preview-selector-name-skips");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		const string collidingName = "preview-shared-vm.example.internal";
+		Guid vmA = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-collide-a", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: collidingName);
+		Guid vmB = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-collide-b", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: collidingName);
+		Guid wildcardVm = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-wildcard", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "preview-web*");
+		Guid safeControl = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-safe-control", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs/plan-preview", "Cyber", new
+		{
+			scope = JsonSerializer.Serialize(new
+			{
+				site_id = siteId,
+				target_scope = new { mode = "all" },
+			}),
+		});
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument preview = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+		// The safely-named control is the only accepted item; the three hazardous
+		// components are coverage omissions the caller sees before creating the run.
+		List<Guid> previewItemComponentIds =
+			[.. preview.RootElement.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("component_id").GetGuid())];
+		Assert.Equal([safeControl], previewItemComponentIds);
+
+		List<JsonElement> skips = [.. preview.RootElement.GetProperty("skips").EnumerateArray()];
+		Dictionary<Guid, JsonElement> skipsByComponentId = skips.ToDictionary(
+			skip => Guid.Parse(skip.GetProperty("component_id").GetString()!), skip => skip);
+		Assert.Equal(new HashSet<Guid> { vmA, vmB, wildcardVm }, skipsByComponentId.Keys.ToHashSet());
+
+		Assert.Equal(ScanPlanSkipReasons.AmbiguousSelectorName, skipsByComponentId[vmA].GetProperty("reason").GetString());
+		Assert.Equal(ScanPlanSkipReasons.AmbiguousSelectorName, skipsByComponentId[vmB].GetProperty("reason").GetString());
+		Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skipsByComponentId[wildcardVm].GetProperty("reason").GetString());
+
+		// The sibling ids are in the preview detail, not only in the created run's plan.
+		Assert.Contains(vmB.ToString(), skipsByComponentId[vmA].GetProperty("detail").GetString());
+		Assert.Contains(vmA.ToString(), skipsByComponentId[vmB].GetProperty("detail").GetString());
+		Assert.Contains("wildcard", skipsByComponentId[wildcardVm].GetProperty("detail").GetString()!, StringComparison.Ordinal);
 	}
 
 	[Fact]

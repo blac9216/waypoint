@@ -161,23 +161,29 @@ public sealed class ScanPlannerService
 	/// tries to build the job payload) is unsafe to pass to the vendor content:
 	/// <list type="bullet">
 	/// <item><description><see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> -- the
-	/// DisplayName contains whitespace or a quote character. Checked first and
-	/// per-item: the vendor ESX baseline interpolates the name unquoted into
-	/// <c>Get-VMHost -Name #{vmhostName}</c>, so this is unsafe independent of any
-	/// collision.</description></item>
+	/// DisplayName fails <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>, the
+	/// single conservative allow-list (<c>[A-Za-z0-9._-]</c> only) for a value the
+	/// vendor content interpolates UNQUOTED into <c>Get-VMHost -Name #{vmhostName}</c>:
+	/// PowerCLI wildcards, PowerShell metacharacters, whitespace, control and non-ASCII
+	/// characters are all refused. Checked first and per-item, so it is unsafe
+	/// independent of any collision; the skip detail names the offending character
+	/// class.</description></item>
 	/// <item><description><see cref="ScanPlanSkipReasons.AmbiguousSelectorName"/> --
 	/// two or more of the REMAINING (already name-safe) items share the same
-	/// (parent target, DisplayName) pair. <c>Get-VM -Name &lt;name&gt;</c>/
-	/// <c>Get-VMHost -Name &lt;name&gt;</c> would resolve to every one of them, so ALL
-	/// members of the colliding group are skipped -- never a guessed
+	/// (parent target, selector kind, DisplayName) triple. <c>Get-VM -Name
+	/// &lt;name&gt;</c>/<c>Get-VMHost -Name &lt;name&gt;</c> would resolve to every one
+	/// of them, so ALL members of the colliding group are skipped -- never a guessed
 	/// disambiguation, and never just one side of the pair.</description></item>
 	/// </list>
 	/// Grouped per parent target (vCenter), not globally: the same VM/host name under
 	/// two DIFFERENT vCenters is not ambiguous -- each vCenter resolves its own
-	/// <c>Get-VM</c>/<c>Get-VMHost</c> call independently. Compared with
-	/// <see cref="StringComparer.OrdinalIgnoreCase"/> deliberately: vSphere object-name
-	/// matching is not case-sensitive, so two names differing only by case are the same
-	/// collision hazard, not a safe pair.
+	/// <c>Get-VM</c>/<c>Get-VMHost</c> call independently. Grouped per SELECTOR KIND
+	/// too: an ESXi host and a VM sharing one name on one vCenter are resolved by
+	/// DIFFERENT cmdlets (<c>Get-VMHost -Name</c> vs <c>Get-VM -Name</c>) and are not
+	/// ambiguous with each other, so demoting them would be a false coverage omission.
+	/// The name is compared with <see cref="StringComparer.OrdinalIgnoreCase"/>
+	/// deliberately: vSphere object-name matching is not case-sensitive, so two names
+	/// differing only by case are the same collision hazard, not a safe pair.
 	/// </summary>
 	private async Task ApplyNarrowingSelectorNameSkipsAsync(
 		List<ScanPlanItem> items, List<ScanPlanSkip> skips, CancellationToken cancellationToken)
@@ -217,24 +223,26 @@ public sealed class ScanPlannerService
 		// with no collision at all (issue #1138's second, related hazard).
 		foreach ((ScanPlanItem item, Component component) in candidates)
 		{
-			if (component.DisplayName.Any(c => char.IsWhiteSpace(c) || c is '\'' or '"'))
+			if (ScanComponentNarrowing.DescribeUnsafeSelectorName(component.DisplayName) is { } offendingClass)
 			{
 				demoted.Add(item.ComponentId);
 				skips.Add(new ScanPlanSkip(
 					item.ComponentId,
 					ScanPlanSkipReasons.UnsafeSelectorName,
-					$"Component '{item.ComponentId}' has display name '{component.DisplayName}', which contains whitespace or a quote character. " +
-						"The vendor content interpolates this value unquoted into its PowerCLI object selector, so it cannot be passed safely; " +
+					$"Component '{item.ComponentId}' has display name '{component.DisplayName}', which contains {offendingClass}. " +
+						"Only [A-Za-z0-9._-] is accepted: the vendor content interpolates this value unquoted into its PowerCLI object selector, " +
+						"where a wildcard would silently widen the scope and a metacharacter would break or inject into the invocation; " +
 						"no scan attempt was created for this component. Rename the object in vSphere, or use a stable identity that resolves to a safe name."));
 			}
 		}
 
 		// Collision pass over the remaining (already name-safe) candidates, grouped by
-		// (parent target, DisplayName) -- the same DisplayName under two DIFFERENT
-		// vCenters is not ambiguous.
-		foreach (IGrouping<(Guid ParentTargetId, string DisplayName), (ScanPlanItem Item, Component Component)> group in candidates
+		// (parent target, selector kind, DisplayName) -- the same DisplayName under two
+		// DIFFERENT vCenters is not ambiguous, and neither is an ESXi host that happens
+		// to share a name with a VM (different resolving cmdlet).
+		foreach (IGrouping<(Guid ParentTargetId, string SelectorKind, string DisplayName), (ScanPlanItem Item, Component Component)> group in candidates
 			.Where(c => !demoted.Contains(c.Item.ComponentId))
-			.GroupBy(c => (c.Component.ParentTargetId, c.Component.DisplayName), TupleDisplayNameComparer.Instance))
+			.GroupBy(c => (c.Component.ParentTargetId, c.Item.SelectorKind ?? string.Empty, c.Component.DisplayName), SelectorNameGroupComparer.Instance))
 		{
 			List<(ScanPlanItem Item, Component Component)> colliding = [.. group];
 			if (colliding.Count < 2)
@@ -249,7 +257,7 @@ public sealed class ScanPlannerService
 				skips.Add(new ScanPlanSkip(
 					item.ComponentId,
 					ScanPlanSkipReasons.AmbiguousSelectorName,
-					$"Component '{item.ComponentId}' shares display name '{component.DisplayName}' on the same vSphere target with component(s) " +
+					$"Component '{item.ComponentId}' shares display name '{component.DisplayName}' with another '{item.SelectorKind}' component on the same vSphere target: " +
 						$"'{string.Join("', '", componentIds.Where(id => id != item.ComponentId))}'. The vendor content resolves this narrowing " +
 						"selector by name, and a name-based lookup would return every one of these objects, cross-attributing scan results; " +
 						"no scan attempt was created for any of them. Rename the objects in vSphere so each has a distinct name, then re-plan."));
@@ -264,19 +272,26 @@ public sealed class ScanPlannerService
 
 	/// <summary>
 	/// Groups <see cref="ApplyNarrowingSelectorNameSkipsAsync"/>'s (parent target,
-	/// DisplayName) candidates using ordinal target-id equality and
-	/// <see cref="StringComparer.OrdinalIgnoreCase"/> for the name, matching vSphere's
-	/// own case-insensitive object-name resolution.
+	/// selector kind, DisplayName) candidates. Target id and selector kind compare
+	/// ordinally -- a <c>Get-VMHost -Name</c> lookup and a <c>Get-VM -Name</c> lookup
+	/// are separate name spaces, so an <c>esxi</c> and a <c>vm</c> component sharing a
+	/// name never collide -- while the NAME uses
+	/// <see cref="StringComparer.OrdinalIgnoreCase"/>, matching vSphere's own
+	/// case-insensitive object-name resolution.
 	/// </summary>
-	private sealed class TupleDisplayNameComparer : IEqualityComparer<(Guid ParentTargetId, string DisplayName)>
+	private sealed class SelectorNameGroupComparer : IEqualityComparer<(Guid ParentTargetId, string SelectorKind, string DisplayName)>
 	{
-		public static readonly TupleDisplayNameComparer Instance = new();
+		public static readonly SelectorNameGroupComparer Instance = new();
 
-		public bool Equals((Guid ParentTargetId, string DisplayName) x, (Guid ParentTargetId, string DisplayName) y) =>
-			x.ParentTargetId == y.ParentTargetId && string.Equals(x.DisplayName, y.DisplayName, StringComparison.OrdinalIgnoreCase);
+		public bool Equals(
+			(Guid ParentTargetId, string SelectorKind, string DisplayName) x,
+			(Guid ParentTargetId, string SelectorKind, string DisplayName) y) =>
+			x.ParentTargetId == y.ParentTargetId
+				&& string.Equals(x.SelectorKind, y.SelectorKind, StringComparison.Ordinal)
+				&& string.Equals(x.DisplayName, y.DisplayName, StringComparison.OrdinalIgnoreCase);
 
-		public int GetHashCode((Guid ParentTargetId, string DisplayName) obj) =>
-			HashCode.Combine(obj.ParentTargetId, obj.DisplayName.ToUpperInvariant());
+		public int GetHashCode((Guid ParentTargetId, string SelectorKind, string DisplayName) obj) =>
+			HashCode.Combine(obj.ParentTargetId, obj.SelectorKind, obj.DisplayName.ToUpperInvariant());
 	}
 
 	/// <summary>
