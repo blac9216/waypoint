@@ -1,0 +1,18 @@
+# Design-docs checks: rationale-index pointer integrity and ADR index drift.
+# Always-report (no path filter) so a docs-only PR cannot hide from a required check.
+name: docs-checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  design-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rationale-index pointers resolve
+        run: bash <SCRIPTS_DIR>/check-pointers.sh --root .
+      - name: ADR index matches the ADR files
+        run: bash <SCRIPTS_DIR>/adr-index.sh --root . --check
+# <SCRIPTS_DIR> = .claude/skills/design-docs/scripts if the repo vendors the skill,
+# otherwise scripts/docs (copied at adoption).
