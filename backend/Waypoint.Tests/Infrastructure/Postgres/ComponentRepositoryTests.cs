@@ -90,13 +90,13 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 	{
 		Guid targetId = await SeedTargetAsync("declared-root-target");
 
-		Guid? componentId = await _repository.CreateDeclaredRootAsync(targetId, "photon", "Photon OS", CancellationToken.None);
+		Guid? componentId = await _repository.CreateDeclaredRootAsync(targetId, "photon", CancellationToken.None);
 
 		Assert.NotNull(componentId);
 		Component created = (await _repository.GetAsync(componentId!.Value, CancellationToken.None))!;
 		Assert.Equal(targetId, created.ParentTargetId);
 		Assert.Equal("photon", created.CatalogComponentKey);
-		Assert.Equal("Photon OS", created.DisplayName);
+		Assert.Equal("photon", created.DisplayName);
 		Assert.Null(created.ParentComponentId);
 		Assert.Null(created.VendorIdentity);
 		Assert.Null(created.CatalogComponentId);
@@ -115,15 +115,15 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 	public async Task CreateDeclaredRootAsync_DuplicateKey_ReturnsNullAndLeavesTheExistingRowIntact()
 	{
 		Guid targetId = await SeedTargetAsync("declared-root-duplicate");
-		Guid first = (await _repository.CreateDeclaredRootAsync(targetId, "vidm", "Workspace ONE Access", CancellationToken.None))!.Value;
+		Guid first = (await _repository.CreateDeclaredRootAsync(targetId, "vidm", CancellationToken.None))!.Value;
 
-		Guid? second = await _repository.CreateDeclaredRootAsync(targetId, "vidm", "A Different Display Name", CancellationToken.None);
+		Guid? second = await _repository.CreateDeclaredRootAsync(targetId, "vidm", CancellationToken.None);
 
 		Assert.Null(second);
 		IReadOnlyList<Component> components = await _repository.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
 		Component only = Assert.Single(components);
 		Assert.Equal(first, only.Id);
-		Assert.Equal("Workspace ONE Access", only.DisplayName);
+		Assert.Equal("vidm", only.DisplayName);
 	}
 
 	/// <summary>
@@ -137,8 +137,8 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 	{
 		Guid targetId = await SeedTargetAsync("declared-root-multi");
 
-		Guid photon = (await _repository.CreateDeclaredRootAsync(targetId, "photon", "Photon OS", CancellationToken.None))!.Value;
-		Guid aria = (await _repository.CreateDeclaredRootAsync(targetId, "aria-operations", "Aria Operations", CancellationToken.None))!.Value;
+		Guid photon = (await _repository.CreateDeclaredRootAsync(targetId, "photon", CancellationToken.None))!.Value;
+		Guid aria = (await _repository.CreateDeclaredRootAsync(targetId, "aria-operations", CancellationToken.None))!.Value;
 
 		Assert.NotEqual(photon, aria);
 		IReadOnlyList<Component> components = await _repository.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);

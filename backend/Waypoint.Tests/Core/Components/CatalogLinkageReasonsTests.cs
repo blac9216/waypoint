@@ -20,15 +20,19 @@ namespace Waypoint.Tests.Core.Components;
 
 /// <summary>
 /// Round-2 finding T1 on PR #1232: <see cref="CatalogLinkageReasons"/> is a CLOSED
-/// vocabulary published in <c>docs/api-contract.md</c> (both the
-/// <c>/targets/{id}/discover</c> and <c>/components/{id}</c> rows), exactly like
-/// <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.All"/> and
+/// vocabulary published in <c>docs/api-contract.md</c>'s <c>/targets/{id}/discover</c>
+/// row, exactly like <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.All"/> and
 /// <see cref="ScopeOmissionReasons.All"/>. These are its drift guards: the member list
 /// is pinned here, every emitting branch is asserted to be inside
 /// <see cref="CatalogLinkageReasons.All"/> where it is produced
 /// (<c>DiscoverJobHandlerCatalogLinkageTests</c>), and the doc must publish exactly the
 /// same set -- so a fifth reason cannot reach <c>discover.progress</c> without the
 /// contract being updated in the same change.
+///
+/// Issue #1254: <c>/components/{id}</c> exposes none of these reasons (it never
+/// returns one), so it no longer enumerates the set at all -- it only points at the
+/// <c>/targets/{id}/discover</c> row where the vocabulary actually lives. This class
+/// also guards that disclaimer.
 /// </summary>
 public sealed class CatalogLinkageReasonsTests
 {
@@ -54,12 +58,12 @@ public sealed class CatalogLinkageReasonsTests
 	/// <see cref="CatalogLinkageReasons.All"/> -- same members, same order.
 	///
 	/// Issue #1272: both directions are guarded, which containment alone did not do.
-	/// Each published list is EXTRACTED from its row and compared with
+	/// The published list is EXTRACTED from the row and compared with
 	/// <see cref="Assert.Equal{T}(System.Collections.Generic.IEnumerable{T}, System.Collections.Generic.IEnumerable{T})"/>,
 	/// so adding a fifth reason in code without updating the contract fails here, AND so
-	/// does adding a fifth value to either doc list that no code declares. The
-	/// <c>/components/{id}</c> row enumerates the same set in prose and is extracted and
-	/// compared the same way.
+	/// does adding a fifth value to the doc list that no code declares. Issue #1254: the
+	/// <c>/components/{id}</c> row no longer enumerates this set (it exposes none of the
+	/// reasons); the second half of this test instead guards that it stays that way.
 	/// </summary>
 	[Fact]
 	public void ApiContract_PublishesExactlyTheseReasons()
@@ -86,19 +90,16 @@ public sealed class CatalogLinkageReasonsTests
 			CatalogLinkageReasons.All,
 			discoverRow.Groups[1].Value.Split("\\|").Select(token => token.Trim('`')).ToArray());
 
-		// The /components/{id} (GET, PUT) row's prose enumeration, e.g.
-		// "... for every unlinked outcome -- `a`, `b`, `c`, `d` -- not only ...".
-		// `/components/{id}` also has DELETE and /observations rows in this same doc, so
-		// anchor on the one row that both names `/components/{id}` AND contains "unlinked
-		// outcome" -- never the whole document's first match of either pattern alone.
-		string componentRowLine = FindTableRow(doc, "`/components/{id}`", "unlinked outcome");
-		Match componentRow = Regex.Match(componentRowLine, @"unlinked outcome — (.+?) —", RegexOptions.None, TimeSpan.FromSeconds(5));
-		Assert.True(componentRow.Success, "docs/api-contract.md's /components/{id} (GET, PUT) row no longer publishes the catalog-linkage reason prose enumeration.");
-		Assert.Equal(
-			CatalogLinkageReasons.All,
-			Regex.Matches(componentRow.Groups[1].Value, "`([a-z_]+)`", RegexOptions.None, TimeSpan.FromSeconds(5))
-				.Select(match => match.Groups[1].Value)
-				.ToArray());
+		// Issue #1254: the `/components/{id}` (GET, PUT) row used to enumerate the same
+		// closed set in prose, which read as though the endpoint exposed a reason field
+		// it does not carry. The row now disclaims that explicitly and points at the
+		// `/targets/{id}/discover` row instead -- assert the disclaimer stays and the
+		// enumeration does not silently creep back onto this row.
+		string componentRowLine = FindTableRow(doc, "`/components/{id}`", "no linkage-reason field");
+		Assert.Contains("/targets/{id}/discover", componentRowLine, StringComparison.Ordinal);
+		Assert.DoesNotMatch(
+			new Regex(@"unlinked outcome — (?:`[a-z_]+`, ?)+", RegexOptions.None, TimeSpan.FromSeconds(5)),
+			componentRowLine);
 	}
 
 	/// <summary>
