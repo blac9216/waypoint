@@ -1045,6 +1045,70 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #1517 (migration 0103): negative-direction grant check, same "a new
+	/// runner-executed table without a role-contract test ships grant drift silently"
+	/// lesson issue #584's own tests above cite. This table has exactly one consumer
+	/// today -- the API process (<c>RepoCredentialsController</c>) -- so BOTH runner
+	/// roles must be denied even a bare SELECT (see migration 0103's own comment for
+	/// why this is the honest no-grant rationale, not the wrong one issue #1406's
+	/// review round 1 finding 5 caught).
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotReadRepoCredentialBindings()
+	{
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM repo_credential_bindings LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Same negative-direction check as <see cref="ComplianceRunnerRole_CannotReadRepoCredentialBindings"/>, for the other runner role.</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotReadRepoCredentialBindings()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM repo_credential_bindings LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Neither runner role may write <c>repo_credential_bindings</c> either -- INSERT stays API-only (RepoCredentialsController), same as every other domain-config table.</summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotInsertRepoCredentialBindings()
+	{
+		Guid credentialId = await SeedCredentialOfTypeAsync("repo-basic-auth");
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO repo_credential_bindings (store, credential_id) VALUES ('depot', $1)", connection);
+		insert.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Same negative-direction write check as <see cref="ComplianceRunnerRole_CannotInsertRepoCredentialBindings"/>, for the other runner role.</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotInsertRepoCredentialBindings()
+	{
+		Guid credentialId = await SeedCredentialOfTypeAsync("repo-basic-auth");
+
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO repo_credential_bindings (store, credential_id) VALUES ('depot', $1)", connection);
+		insert.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
 	/// Issue #585 (epic #582, migration 0044): POSITIVE-direction grant check, written
 	/// at authoring time with the grant itself. The compliance runner resolves its
 	/// claimed job's per-purpose credential snapshot

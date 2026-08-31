@@ -70,6 +70,7 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 				services.AddSingleton<IMasterKeyProvider>(new FileMasterKeyProvider(_keyPath));
 				services.AddSingleton<IEnvelopeCipher, AesGcmEnvelopeCipher>();
 				services.AddSingleton(new CredentialRepository(_connectionString));
+				services.AddSingleton(new RepoCredentialBindingRepository(_connectionString));
 				services.AddSingleton<ISecretTracker>(_redactor);
 				services.AddSingleton<ICredentialSecretStore>(provider => new CredentialSecretStore(
 					_connectionString,
@@ -480,6 +481,31 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
 		Assert.Equal("target_credential_bindings", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+	}
+
+	/// <summary>
+	/// Issue #1517 (migration 0103): a live <c>repo_credential_bindings</c> row is its
+	/// own blocking category, the same "not silently allowed, and no orphaned store
+	/// left unauthenticated without a clear signal" rule issue #1517's AC requires --
+	/// deleting a repo-serving credential still bound to a store must be blocked and
+	/// reported, not silently succeed leaving nginx enforcing a Basic-auth pair whose
+	/// credential no longer exists.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByARepoCredentialBinding_Is409_WithRepoCredentialBindingsBlocker()
+	{
+		Guid repoCredentialId = await CreateCredentialAsync("repo-store-bound", credentialType: "repo-basic-auth");
+		HttpResponseMessage bind = await SendAsync(
+			HttpMethod.Put, "/api/v1/repo-credentials/depot", new { credential_ref = repoCredentialId });
+		bind.EnsureSuccessStatusCode();
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{repoCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal("repo_credential_bindings", blockers[0].GetProperty("category").GetString());
 		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
 	}
 

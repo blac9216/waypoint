@@ -91,6 +91,18 @@ public static class CredentialBlockingCategories
 	/// category/count shape the rest of this enum already provides.
 	/// </summary>
 	public const string TargetCredentialBindings = "target_credential_bindings";
+
+	/// <summary>
+	/// Issue #1517 (migration 0103): a <c>repo_credential_bindings</c> row naming the
+	/// credential -- live repo-store binding configuration, the same "not history"
+	/// rule <see cref="TargetCredentialBindings"/> follows for its own binding table.
+	/// The FK is a plain RESTRICT (no ON DELETE action, same choice migration 0043
+	/// made for <c>target_credential_bindings</c>), so without this category a delete
+	/// would instead fail with a bare FK-violation 500 the caller cannot render as a
+	/// 409 breakdown -- and issue #1517's own AC requires the clearer signal:
+	/// "no orphaned store left silently unauthenticated without a clear signal."
+	/// </summary>
+	public const string RepoCredentialBindings = "repo_credential_bindings";
 }
 
 /// <summary>Result of <see cref="CredentialRepository.DeleteAsync"/>: <see cref="Outcome"/> plus, only for <see cref="CredentialDeleteOutcome.InUse"/>, the category/count breakdown driving the 409 body.</summary>
@@ -415,6 +427,16 @@ public sealed class CredentialRepository
 		if (targetCredentialBindings > 0)
 		{
 			blockers.Add(new BlockingCategory(CredentialBlockingCategories.TargetCredentialBindings, targetCredentialBindings));
+		}
+
+		// Issue #1517: repo_credential_bindings is a distinct category from every
+		// other bucket here -- the same "own category, same shape" rule
+		// target_credential_bindings established (issue #584 above).
+		int repoCredentialBindings = await CountAsync(
+			connection, transaction, "SELECT count(*) FROM repo_credential_bindings WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);
+		if (repoCredentialBindings > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.RepoCredentialBindings, repoCredentialBindings));
 		}
 
 		int schedules = await CountAsync(connection, transaction, "SELECT count(*) FROM schedules WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);

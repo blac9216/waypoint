@@ -70,6 +70,16 @@ namespace Waypoint.Infrastructure.Credentials;
 /// still proves the one thing it safely can: the stored value decrypts under the
 /// appliance master key, through the same audited path every other credential type's
 /// decrypt-only test already uses.
+///
+/// <see cref="CredentialTypes.RepoBasicAuth"/> (issue #1517) gets the identical
+/// decrypt-only treatment for the same underlying reason as the depot types: it is
+/// never bound to a <c>targets</c> row at all (its binding is
+/// <c>repo_credential_bindings</c>, keyed to a repo store, not a target), so
+/// <see cref="TargetRepository.FindFirstByCredentialAsync"/> below would always miss
+/// and misreport "not referenced by any target." The real consumer of this
+/// credential is nginx (the sibling B child, #1510, blocked on #1608) -- not any
+/// runner-hosted PowerShell module -- so there is nothing this handler could
+/// honestly dial either.
 /// </summary>
 public sealed class CredentialTestJobHandler : IJobHandler
 {
@@ -131,7 +141,8 @@ public sealed class CredentialTestJobHandler : IJobHandler
 		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
 		if (credential.CredentialType is CredentialTypes.Token or CredentialTypes.DepotToken
-			or CredentialTypes.DepotActivationCode or CredentialTypes.LegacyDownloadToken)
+			or CredentialTypes.DepotActivationCode or CredentialTypes.LegacyDownloadToken
+			or CredentialTypes.RepoBasicAuth)
 		{
 			return await RunDecryptOnlyAsync(credentialId, actor, context, cancellationToken).ConfigureAwait(false);
 		}
@@ -206,8 +217,9 @@ public sealed class CredentialTestJobHandler : IJobHandler
 
 	/// <summary>
 	/// <see cref="CredentialTypes.Token"/>, <see cref="CredentialTypes.DepotToken"/>,
-	/// <see cref="CredentialTypes.DepotActivationCode"/>, and
-	/// <see cref="CredentialTypes.LegacyDownloadToken"/> have no endpoint to dial in
+	/// <see cref="CredentialTypes.DepotActivationCode"/>,
+	/// <see cref="CredentialTypes.LegacyDownloadToken"/>, and
+	/// <see cref="CredentialTypes.RepoBasicAuth"/> have no endpoint to dial in
 	/// this slice -- the same decrypt-liveness check issue #20's synchronous handler
 	/// ran, now driven through the job/audit path so the health flip has one uniform
 	/// source (<see cref="CredentialRepository.MarkTestOutcomeAsync"/> from a job
