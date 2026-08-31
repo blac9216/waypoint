@@ -472,8 +472,24 @@ public sealed class SchemaMigrationTests
 	/// exists as <c>unknown_catalog_files</c>, 0100/#1488), same insert-or-touch,
 	/// no-delete-path shape. No new runner grants -- no consumer, runner or
 	/// otherwise, exists yet; real out-of-scope discovery is deferred to #1421 --
+	/// 0091 (issue #1447, epic #1183, split from design record #38, approved
+	/// design #16 section 4; slot pre-assigned 2026-08-30 on #38's closing
+	/// comment): adds <c>esx_patch_store_index</c> (a cumulative model, keyed on
+	/// #1446's content-identity SHA-256, of every metadata bundle a reconciliation
+	/// pass has ever seen at a store root -- a bundle absent from one run is never
+	/// row-deleted, since that absence is what makes "missing" detection possible)
+	/// and <c>esx_patch_store_discrepancies</c> (missing/orphan findings as
+	/// first-class rows, one per <c>(store_root, discrepancy_type, key)</c>;
+	/// <c>resolved_at</c> is bookkeeping on the alert's own lifecycle only -- rows
+	/// are never deleted, and no orphan disk content is ever removed by
+	/// <c>EsxPatchStoreReconciler</c>, design decision Q11/issue #1447 AC3). Grants
+	/// <c>waypoint_download_runner</c> <c>SELECT, INSERT, UPDATE</c> (no DELETE) on
+	/// both tables -- the reconciler runs runner-side (only a runner has
+	/// filesystem access to a mounted patch store, ADR-0013/0014) -- proven both
+	/// directions by <c>EsxPatchStoreIndexRunnerRoleGrantTests</c> (this repo's
+	/// #556 convention) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 89;
+	private const int ExpectedMigrationCount = 90;
 
 	private readonly PostgresFixture _fixture;
 
