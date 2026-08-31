@@ -466,7 +466,7 @@ public sealed class SchemaMigrationTests
 	/// fail" negative by <c>RetentionSweepRunnerRoleGrantTests</c> (this repo's #556
 	/// convention) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 87;
+	private const int ExpectedMigrationCount = 88;
 
 	private readonly PostgresFixture _fixture;
 
