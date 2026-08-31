@@ -326,6 +326,11 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		EsxPatchStoreMetadataBundle bundle = Assert.Single(result.Metadata!.Bundles);
 		Assert.Equal("HPE", bundle.VendorCode);
 		Assert.Contains(result.Metadata.Warnings, w => w.Contains("vmw-ESXi-9.1-metadata.zip") && w.Contains("not found"));
+
+		// Genuine absence (a metadata entry naming a zip that simply is not on disk)
+		// must never set vendor health -- round-2 review finding F4's "do not
+		// classify the genuine-absence shapes" instruction.
+		Assert.Empty(result.Metadata.VendorHealth);
 	}
 
 	[Fact]
@@ -421,6 +426,117 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		{
 			// Restore a permissive mode so the fixture's temp-directory cleanup in
 			// Dispose() can actually delete this subtree.
+			File.SetUnixFileMode(hostupdateDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+	}
+
+	// ----- round-2 review finding F4: structural vendor health -------------------
+
+	/// <summary>
+	/// Round-2 review finding F4, reproduced directly against the parser: a
+	/// zero-length vendor consolidated metadata index (the exact concurrent-write
+	/// trigger round 1's finding 1 named) must set <see cref="EsxPatchStoreVendorHealth"/>
+	/// with <see cref="EsxPatchStoreVendorHealthKind.EmptyIndex"/> for that vendor --
+	/// this is what the reconciler's missing-detection gate keys on instead of the
+	/// warning prose below.
+	/// </summary>
+	[Fact]
+	public void Parse_ZeroLengthVendorIndex_SetsEmptyIndexVendorHealth()
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"), [("vib20/esx-update/pkg-a.vib", "aa".PadRight(64, '0'))]);
+
+		// Truncate the already-written index to zero bytes -- a concurrent
+		// UMDS/rsync write caught mid-truncate.
+		File.WriteAllText(Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"), string.Empty);
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Empty(result.Metadata!.Bundles);
+		Assert.True(result.Metadata.RootReadable);
+		EsxPatchStoreVendorHealth health = Assert.Single(result.Metadata.VendorHealth);
+		Assert.Equal("vmw", health.VendorCode);
+		Assert.Equal(EsxPatchStoreVendorHealthKind.EmptyIndex, health.Kind);
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains("is empty"));
+	}
+
+	/// <summary>
+	/// Round-2 review finding F4, reproduced directly against the parser: a
+	/// half-written/malformed vendor consolidated metadata index must set
+	/// <see cref="EsxPatchStoreVendorHealthKind.MalformedIndex"/> for that vendor.
+	/// </summary>
+	[Fact]
+	public void Parse_MalformedVendorIndex_SetsMalformedIndexVendorHealth()
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"), [("vib20/esx-update/pkg-a.vib", "aa".PadRight(64, '0'))]);
+
+		// Truncated mid-tag -- a half-written concurrent sync, not empty and not
+		// valid XML.
+		File.WriteAllText(
+			Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"),
+			"<metadataList><metadata><productId>ESXi900</productId");
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Empty(result.Metadata!.Bundles);
+		Assert.True(result.Metadata.RootReadable);
+		EsxPatchStoreVendorHealth health = Assert.Single(result.Metadata.VendorHealth);
+		Assert.Equal("vmw", health.VendorCode);
+		Assert.Equal(EsxPatchStoreVendorHealthKind.MalformedIndex, health.Kind);
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains("not valid/safe XML"));
+	}
+
+	[Fact]
+	public void Parse_HealthyStore_HasNoVendorHealthEntries()
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"), [("vib20/esx-update/pkg-a.vib", "aa".PadRight(64, '0'))]);
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.True(result.Metadata!.RootReadable);
+		Assert.Empty(result.Metadata.VendorHealth);
+	}
+
+	/// <summary>
+	/// Round-2 review finding F5: an unreadable <c>hostupdate/</c> root must set
+	/// <see cref="EsxPatchStoreMetadata.RootReadable"/> to <see langword="false"/> --
+	/// the field the reconciler's whole-run skip is keyed on, alongside the existing
+	/// warning-prose assertion above.
+	/// </summary>
+	[Fact]
+	public void Parse_UnreadableHostupdateRoot_SetsRootReadableFalse()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a7f3.zip");
+
+		File.SetUnixFileMode(hostupdateDir, UnixFileMode.UserWrite);
+		try
+		{
+			EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+			Assert.True(result.Succeeded);
+			Assert.False(result.Metadata!.RootReadable);
+			Assert.Empty(result.Metadata.VendorHealth);
+		}
+		finally
+		{
 			File.SetUnixFileMode(hostupdateDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 		}
 	}

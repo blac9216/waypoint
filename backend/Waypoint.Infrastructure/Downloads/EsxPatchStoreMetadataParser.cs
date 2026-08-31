@@ -83,6 +83,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		(string hostupdateRoot, EsxPatchStoreLayout resolvedLayout) = resolved.Value;
 
 		List<string> warnings = [];
+		List<EsxPatchStoreVendorHealth> vendorHealth = [];
 		SortedSet<string> vendorCodes = new(StringComparer.Ordinal);
 		foreach (string indexVendorCode in ParseConsolidatedIndexVendorCodes(hostupdateRoot, warnings))
 		{
@@ -91,7 +92,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 
 		List<EsxPatchStoreMetadataBundle> bundles = [];
 
-		foreach (string vendorDir in SafeEnumerateDirectories(hostupdateRoot, warnings))
+		string[] vendorDirs = SafeEnumerateDirectories(hostupdateRoot, warnings, out bool rootReadable);
+		foreach (string vendorDir in vendorDirs)
 		{
 			string vendorCode = Path.GetFileName(vendorDir);
 
@@ -105,7 +107,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			}
 
 			vendorCodes.Add(vendorCode);
-			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings);
+			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings, vendorHealth);
 		}
 
 		EsxPatchStoreMetadata metadata = new(
@@ -114,7 +116,9 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			HostupdateRoot: hostupdateRoot,
 			VendorCodes: [.. vendorCodes],
 			Bundles: bundles,
-			Warnings: warnings);
+			Warnings: warnings,
+			RootReadable: rootReadable,
+			VendorHealth: vendorHealth);
 
 		return EsxPatchStoreParseResult.Ok(metadata);
 	}
@@ -193,8 +197,14 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// <summary>
 	/// Parses one vendor directory's consolidated metadata index and resolves every
 	/// metadata entry it names into a content-identified <see cref="EsxPatchStoreMetadataBundle"/>.
+	/// The missing-index case is genuine absence (not a health failure -- nothing to
+	/// read means nothing was lost); every case below it that leaves this vendor with
+	/// zero or partial bundles despite reaching this point appends the matching
+	/// <see cref="EsxPatchStoreVendorHealth"/> entry at the exact site that also emits
+	/// today's warning text for humans (round-2 review finding F4).
 	/// </summary>
-	private static void ParseVendorMetadataIndex(string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings)
+	private static void ParseVendorMetadataIndex(
+		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
 	{
 		string indexPath = Path.Combine(vendorDir, ConsolidatedMetadataIndexFileName);
 		if (!File.Exists(indexPath))
@@ -203,7 +213,9 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			return;
 		}
 
-		XmlDocument? document = TryLoadXml(indexPath, warnings, $"vendor '{vendorCode}' consolidated metadata index");
+		XmlDocument? document = TryLoadXml(
+			indexPath, warnings, $"vendor '{vendorCode}' consolidated metadata index",
+			kind => vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, kind)));
 		if (document?.DocumentElement is null)
 		{
 			return;
@@ -242,7 +254,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 				productId: FindValue(metadataElement, "productId"),
 				version: FindValue(metadataElement, "version"),
 				channelName: FindValue(metadataElement, "channelName"),
-				warnings);
+				warnings,
+				vendorHealth);
 
 			if (bundle is not null)
 			{
@@ -255,10 +268,16 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// Opens one metadata zip, computes its content-identity key from the zip's own
 	/// bytes (never its filename), and resolves the VIB references inside it. Any
 	/// failure to open or read the zip is a warning, not an exception -- a truncated
-	/// or half-synced download must not abort the rest of the store's parse.
+	/// or half-synced download must not abort the rest of the store's parse. Both
+	/// failure-to-open shapes below append an <see cref="EsxPatchStoreVendorHealthKind.UnreadableZip"/>
+	/// entry -- the content-key failure because it drops this bundle entirely, and the
+	/// VIB-read failure conservatively too, since it means the vendor's on-disk state
+	/// changed mid-parse and this vendor's other previously-indexed content cannot be
+	/// trusted as fully re-verified this run either (round-2 review finding F4).
 	/// </summary>
 	private static EsxPatchStoreMetadataBundle? TryParseMetadataZip(
-		string zipPath, string displayRelativePath, string vendorCode, string? productId, string? version, string? channelName, List<string> warnings)
+		string zipPath, string displayRelativePath, string vendorCode, string? productId, string? version, string? channelName,
+		List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
 	{
 		string contentKey;
 		try
@@ -269,6 +288,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
 			warnings.Add($"Vendor '{vendorCode}': could not read '{displayRelativePath}' to compute its content key: {ex.Message}");
+			vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.UnreadableZip));
 			return null;
 		}
 
@@ -291,6 +311,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			// kind of transient store condition this parser's "never throws"
 			// contract exists for.
 			warnings.Add($"Vendor '{vendorCode}': could not open '{displayRelativePath}' to read its VIB references: {ex.GetType().Name}: {ex.Message}");
+			vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.UnreadableZip));
 			return new EsxPatchStoreMetadataBundle(vendorCode, contentKey, displayRelativePath, productId, version, channelName, []);
 		}
 
@@ -416,7 +437,16 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		return TryParseXmlText(content, $"zip entry '{entry.FullName}'", warnings);
 	}
 
-	private static XmlDocument? TryLoadXml(string path, List<string> warnings, string description)
+	/// <summary>
+	/// Loads and parses one XML document, warning (never throwing) on any failure.
+	/// <paramref name="onDegraded"/>, when given, is invoked with the specific
+	/// <see cref="EsxPatchStoreVendorHealthKind"/> at the exact site each warning
+	/// below is emitted -- callers parsing a per-vendor document pass a callback that
+	/// records it against that vendor code; the root-level consolidated index (which
+	/// has no single vendor to blame and is non-fatal on failure -- the per-directory
+	/// walk is the real ground truth) passes none.
+	/// </summary>
+	private static XmlDocument? TryLoadXml(string path, List<string> warnings, string description, Action<EsxPatchStoreVendorHealthKind>? onDegraded = null)
 	{
 		string content;
 		try
@@ -426,23 +456,26 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
 			warnings.Add($"Could not read {description} at '{path}': {ex.Message}");
+			onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.UnreadableIndex);
 			return null;
 		}
 
-		return TryParseXmlText(content, $"{description} at '{path}'", warnings);
+		return TryParseXmlText(content, $"{description} at '{path}'", warnings, onDegraded);
 	}
 
-	private static XmlDocument? TryParseXmlText(string content, string description, List<string> warnings)
+	private static XmlDocument? TryParseXmlText(string content, string description, List<string> warnings, Action<EsxPatchStoreVendorHealthKind>? onDegraded = null)
 	{
 		if (string.IsNullOrWhiteSpace(content))
 		{
 			warnings.Add($"{description} is empty.");
+			onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.EmptyIndex);
 			return null;
 		}
 
 		if (content.Length > MaxXmlBytes)
 		{
 			warnings.Add($"{description} exceeds the {MaxXmlBytes}-byte parse bound ({content.Length} bytes).");
+			onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.MalformedIndex);
 			return null;
 		}
 
@@ -467,6 +500,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		catch (Exception ex) when (ex is XmlException or InvalidOperationException or NotSupportedException)
 		{
 			warnings.Add($"{description} is not valid/safe XML: {ex.Message}");
+			onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.MalformedIndex);
 			return null;
 		}
 
@@ -480,17 +514,23 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// <c>hostupdate/</c> root is otherwise indistinguishable from a legitimately
 	/// empty one, and the caller's other warnings (e.g. "consolidated index not
 	/// found") would misattribute the failure to a missing file rather than a
-	/// denied directory listing.
+	/// denied directory listing. <paramref name="readable"/> is this call's
+	/// machine-readable counterpart to that same warning -- it becomes
+	/// <see cref="EsxPatchStoreMetadata.RootReadable"/> since this is the parser's
+	/// only hostupdate-root-level directory listing (round-2 review finding F5).
 	/// </summary>
-	private static string[] SafeEnumerateDirectories(string path, List<string> warnings)
+	private static string[] SafeEnumerateDirectories(string path, List<string> warnings, out bool readable)
 	{
 		try
 		{
-			return Directory.GetDirectories(path);
+			string[] directories = Directory.GetDirectories(path);
+			readable = true;
+			return directories;
 		}
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
 			warnings.Add($"Could not list vendor directories under '{path}': {ex.GetType().Name}: {ex.Message}");
+			readable = false;
 			return [];
 		}
 	}

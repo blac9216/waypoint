@@ -381,6 +381,161 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		}
 	}
 
+	// ----- round-2 review finding F4: empty/malformed vendor index must gate too ----
+
+	/// <summary>
+	/// Round-2 review finding F4, reproduced exactly as the reviewer's probe: a
+	/// vendor consolidated metadata index truncated to zero bytes after a good first
+	/// pass is a <c>Succeeded=true</c> parse that leaves the vendor with zero
+	/// bundles, structurally identical to the round-1 unreadable-index case but via a
+	/// different parser code path (<c>TryParseXmlText</c>'s empty-content branch,
+	/// which round 1's prose-only gate did not recognise). Must open **zero** false
+	/// missing rows -- the vendor's previously-indexed key must stay untouched, not
+	/// flooded as removed.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_TruncatedVendorIndexAfterGoodPass_DoesNotOpenMissingForThatVendorsKeys()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// Truncate to zero bytes -- the reviewer's exact reproduction of a
+		// concurrent UMDS/rsync write caught mid-truncate.
+		File.WriteAllText(Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"), string.Empty);
+
+		EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(secondReport.Succeeded);
+		Assert.Contains(secondReport.ParserWarnings, w => w.Contains("is empty"));
+		Assert.Equal(0, secondReport.NewMissingCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Missing-discrepancy detection skipped") && w.Contains("vmw"));
+
+		(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+		Assert.Equal(0, count);
+		Assert.Equal(1, await CountIndexRowsAsync());
+	}
+
+	/// <summary>
+	/// Round-2 review finding F4, second reproduction: a half-written/malformed
+	/// vendor consolidated metadata index (not empty, not valid XML) must gate the
+	/// same as the empty case above -- <c>TryParseXmlText</c>'s XML-exception branch,
+	/// the other unrecognised shape round 1's prose-only gate missed.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_MalformedVendorIndexAfterGoodPass_DoesNotOpenMissingForThatVendorsKeys()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// Half-written / truncated mid-tag -- present, non-empty, not valid XML.
+		File.WriteAllText(
+			Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"),
+			"<metadataList><metadata><productId>ESXi900</productId");
+
+		EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(secondReport.Succeeded);
+		Assert.Contains(secondReport.ParserWarnings, w => w.Contains("not valid/safe XML"));
+		Assert.Equal(0, secondReport.NewMissingCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Missing-discrepancy detection skipped") && w.Contains("vmw"));
+
+		(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+		Assert.Equal(0, count);
+		Assert.Equal(1, await CountIndexRowsAsync());
+	}
+
+	// ----- round-2 review finding F5: whole-run rootDegraded branch, direct test ----
+
+	/// <summary>
+	/// Round-2 review finding F5: the whole-store <c>rootDegraded</c> branch had no
+	/// test in this PR despite being the largest blast radius in the file. Drives the
+	/// real parser against a mode-0300 (unreadable/unenumerable) <c>hostupdate/</c>
+	/// root after a good first pass, keyed on <see cref="Waypoint.Core.Downloads.EsxPatchStoreMetadata.RootReadable"/>
+	/// rather than any warning string. Skipped on Windows -- see the mode-0200
+	/// rationale on the vendor-directory tests above.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_UnreadableRootAfterGoodPass_SkipsWholeRunAndSurfacesWarning()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// Write-only, no read/execute: denies enumerating hostupdate/'s
+		// subdirectories entirely -- the parser's SafeEnumerateDirectories failure,
+		// which is the sole site RootReadable is derived from.
+		File.SetUnixFileMode(_hostupdateDir, UnixFileMode.UserWrite);
+		try
+		{
+			EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+			Assert.True(secondReport.Succeeded);
+			Assert.Contains(secondReport.ParserWarnings, w => w.Contains("Could not list vendor directories"));
+			Assert.Equal(0, secondReport.NewMissingCount);
+			Assert.Contains(
+				secondReport.ReconcilerWarnings,
+				w => w.Contains("Missing-discrepancy detection skipped entirely this run"));
+
+			(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+			Assert.Equal(0, count);
+
+			// The index row this store already had survives untouched -- a degraded
+			// whole-run skip neither opens a false missing row nor drops the prior
+			// index entry.
+			Assert.Equal(1, await CountIndexRowsAsync());
+		}
+		finally
+		{
+			File.SetUnixFileMode(_hostupdateDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+	}
+
+	// ----- round-2 review finding F5: pin the parser/reconciler health contract ----
+
+	/// <summary>
+	/// Round-2 review finding F5's "unpinned cross-assembly contract" concern: this
+	/// asserts the exact set of <see cref="EsxPatchStoreVendorHealthKind"/> members
+	/// #1446's parser is known to produce. If a future parser change adds a new
+	/// degraded-vendor code path, it must also emit a matching
+	/// <see cref="EsxPatchStoreVendorHealth"/> entry and extend this set (and
+	/// <c>EsxPatchStoreReconciler.DescribeHealthKind</c>'s switch, which throws at
+	/// runtime for any kind not listed there) -- otherwise this test goes red the
+	/// moment the new enum member exists, rather than the gap staying invisible the
+	/// way an unshared warning-prose regex would leave it.
+	/// </summary>
+	[Fact]
+	public void EsxPatchStoreVendorHealthKind_HasExactlyTheKindsThisSuiteCovers()
+	{
+		EsxPatchStoreVendorHealthKind[] expected =
+		[
+			EsxPatchStoreVendorHealthKind.UnreadableIndex,
+			EsxPatchStoreVendorHealthKind.EmptyIndex,
+			EsxPatchStoreVendorHealthKind.MalformedIndex,
+			EsxPatchStoreVendorHealthKind.UnreadableZip,
+		];
+
+		Assert.Equal(expected, Enum.GetValues<EsxPatchStoreVendorHealthKind>());
+	}
+
 	// ----- round-1 review finding 2: orphan detection must confine vendor codes ----
 
 	[Theory]

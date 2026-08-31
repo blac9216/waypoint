@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Text.RegularExpressions;
 using Npgsql;
 using Waypoint.Core.Downloads;
 
@@ -51,19 +50,37 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <c>resolved_at</c> on the alert; removing orphaned disk content is this issue's
 /// surfacing/rebuild sibling's (#1452) explicit action, never automatic here.
 ///
-/// Round-1 review hardening: #1446's parser is deliberately tolerant -- an
-/// unreadable <c>hostupdate/</c> root or vendor directory still returns
-/// <c>Succeeded=true</c> with an empty/partial <c>Bundles</c> list plus a warning,
-/// not a failure. Treating that output as a complete reading of the store would
-/// convert a transient read failure into persistent <c>missing</c> discrepancy rows
-/// for every content key the affected scope ever indexed (the exact
-/// transient-to-persistent conversion #1656 rules out). <see cref="ClassifyParseWarnings"/>
-/// recognizes the parser's own read-failure warning shapes and scopes
-/// missing-detection accordingly (skipping the whole run when the root itself could
-/// not be listed, or just the affected vendor's previously-indexed keys otherwise),
-/// surfacing every skip on <see cref="EsxPatchStoreReconciliationReport.ReconcilerWarnings"/>
-/// rather than staying silent -- a degraded run is retried in full on the next pass,
-/// so this never permanently suppresses real missing-detection, only this run's.
+/// Round-1 review hardening, structurally re-keyed in round 2: #1446's parser is
+/// deliberately tolerant -- an unreadable <c>hostupdate/</c> root or vendor
+/// consolidated metadata index still returns <c>Succeeded=true</c> with an
+/// empty/partial <c>Bundles</c> list plus a warning, not a failure. Treating that
+/// output as a complete reading of the store would convert a transient read failure
+/// into persistent <c>missing</c> discrepancy rows for every content key the
+/// affected scope ever indexed (the exact transient-to-persistent conversion #1656
+/// rules out).
+///
+/// Round 1 gated this on pattern-matching the parser's warning <i>prose</i>, which
+/// round 2 found incomplete in the way that strategy predicts: two of the parser's
+/// warning shapes (a zero-length or malformed/half-written vendor consolidated
+/// metadata index) produced the identical "vendor left with zero bundles" outcome
+/// but were not recognized, so a concurrently-written index still flooded that
+/// vendor's previously-indexed content as false <c>missing</c> rows (round-2 review
+/// finding F4), and the whole-run root-degraded branch had no test pinning its
+/// prose-only trigger at all (finding F5). Both are now keyed on machine-readable
+/// fields #1446's parser sets at the exact sites that also emit those warnings --
+/// <see cref="EsxPatchStoreMetadata.RootReadable"/> for the whole-store case and
+/// <see cref="EsxPatchStoreMetadata.VendorHealth"/> (a closed
+/// <see cref="EsxPatchStoreVendorHealthKind"/> enum) for the per-vendor case. No
+/// prose parsing remains in the gate; <c>Warnings</c> stays for humans only. A
+/// contract test in <see cref="EsxPatchStoreReconcilerTests"/> pins the enum's member
+/// count against this class's exhaustive-by-throw <see cref="DescribeHealthKind"/>
+/// switch, so a future parser edit that adds a new degraded-vendor shape without
+/// updating both goes red (round-2 review finding F5's "pin the contract" ask). Every
+/// skip still surfaces on
+/// <see cref="EsxPatchStoreReconciliationReport.ReconcilerWarnings"/> rather than
+/// staying silent -- a degraded run is retried in full on the next pass, so this
+/// never permanently suppresses real missing-detection, only this run's.
+///
 /// Orphan detection separately confines each vendor code from the store's XML to a
 /// single path segment resolving strictly under <c>HostupdateRoot</c> (the
 /// <c>ContentLibraryRepository.ResolveDiskPath</c> pattern, #1391) before it is ever
@@ -71,20 +88,6 @@ namespace Waypoint.Infrastructure.Downloads;
 /// </remarks>
 public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 {
-	/// <summary>
-	/// Matches <see cref="EsxPatchStoreMetadataParser"/>'s own read-failure warning
-	/// text (as opposed to its not-found/malformed warnings, which describe content
-	/// that is legitimately absent or invalid, not unreadable). Group <c>root</c>
-	/// matches <c>SafeEnumerateDirectories</c>'s hostupdate-root-level enumeration
-	/// failure (affects every vendor, since no per-vendor walk even ran); group
-	/// <c>vendor</c> matches a per-vendor consolidated-metadata-index read failure or
-	/// a per-bundle zip read failure (affects only that vendor's previously-indexed
-	/// content).
-	/// </summary>
-	private static readonly Regex ParseReadFailurePattern = new(
-		"""^(?:(?<root>Could not list vendor directories under ')|Could not read vendor '(?<vendor>[^']+)' consolidated metadata index at '|Vendor '(?<vendor2>[^']+)': (?:could not read|could not open) ')""",
-		RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
 	private readonly string _connectionString;
 	private readonly IEsxPatchStoreMetadataParser _parser;
 	private readonly TimeProvider _clock;
@@ -125,7 +128,7 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 		}
 
 		List<string> reconcilerWarnings = [];
-		(bool rootDegraded, HashSet<string> degradedVendorCodes) = ClassifyParseWarnings(metadata.Warnings);
+		(bool rootDegraded, HashSet<string> degradedVendorCodes) = ClassifyParseHealth(metadata);
 		if (rootDegraded)
 		{
 			reconcilerWarnings.Add(
@@ -168,8 +171,11 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 
 		if (!rootDegraded && skippedMissing > 0)
 		{
+			string vendorDetail = string.Join(", ", vendorsWithSkippedMissing
+				.Order(StringComparer.Ordinal)
+				.Select(code => $"{code} ({DescribeVendorDegradation(metadata.VendorHealth, code)})"));
 			reconcilerWarnings.Add(
-				$"Missing-discrepancy detection skipped for {skippedMissing} previously indexed key(s) under vendor(s) {string.Join(", ", vendorsWithSkippedMissing.Order(StringComparer.Ordinal))}: the parse reported a read failure for that vendor this run, so its absence from the current bundle list cannot be trusted as a real removal. See ParserWarnings for the read failure; a healthy parse of that vendor will detect real missing content on a later run.");
+				$"Missing-discrepancy detection skipped for {skippedMissing} previously indexed key(s) under vendor(s) {vendorDetail}: that vendor's parse this run left it degraded, so its absence from the current bundle list cannot be trusted as a real removal. See ParserWarnings for the read failure; a healthy parse of that vendor will detect real missing content on a later run.");
 		}
 
 		int newOrphan = 0;
@@ -232,40 +238,52 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 	}
 
 	/// <summary>
-	/// Scans the parser's warnings for its own read-failure shapes (see
-	/// <see cref="ParseReadFailurePattern"/>), distinguishing a genuine I/O failure
-	/// from the parser's not-found/malformed warnings, which describe content that
-	/// is legitimately absent rather than unreadable and must not gate
-	/// missing-detection. Returns whether the hostupdate root itself could not be
-	/// enumerated (every vendor's previously-indexed content is then unattributable
-	/// and the whole run's missing-detection is skipped) and, otherwise, which
-	/// individual vendor codes had a read failure this run.
+	/// Classifies this run's parse health from #1446's structural fields (round-2
+	/// review findings F4/F5) -- never from <see cref="EsxPatchStoreMetadata.Warnings"/>
+	/// prose. Returns whether the hostupdate root itself could not be enumerated
+	/// (<see cref="EsxPatchStoreMetadata.RootReadable"/> is <see langword="false"/>;
+	/// every vendor's previously-indexed content is then unattributable and the whole
+	/// run's missing-detection is skipped) and, otherwise, which individual vendor
+	/// codes <see cref="EsxPatchStoreMetadata.VendorHealth"/> named as degraded this
+	/// run.
 	/// </summary>
-	private static (bool RootDegraded, HashSet<string> DegradedVendorCodes) ClassifyParseWarnings(IReadOnlyList<string> warnings)
+	private static (bool RootDegraded, HashSet<string> DegradedVendorCodes) ClassifyParseHealth(EsxPatchStoreMetadata metadata)
 	{
-		bool rootDegraded = false;
-		HashSet<string> degradedVendorCodes = new(StringComparer.Ordinal);
+		HashSet<string> degradedVendorCodes = new(
+			metadata.VendorHealth.Select(health => health.VendorCode),
+			StringComparer.Ordinal);
 
-		foreach (string warning in warnings)
-		{
-			Match match = ParseReadFailurePattern.Match(warning);
-			if (!match.Success)
-			{
-				continue;
-			}
-
-			if (match.Groups["root"].Success)
-			{
-				rootDegraded = true;
-				continue;
-			}
-
-			string vendorCode = match.Groups["vendor"].Success ? match.Groups["vendor"].Value : match.Groups["vendor2"].Value;
-			degradedVendorCodes.Add(vendorCode);
-		}
-
-		return (rootDegraded, degradedVendorCodes);
+		return (!metadata.RootReadable, degradedVendorCodes);
 	}
+
+	/// <summary>
+	/// Human-readable summary of every distinct <see cref="EsxPatchStoreVendorHealthKind"/>
+	/// <paramref name="vendorCode"/> triggered this run, for
+	/// <see cref="EsxPatchStoreReconciliationReport.ReconcilerWarnings"/>. The gate
+	/// itself (<see cref="ClassifyParseHealth"/>) never inspects this text -- it is
+	/// display only; <see cref="DescribeHealthKind"/>'s <c>default</c> arm throwing
+	/// (this repo's <c>DiscrepancyTypeKey</c> precedent, below) turns an unhandled
+	/// <see cref="EsxPatchStoreVendorHealthKind"/> member into a loud runtime failure
+	/// the first time it is actually produced, rather than a silently-blank
+	/// description; <see cref="EsxPatchStoreReconcilerTests"/>'s enum-count contract
+	/// test is what actually pins the member count at build/test time (round-2 review
+	/// finding F5).
+	/// </summary>
+	private static string DescribeVendorDegradation(IReadOnlyList<EsxPatchStoreVendorHealth> vendorHealth, string vendorCode) =>
+		string.Join("; ", vendorHealth
+			.Where(health => string.Equals(health.VendorCode, vendorCode, StringComparison.Ordinal))
+			.Select(health => health.Kind)
+			.Distinct()
+			.Select(DescribeHealthKind));
+
+	private static string DescribeHealthKind(EsxPatchStoreVendorHealthKind kind) => kind switch
+	{
+		EsxPatchStoreVendorHealthKind.UnreadableIndex => "could not read its consolidated metadata index",
+		EsxPatchStoreVendorHealthKind.EmptyIndex => "its consolidated metadata index is empty",
+		EsxPatchStoreVendorHealthKind.MalformedIndex => "its consolidated metadata index is not valid/safe XML (or exceeds the parse size bound)",
+		EsxPatchStoreVendorHealthKind.UnreadableZip => "could not read a metadata zip it names",
+		_ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+	};
 
 	/// <summary>
 	/// Confines a vendor code taken verbatim from the store's own XML (the
