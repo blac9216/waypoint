@@ -197,6 +197,12 @@ public static class ServiceCollectionExtensions
 		// above (and shares its presence-checker dependency).
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolMetadataPuller, Downloads.ManagedToolMetadataPuller>();
 
+		// Issue #1446: the ESX patch-store metadata parser is pure filesystem/zip
+		// reading, unconditional like the checker/installer above -- no connection
+		// string, no tool presence dependency (it only reads a store another job
+		// already populated).
+		services.AddSingleton<Waypoint.Core.Downloads.IEsxPatchStoreMetadataParser, Downloads.EsxPatchStoreMetadataParser>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
