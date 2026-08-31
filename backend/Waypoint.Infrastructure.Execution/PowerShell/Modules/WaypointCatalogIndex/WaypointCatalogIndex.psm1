@@ -39,11 +39,19 @@
 #
 # Recognized catalog-adjacent exceptions (ratified #1026/#1027 scope addition, folded
 # into #1503 by #1038's split plan):
-#   - vCenter updaterepo zip-expand directories: a catalog-listed VCENTER *.zip
-#     installs as an expanded tree under COMP/VCENTER/vmw/<uuid>/<version>/. The
-#     sweep verifies the expanded tree's presence as the zip entry's installed form
-#     (status 'present') instead of requiring the zip file itself on disk, and does
-#     not enumerate the expanded tree's own contents as unknown files.
+#   - vCenter updaterepo zip-expand directories: a catalog binary carrying the
+#     vendor catalog's own `metadata[]` tag `zip-expand` (configuration key
+#     `relative`, e.g. value `vmw/<uuid>/<version>` -- #1027's depot-consumption
+#     finding, verbatim from the shipped vcf-download-tool's own catalog writer)
+#     installs as an expanded tree under COMP/<Product>/<that relative value>/,
+#     itself under the depot root (DepotPath). The sweep reads that per-binary
+#     metadata directly rather than pattern-matching disk directories against a
+#     guessed shape or version string -- each zip entry carries its own exact
+#     expand path, so two same-version zips (round-1 review finding 5) each bind to
+#     their own tree, never to each other's. The sweep verifies the expanded tree's
+#     presence as the zip entry's installed form (status 'present') instead of
+#     requiring the zip file itself on disk, and does not enumerate the expanded
+#     tree's own contents as unknown files.
 #   - upgrade_info.xml: a vendor-signed file that sits alongside the catalog and
 #     enumerates vCenter upgrade paths. Any file with that basename is reported as a
 #     known/indexed presence record, never as unknown.
@@ -66,9 +74,15 @@ $Script:VcfDownloadManagerCommonPath = $env:WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON
 # that default in a second place beyond this comment's pointer to it.
 $Script:DefaultCatalogRelativePath = 'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'
 
-# Issue #1026/#1027 ratified scope addition: vCenter updaterepo zip-expand
-# directories live at COMP/VCENTER/vmw/<uuid>/<version>/ under the depot root.
-$Script:ZipExpandDirPattern = '(?i)^COMP/VCENTER/vmw/(?<Uuid>[^/]+)/(?<Version>[^/]+)/'
+# Issue #1027 depot-consumption finding (`lcm.depot.adapter.remote.v2.rootDir` /
+# `…vcfBinariesDir`): every catalog binary resolves to
+# PROD/COMP/<catalog product key>/<fileName> under DepotPath by default; a
+# zip-expand binary's own relative-expand-path metadata (see
+# Get-BinaryZipExpandRelativePath) is joined onto this same PROD/COMP root
+# (round-1 review finding 1: the prior COMP/-anchored-at-root pattern never
+# matched, because manifest keys are DepotPath-relative, i.e. PROD-prefixed).
+$Script:DepotRoot = 'PROD'
+$Script:ComponentBinariesDir = 'COMP'
 
 function Invoke-WaypointCatalogIndex {
 	<#
@@ -100,9 +114,12 @@ function Invoke-WaypointCatalogIndex {
 	.OUTPUTS
 	    One [pscustomobject] per catalog entry and per unknown file, distinguished by
 	    RecordType:
-	      'ArtifactPresence' -- RelativePath, Sha256, SizeBytes, Status
-	      ('present'/'missing'), Product, Version. Matches #1488's DepotArtifactUpsert
-	      identity fields exactly.
+	      'ArtifactPresence' -- RelativePath, ExternalId (round-1 review finding 3:
+	      the live CatalogIndexJobHandler.TryParseArtifact reads ExternalId, not
+	      RelativePath, as the upsert identity -- kept equal to RelativePath so the
+	      current handler stays functional pending #1512's wiring rework), Sha256,
+	      SizeBytes, Status ('present'/'missing'), Product, Version. Matches #1488's
+	      DepotArtifactUpsert identity fields exactly.
 	      'UnknownFile' -- RelativePath, SizeBytes. A file present on disk that
 	      matches no catalog entry and is not a recognized catalog-adjacent exception.
 	#>
@@ -176,29 +193,26 @@ function Invoke-WaypointCatalogIndex {
 	# RelativePath keys the manifest hashtable already uses forward-slash-normalized
 	# paths (Get-FileManifest, vcf-download-manager.common.ps1) -- reuse that
 	# normalization for every comparison below.
-	$ZipExpandDirs = Get-ZipExpandDirectories -ManifestKeys $Manifest.Keys
 	$ConsumedRelativePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 	$PresenceCount = 0
 	foreach ($CatalogEntry in $CatalogEntries) {
 		$PresenceCount++
-		$ZipExpandMatch = $null
-		if ($CatalogEntry.RelativePath -like '*.zip') {
-			$ZipExpandMatch = $ZipExpandDirs | Where-Object {
-				$_.Version -eq $CatalogEntry.Version -and (
-					[string]::IsNullOrEmpty($CatalogEntry.Product) -or $_.Component -eq $CatalogEntry.Product
-				)
-			} | Select-Object -First 1
+		$ExpandedRelativePaths = $null
+		if (-not [string]::IsNullOrWhiteSpace($CatalogEntry.ZipExpandRelativePath)) {
+			$ExpandPrefix = Get-ZipExpandDepotPrefix -Product $CatalogEntry.Product -RelativePath $CatalogEntry.ZipExpandRelativePath
+			$ExpandedRelativePaths = @($Manifest.Keys | Where-Object { $_.StartsWith($ExpandPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
 		}
 
-		if ($ZipExpandMatch) {
-			foreach ($ExpandedRelativePath in $ZipExpandMatch.RelativePaths) {
+		if ($ExpandedRelativePaths -and $ExpandedRelativePaths.Count -gt 0) {
+			foreach ($ExpandedRelativePath in $ExpandedRelativePaths) {
 				[void]$ConsumedRelativePaths.Add($ExpandedRelativePath)
 			}
 
 			[pscustomobject]@{
 				RecordType   = 'ArtifactPresence'
 				RelativePath = $CatalogEntry.RelativePath
+				ExternalId   = $CatalogEntry.RelativePath
 				Sha256       = $CatalogEntry.Sha256
 				SizeBytes    = $CatalogEntry.SizeBytes
 				Status       = 'present'
@@ -217,6 +231,7 @@ function Invoke-WaypointCatalogIndex {
 		[pscustomobject]@{
 			RecordType   = 'ArtifactPresence'
 			RelativePath = $CatalogEntry.RelativePath
+			ExternalId   = $CatalogEntry.RelativePath
 			Sha256       = $CatalogEntry.Sha256
 			SizeBytes    = $CatalogEntry.SizeBytes
 			Status       = $Status
@@ -238,6 +253,7 @@ function Invoke-WaypointCatalogIndex {
 			[pscustomobject]@{
 				RecordType   = 'ArtifactPresence'
 				RelativePath = $RelativePath
+				ExternalId   = $RelativePath
 				Sha256       = $Entry.Hash
 				SizeBytes    = $Entry.Size
 				Status       = 'present'
@@ -303,11 +319,12 @@ function ConvertFrom-WaypointCatalogJson {
 					}
 
 					$ByFileName[$Binary.fileName] = [pscustomobject]@{
-						RelativePath = $Binary.fileName
-						Sha256       = $Binary.checksum
-						SizeBytes    = $Binary.size
-						Product      = $ComponentName
-						Version      = $Version
+						RelativePath          = $Binary.fileName
+						Sha256                = $Binary.checksum
+						SizeBytes             = $Binary.size
+						Product               = $ComponentName
+						Version               = $Version
+						ZipExpandRelativePath = Get-BinaryZipExpandRelativePath -Binary $Binary
 					}
 				}
 			}
@@ -319,39 +336,65 @@ function ConvertFrom-WaypointCatalogJson {
 
 <#
 .SYNOPSIS
-    Groups manifest relative paths by recognized vCenter updaterepo zip-expand
-    directory (COMP/VCENTER/vmw/<uuid>/<version>/), returning one object per distinct
-    directory: Version, Component ('VCENTER'), and every manifest RelativePath nested
-    under it.
+    Reads a catalog binary's own zip-expand metadata (issue #1027 depot-consumption
+    finding): a vCenter updaterepo zip binary carries a `metadata[]` entry with
+    `tag: "zip-expand"` and a `configuration` of `{key: "relative", value: "vmw/<uuid>/
+    <version>"}` naming exactly where that specific zip installs as an expanded tree,
+    relative to its component's COMP directory. Returns $null when the binary carries
+    no such metadata (an ordinary, non-expanding binary). `configuration` is read
+    defensively as either a single object or an array of key/value pairs -- the
+    catalog document's own shape is not ours to assume beyond what #1027 documented.
 #>
-function Get-ZipExpandDirectories {
+function Get-BinaryZipExpandRelativePath {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)]
-		[AllowEmptyCollection()]
-		[string[]]$ManifestKeys
+		[AllowNull()]
+		[psobject]$Binary
 	)
 
-	$ByDir = [ordered]@{}
-	foreach ($RelativePath in $ManifestKeys) {
-		$Match = [regex]::Match($RelativePath, $Script:ZipExpandDirPattern)
-		if (-not $Match.Success) {
+	foreach ($MetadataEntry in @($Binary.metadata)) {
+		if ($null -eq $MetadataEntry -or $MetadataEntry.tag -ine 'zip-expand') {
 			continue
 		}
 
-		$DirKey = $Match.Value
-		if (-not $ByDir.Contains($DirKey)) {
-			$ByDir[$DirKey] = [pscustomobject]@{
-				Version       = $Match.Groups['Version'].Value
-				Component     = 'VCENTER'
-				RelativePaths = [System.Collections.Generic.List[string]]::new()
+		foreach ($ConfigurationEntry in @($MetadataEntry.configuration)) {
+			if ($null -eq $ConfigurationEntry) {
+				continue
+			}
+
+			if ($ConfigurationEntry.key -ieq 'relative' -and -not [string]::IsNullOrWhiteSpace($ConfigurationEntry.value)) {
+				return $ConfigurationEntry.value
 			}
 		}
-
-		$ByDir[$DirKey].RelativePaths.Add($RelativePath)
 	}
 
-	return @($ByDir.Values)
+	return $null
+}
+
+<#
+.SYNOPSIS
+    Builds the depot-root-relative prefix (PROD/COMP/<Product>/<RelativePath>/) a zip
+    binary's own zip-expand metadata (Get-BinaryZipExpandRelativePath) resolves to, so
+    the sweep can match the expanded tree's manifest keys directly -- one exact prefix
+    per catalog binary, never a version-wide directory scan (round-1 review finding 5:
+    two same-version zips each carry their own distinct relative value and therefore
+    never collide here).
+#>
+function Get-ZipExpandDepotPrefix {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[AllowNull()]
+		[string]$Product,
+
+		[Parameter(Mandatory)]
+		[string]$RelativePath
+	)
+
+	$TrimmedRelativePath = $RelativePath.Trim('/')
+	return "$Script:DepotRoot/$Script:ComponentBinariesDir/$Product/$TrimmedRelativePath/"
 }
 
 <#

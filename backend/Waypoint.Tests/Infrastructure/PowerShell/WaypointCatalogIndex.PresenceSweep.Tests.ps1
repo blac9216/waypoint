@@ -80,16 +80,28 @@ AfterAll {
 Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 
 	BeforeAll {
+		# Round-1 review finding 4: fixture is depot-shape-faithful, not
+		# code-shape-faithful -- manifest keys are DepotPath-relative (PROD-rooted,
+		# per #1027's depot-consumption finding), the VCENTER productVersion carries
+		# a real build suffix, and two same-version VCENTER zips each carry their
+		# own distinct zip-expand `metadata[]` (finding 5's disambiguation case).
+		# All paths/hashes/sizes/uuids below are invented fixture data (AGENTS.md
+		# sanitization) -- no real depot content, filenames, or vendor catalog excerpt.
 		$script:CatalogJson = @'
 {
   "patches": {
     "VCENTER": [
       {
-        "productVersion": "8.0.3.00900",
+        "productVersion": "9.1.0.5210.25573614",
         "artifacts": { "bundles": [ { "id": "b1", "binaries": [
           { "fileName": "vcsa-patch.iso", "checksum": "AAAA", "size": 100 },
           { "fileName": "vcsa-corrupt.iso", "checksum": "DEAD", "size": 100 },
-          { "fileName": "vcsa-full.zip", "checksum": "BBBB", "size": 5000 }
+          { "fileName": "vcsa-full-a-updaterepo.zip", "checksum": "BBBB", "size": 5000,
+            "metadata": [ { "tag": "zip-expand",
+              "configuration": { "key": "relative", "value": "vmw/1111aaaa/9.1.0.5210" } } ] },
+          { "fileName": "vcsa-full-b-updaterepo.zip", "checksum": "FFFF", "size": 6000,
+            "metadata": [ { "tag": "zip-expand",
+              "configuration": { "key": "relative", "value": "vmw/2222bbbb/9.1.0.5210" } } ] }
         ] } ] }
       }
     ],
@@ -106,12 +118,13 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 '@
 
 		$script:Manifest = [ordered]@{
-			'vcsa-patch.iso'                                            = @{ Size = 100; Hash = 'AAAA' }
-			'vcsa-corrupt.iso'                                          = @{ Size = 999; Hash = 'DEAD' }
-			'COMP/VCENTER/vmw/1111aaaa/8.0.3.00900/installed-file1.dat' = @{ Size = 10; Hash = 'X' }
-			'COMP/VCENTER/vmw/1111aaaa/8.0.3.00900/installed-file2.dat' = @{ Size = 20; Hash = 'Y' }
-			'PROD/metadata/upgrade_info.xml'                            = @{ Size = 50; Hash = 'Z' }
-			'stray/unexpected-file.bin'                                 = @{ Size = 99; Hash = 'W' }
+			'vcsa-patch.iso'                                                      = @{ Size = 100; Hash = 'AAAA' }
+			'vcsa-corrupt.iso'                                                    = @{ Size = 999; Hash = 'DEAD' }
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'       = @{ Size = 10; Hash = 'X' }
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'       = @{ Size = 20; Hash = 'Y' }
+			'PROD/metadata/upgrade_info.xml'                                      = @{ Size = 50; Hash = 'Z' }
+			'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'  = @{ Size = 1; Hash = 'CAT' }
+			'stray/unexpected-file.bin'                                           = @{ Size = 99; Hash = 'W' }
 		}
 
 		$script:Results = script:Invoke-Sweep -CatalogJson $script:CatalogJson -Manifest $script:Manifest
@@ -121,10 +134,11 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-patch.iso' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'present'
+		$Row.ExternalId | Should -Be 'vcsa-patch.iso'
 		$Row.Sha256 | Should -Be 'AAAA'
 		$Row.SizeBytes | Should -Be 100
 		$Row.Product | Should -Be 'VCENTER'
-		$Row.Version | Should -Be '8.0.3.00900'
+		$Row.Version | Should -Be '9.1.0.5210.25573614'
 	}
 
 	It 'reports a catalog entry absent from disk as missing' {
@@ -139,16 +153,23 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$Row.Status | Should -Be 'missing'
 	}
 
-	It 'reports a vCenter zip-expand directory as the zip catalog entry''s installed-form presence' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-full.zip' }
+	It 'reports a vCenter zip-expand directory as its own zip catalog entry''s installed-form presence (issue #1027, round-1 finding 1/2)' {
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-full-a-updaterepo.zip' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'present'
+		$Row.ExternalId | Should -Be 'vcsa-full-a-updaterepo.zip'
+	}
+
+	It 'does not report the second same-version zip present just because the first one''s tree exists (round-1 finding 5)' {
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-full-b-updaterepo.zip' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be 'missing'
 	}
 
 	It 'does not enumerate the zip-expand directory''s own contents as unknown files' {
 		$Unknown = $script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' }
-		$Unknown.RelativePath | Should -Not -Contain 'COMP/VCENTER/vmw/1111aaaa/8.0.3.00900/installed-file1.dat'
-		$Unknown.RelativePath | Should -Not -Contain 'COMP/VCENTER/vmw/1111aaaa/8.0.3.00900/installed-file2.dat'
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'
 	}
 
 	It 'reports upgrade_info.xml as a known/indexed presence record, never unknown' {
@@ -158,11 +179,11 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$Row.Status | Should -Be 'present'
 	}
 
-	It 'reports exactly one genuinely unknown file' {
+	It 'reports the on-disk catalog document and the unrelated stray file as the only genuinely unknown files (#1634 tracks reducing this noise)' {
 		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
-		$Unknown.Count | Should -Be 1
-		$Unknown[0].RelativePath | Should -Be 'stray/unexpected-file.bin'
-		$Unknown[0].SizeBytes | Should -Be 99
+		$Unknown.RelativePath | Should -Contain 'stray/unexpected-file.bin'
+		$Unknown.RelativePath | Should -Contain 'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'
+		$Unknown.Count | Should -Be 2
 	}
 
 	It 'invokes the shared WaypointLogging adapter for its own progress messages (issue #719 override preserved)' {
@@ -187,25 +208,49 @@ Describe 'Invoke-WaypointCatalogIndex fail-closed behavior' {
 	}
 }
 
-Describe 'Get-ZipExpandDirectories (module-internal, issue #1026/#1027 ratified scope)' {
+Describe 'Get-BinaryZipExpandRelativePath (module-internal, issue #1027 depot-consumption finding)' {
 
-	It 'groups manifest keys under a recognized COMP/VCENTER/vmw/<uuid>/<version>/ directory' {
-		$ManifestKeys = @(
-			'COMP/VCENTER/vmw/uuid-a/8.0.3.00900/one.dat',
-			'COMP/VCENTER/vmw/uuid-a/8.0.3.00900/two.dat',
-			'unrelated/file.dat'
-		)
+	It 'reads the relative value from a zip-expand metadata tag (configuration as a single object)' {
+		$Binary = [pscustomobject]@{
+			fileName = 'vcsa-full-a-updaterepo.zip'
+			metadata = @(
+				[pscustomobject]@{ tag = 'zip-expand'; configuration = [pscustomobject]@{ key = 'relative'; value = 'vmw/1111aaaa/9.1.0.5210' } }
+			)
+		}
 
-		$Dirs = & $script:CatalogIndexModule { param($Keys) Get-ZipExpandDirectories -ManifestKeys $Keys } $ManifestKeys
-
-		$Dirs.Count | Should -Be 1
-		$Dirs[0].Version | Should -Be '8.0.3.00900'
-		$Dirs[0].Component | Should -Be 'VCENTER'
-		$Dirs[0].RelativePaths.Count | Should -Be 2
+		$Value = & $script:CatalogIndexModule { param($B) Get-BinaryZipExpandRelativePath -Binary $B } $Binary
+		$Value | Should -Be 'vmw/1111aaaa/9.1.0.5210'
 	}
 
-	It 'recognizes no directory when nothing matches the pattern' {
-		$Dirs = & $script:CatalogIndexModule { param($Keys) Get-ZipExpandDirectories -ManifestKeys $Keys } @('some/other/path.dat')
-		$Dirs.Count | Should -Be 0
+	It 'reads the relative value from a zip-expand metadata tag (configuration as an array of key/value pairs)' {
+		$Binary = [pscustomobject]@{
+			fileName = 'vcsa-full-b-updaterepo.zip'
+			metadata = @(
+				[pscustomobject]@{
+					tag           = 'zip-expand'
+					configuration = @(
+						[pscustomobject]@{ key = 'unrelated'; value = 'ignored' }
+						[pscustomobject]@{ key = 'relative'; value = 'vmw/2222bbbb/9.1.0.5210' }
+					)
+				}
+			)
+		}
+
+		$Value = & $script:CatalogIndexModule { param($B) Get-BinaryZipExpandRelativePath -Binary $B } $Binary
+		$Value | Should -Be 'vmw/2222bbbb/9.1.0.5210'
+	}
+
+	It 'returns $null for a binary carrying no zip-expand metadata' {
+		$Binary = [pscustomobject]@{ fileName = 'vcsa-patch.iso' }
+		$Value = & $script:CatalogIndexModule { param($B) Get-BinaryZipExpandRelativePath -Binary $B } $Binary
+		$Value | Should -BeNullOrEmpty
+	}
+}
+
+Describe 'Get-ZipExpandDepotPrefix (module-internal, round-1 review finding 1)' {
+
+	It 'anchors the expand prefix at the depot root, not at COMP' {
+		$Prefix = & $script:CatalogIndexModule { param($P, $R) Get-ZipExpandDepotPrefix -Product $P -RelativePath $R } 'VCENTER' 'vmw/1111aaaa/9.1.0.5210'
+		$Prefix | Should -Be 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/'
 	}
 }
