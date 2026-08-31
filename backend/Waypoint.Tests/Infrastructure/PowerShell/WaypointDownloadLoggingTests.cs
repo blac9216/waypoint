@@ -168,6 +168,16 @@ public sealed class WaypointDownloadLoggingTests : IDisposable
 		Directory.CreateDirectory(directory);
 		try
 		{
+			// Issue #1503 rewrite: the sweep now reads the authenticated catalog
+			// (CatalogRelativePath's default, matching
+			// ManagedToolOptions.ProductVersionCatalogPath) before it calls the
+			// fake's Get-FileManifest -- an empty-but-valid catalog document keeps
+			// this test's actual subject (the #719 Write-Log override survives the
+			// rewrite) unchanged.
+			string catalogPath = Path.Combine(directory, "PROD", "metadata", "productVersionCatalog", "v1", "productVersionCatalog.json");
+			Directory.CreateDirectory(Path.GetDirectoryName(catalogPath)!);
+			await File.WriteAllTextAsync(catalogPath, "{\"patches\":{}}");
+
 			PowerShellExecutor executor = CreateExecutor();
 			PowerShellExecutionResult result = await executor.ExecuteAsync(
 				new PowerShellRequest(
