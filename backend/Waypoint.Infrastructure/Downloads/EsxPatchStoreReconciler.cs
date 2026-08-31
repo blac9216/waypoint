@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.RegularExpressions;
 using Npgsql;
 using Waypoint.Core.Downloads;
 
@@ -49,9 +50,41 @@ namespace Waypoint.Infrastructure.Downloads;
 /// Neither branch ever deletes a row or a disk file -- resolving only stamps
 /// <c>resolved_at</c> on the alert; removing orphaned disk content is this issue's
 /// surfacing/rebuild sibling's (#1452) explicit action, never automatic here.
+///
+/// Round-1 review hardening: #1446's parser is deliberately tolerant -- an
+/// unreadable <c>hostupdate/</c> root or vendor directory still returns
+/// <c>Succeeded=true</c> with an empty/partial <c>Bundles</c> list plus a warning,
+/// not a failure. Treating that output as a complete reading of the store would
+/// convert a transient read failure into persistent <c>missing</c> discrepancy rows
+/// for every content key the affected scope ever indexed (the exact
+/// transient-to-persistent conversion #1656 rules out). <see cref="ClassifyParseWarnings"/>
+/// recognizes the parser's own read-failure warning shapes and scopes
+/// missing-detection accordingly (skipping the whole run when the root itself could
+/// not be listed, or just the affected vendor's previously-indexed keys otherwise),
+/// surfacing every skip on <see cref="EsxPatchStoreReconciliationReport.ReconcilerWarnings"/>
+/// rather than staying silent -- a degraded run is retried in full on the next pass,
+/// so this never permanently suppresses real missing-detection, only this run's.
+/// Orphan detection separately confines each vendor code from the store's XML to a
+/// single path segment resolving strictly under <c>HostupdateRoot</c> (the
+/// <c>ContentLibraryRepository.ResolveDiskPath</c> pattern, #1391) before it is ever
+/// combined into a filesystem path.
 /// </remarks>
 public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 {
+	/// <summary>
+	/// Matches <see cref="EsxPatchStoreMetadataParser"/>'s own read-failure warning
+	/// text (as opposed to its not-found/malformed warnings, which describe content
+	/// that is legitimately absent or invalid, not unreadable). Group <c>root</c>
+	/// matches <c>SafeEnumerateDirectories</c>'s hostupdate-root-level enumeration
+	/// failure (affects every vendor, since no per-vendor walk even ran); group
+	/// <c>vendor</c> matches a per-vendor consolidated-metadata-index read failure or
+	/// a per-bundle zip read failure (affects only that vendor's previously-indexed
+	/// content).
+	/// </summary>
+	private static readonly Regex ParseReadFailurePattern = new(
+		"""^(?:(?<root>Could not list vendor directories under ')|Could not read vendor '(?<vendor>[^']+)' consolidated metadata index at '|Vendor '(?<vendor2>[^']+)': (?:could not read|could not open) ')""",
+		RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
 	private readonly string _connectionString;
 	private readonly IEsxPatchStoreMetadataParser _parser;
 	private readonly TimeProvider _clock;
@@ -91,9 +124,20 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 			indexedCount++;
 		}
 
+		List<string> reconcilerWarnings = [];
+		(bool rootDegraded, HashSet<string> degradedVendorCodes) = ClassifyParseWarnings(metadata.Warnings);
+		if (rootDegraded)
+		{
+			reconcilerWarnings.Add(
+				"Missing-discrepancy detection skipped entirely this run: the parse could not list vendor directories under this store's hostupdate root, so its empty/partial bundle list cannot be trusted as ground truth for what is actually missing. See ParserWarnings for the read failure; a healthy parse will detect real missing content on the next run.");
+		}
+
 		int newMissing = 0;
 		int resolved = 0;
-		foreach (string previouslyIndexedKey in await ListIndexedContentKeysAsync(connection, storeRoot, cancellationToken).ConfigureAwait(false))
+		int skippedMissing = 0;
+		HashSet<string> vendorsWithSkippedMissing = new(StringComparer.Ordinal);
+		foreach ((string previouslyIndexedKey, string previouslyIndexedVendorCode) in
+			await ListIndexedContentKeysAsync(connection, storeRoot, cancellationToken).ConfigureAwait(false))
 		{
 			if (seenContentKeys.Contains(previouslyIndexedKey))
 			{
@@ -102,6 +146,13 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 					resolved++;
 				}
 
+				continue;
+			}
+
+			if (rootDegraded || degradedVendorCodes.Contains(previouslyIndexedVendorCode))
+			{
+				skippedMissing++;
+				vendorsWithSkippedMissing.Add(previouslyIndexedVendorCode);
 				continue;
 			}
 
@@ -115,11 +166,17 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 			}
 		}
 
+		if (!rootDegraded && skippedMissing > 0)
+		{
+			reconcilerWarnings.Add(
+				$"Missing-discrepancy detection skipped for {skippedMissing} previously indexed key(s) under vendor(s) {string.Join(", ", vendorsWithSkippedMissing.Order(StringComparer.Ordinal))}: the parse reported a read failure for that vendor this run, so its absence from the current bundle list cannot be trusted as a real removal. See ParserWarnings for the read failure; a healthy parse of that vendor will detect real missing content on a later run.");
+		}
+
 		int newOrphan = 0;
 		foreach (string vendorCode in metadata.VendorCodes)
 		{
-			string vendorDir = Path.Combine(metadata.HostupdateRoot, vendorCode);
-			if (!Directory.Exists(vendorDir))
+			string? vendorDir = TryResolveVendorDir(metadata.HostupdateRoot, vendorCode, reconcilerWarnings);
+			if (vendorDir is null || !Directory.Exists(vendorDir))
 			{
 				continue;
 			}
@@ -135,10 +192,13 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 			}
 			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 			{
-				// Same tolerant-on-unreadable posture as the parser this reconciler
-				// consumes -- an unreadable vendor directory does not abort the rest
-				// of the reconciliation, it just contributes no orphan findings for
-				// this vendor this run.
+				// Diverges from the parser's own tolerant-on-unreadable posture
+				// (SafeEnumerateDirectories) only in silence, not in behaviour: an
+				// unreadable vendor directory still does not abort the rest of the
+				// reconciliation, but it must warn -- a bare `continue` here would be
+				// indistinguishable in the database from a vendor directory that was
+				// read successfully and simply has no orphans (round-1 review finding 3).
+				reconcilerWarnings.Add($"Vendor '{vendorCode}': could not list zip files under '{vendorDir}': {ex.GetType().Name}: {ex.Message}");
 				continue;
 			}
 
@@ -168,7 +228,78 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 			}
 		}
 
-		return new EsxPatchStoreReconciliationReport(true, null, indexedCount, newMissing, newOrphan, resolved, metadata.Warnings);
+		return new EsxPatchStoreReconciliationReport(true, null, indexedCount, newMissing, newOrphan, resolved, metadata.Warnings, reconcilerWarnings);
+	}
+
+	/// <summary>
+	/// Scans the parser's warnings for its own read-failure shapes (see
+	/// <see cref="ParseReadFailurePattern"/>), distinguishing a genuine I/O failure
+	/// from the parser's not-found/malformed warnings, which describe content that
+	/// is legitimately absent rather than unreadable and must not gate
+	/// missing-detection. Returns whether the hostupdate root itself could not be
+	/// enumerated (every vendor's previously-indexed content is then unattributable
+	/// and the whole run's missing-detection is skipped) and, otherwise, which
+	/// individual vendor codes had a read failure this run.
+	/// </summary>
+	private static (bool RootDegraded, HashSet<string> DegradedVendorCodes) ClassifyParseWarnings(IReadOnlyList<string> warnings)
+	{
+		bool rootDegraded = false;
+		HashSet<string> degradedVendorCodes = new(StringComparer.Ordinal);
+
+		foreach (string warning in warnings)
+		{
+			Match match = ParseReadFailurePattern.Match(warning);
+			if (!match.Success)
+			{
+				continue;
+			}
+
+			if (match.Groups["root"].Success)
+			{
+				rootDegraded = true;
+				continue;
+			}
+
+			string vendorCode = match.Groups["vendor"].Success ? match.Groups["vendor"].Value : match.Groups["vendor2"].Value;
+			degradedVendorCodes.Add(vendorCode);
+		}
+
+		return (rootDegraded, degradedVendorCodes);
+	}
+
+	/// <summary>
+	/// Confines a vendor code taken verbatim from the store's own XML (the
+	/// consolidated index's <c>&lt;vendor&gt;</c> text, which the parser accepts on a
+	/// non-empty check alone) to a real, single-segment child of
+	/// <paramref name="hostupdateRoot"/> before it is ever combined into a filesystem
+	/// path -- the <c>ContentLibraryRepository.ResolveDiskPath</c> pattern (#1391).
+	/// A code containing a separator or <c>..</c> is rejected by the segment check;
+	/// an absolute code is caught by both the segment check and the resolved-prefix
+	/// check (belt-and-suspenders, matching the #1391 precedent). Round-1 review
+	/// finding 2: without this, such a code escapes the store root (or, if rooted,
+	/// discards it entirely) and the reconciler lists and records whatever
+	/// <c>*.zip</c> files it finds there as this store's orphans.
+	/// </summary>
+	private static string? TryResolveVendorDir(string hostupdateRoot, string vendorCode, List<string> warnings)
+	{
+		if (vendorCode is "." or ".." || Path.GetFileName(vendorCode) != vendorCode || Path.IsPathRooted(vendorCode))
+		{
+			warnings.Add($"Vendor code '{vendorCode}' from this store's consolidated index is not a valid single path segment -- skipped rather than resolved against the store's hostupdate root.");
+			return null;
+		}
+
+		string rootFullPath = Path.GetFullPath(hostupdateRoot);
+		string vendorDir = Path.GetFullPath(Path.Combine(rootFullPath, vendorCode));
+		string rootWithSeparator = rootFullPath.EndsWith(Path.DirectorySeparatorChar)
+			? rootFullPath
+			: rootFullPath + Path.DirectorySeparatorChar;
+		if (!vendorDir.StartsWith(rootWithSeparator, StringComparison.Ordinal))
+		{
+			warnings.Add($"Vendor code '{vendorCode}' from this store's consolidated index resolved outside this store's hostupdate root -- skipped rather than followed.");
+			return null;
+		}
+
+		return vendorDir;
 	}
 
 	private static async Task UpsertIndexRowAsync(
@@ -198,16 +329,22 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
-	private static async Task<List<string>> ListIndexedContentKeysAsync(NpgsqlConnection connection, string storeRoot, CancellationToken cancellationToken)
+	/// <summary>
+	/// Every content key this store has previously indexed, paired with the vendor
+	/// code it was indexed under -- the vendor pairing is what lets the missing-diff
+	/// scope its degraded-parse gate (<see cref="ClassifyParseWarnings"/>) to just the
+	/// vendor(s) a read failure actually affected, rather than the whole store.
+	/// </summary>
+	private static async Task<List<(string ContentKey, string VendorCode)>> ListIndexedContentKeysAsync(NpgsqlConnection connection, string storeRoot, CancellationToken cancellationToken)
 	{
-		await using NpgsqlCommand command = new("SELECT content_key FROM esx_patch_store_index WHERE store_root = $1", connection);
+		await using NpgsqlCommand command = new("SELECT content_key, vendor_code FROM esx_patch_store_index WHERE store_root = $1", connection);
 		command.Parameters.AddWithValue(storeRoot);
 
-		List<string> keys = [];
+		List<(string, string)> keys = [];
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 		{
-			keys.Add(reader.GetString(0));
+			keys.Add((reader.GetString(0), reader.GetString(1)));
 		}
 
 		return keys;

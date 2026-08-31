@@ -298,4 +298,154 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		(int _, string? _, bool resolvedAfter) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
 		Assert.True(resolvedAfter);
 	}
+
+	// ----- round-1 review finding 1: degraded parse must not flood false missing ----
+
+	[Fact]
+	public async Task ReconcileAsync_HealthyParse_StillDetectsRealMissing()
+	{
+		// Control for the two tests below: with zero warnings, a genuinely removed
+		// zip must still open a missing discrepancy -- the degraded-parse gate must
+		// not swallow real detections.
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		string zipPath = Path.Combine(vendorDir, "metadata-a.zip");
+		WriteMetadataZip(zipPath);
+		await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		File.Delete(zipPath);
+		EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.Equal(1, report.NewMissingCount);
+		Assert.Empty(report.ReconcilerWarnings);
+		(int count, string? _, bool resolved) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+		Assert.Equal(1, count);
+		Assert.False(resolved);
+	}
+
+	/// <summary>
+	/// Round-1 review finding 1: an unreadable vendor consolidated-metadata-index
+	/// file after a good first pass yields a tolerant, warning-bearing parse (empty
+	/// bundles for that vendor, <c>Succeeded=true</c>) -- the reconciler must not
+	/// read that as "all of this vendor's previously indexed content vanished" and
+	/// open missing rows for every one of its keys. The directory itself stays
+	/// traversable and only the index file loses its read bit, so the parser's
+	/// <c>File.Exists</c> precheck still passes and the failure surfaces as a real
+	/// "could not read" warning (<c>TryLoadXml</c>'s catch), not the ambiguous
+	/// "not found" warning a denied directory traversal would produce instead.
+	/// Skipped on Windows -- <see cref="UnixFileMode"/> does not model Windows ACLs.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_UnreadableVendorDirectoryAfterGoodPass_DoesNotOpenMissingForThatVendorsKeys()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// Write-only, no read: the directory stays listable/traversable, but the
+		// index file itself cannot be opened -- File.Exists still succeeds (it only
+		// needs to stat the entry via the directory's own permissions) so the
+		// parser reaches File.ReadAllText and hits a genuine read failure rather
+		// than an ambiguous "not found".
+		string indexPath = Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml");
+		File.SetUnixFileMode(indexPath, UnixFileMode.UserWrite);
+		try
+		{
+			EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+			Assert.True(secondReport.Succeeded);
+			Assert.Contains(secondReport.ParserWarnings, w => w.Contains("Could not read vendor 'vmw' consolidated metadata index"));
+			Assert.Equal(0, secondReport.NewMissingCount);
+			Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Missing-discrepancy detection skipped") && w.Contains("vmw"));
+
+			(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+			Assert.Equal(0, count);
+
+			// The index row this store already had for the vendor's bundle survives
+			// untouched -- the degraded run neither opened a false missing row nor
+			// dropped the prior index entry.
+			Assert.Equal(1, await CountIndexRowsAsync());
+		}
+		finally
+		{
+			File.SetUnixFileMode(indexPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+		}
+	}
+
+	// ----- round-1 review finding 2: orphan detection must confine vendor codes ----
+
+	[Theory]
+	[InlineData("../../etc")]
+	[InlineData("/etc")]
+	[InlineData("vmw/../../escape")]
+	public async Task ReconcileAsync_VendorCodeEscapesStoreRoot_SkipsAndWarnsRatherThanFollowing(string maliciousVendorCode)
+	{
+		// The consolidated index's <vendor> element accepts this on a non-empty
+		// check alone (the parser never path-combines it), so it flows straight
+		// into metadata.VendorCodes for the reconciler's orphan pass to confine.
+		WriteConsolidatedIndex(_hostupdateDir, "vmw", maliciousVendorCode);
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(report.Succeeded);
+		Assert.Equal(0, report.NewOrphanCount);
+		Assert.Contains(
+			report.ReconcilerWarnings,
+			w => w.Contains(maliciousVendorCode) && (w.Contains("not a valid single path segment") || w.Contains("resolved outside")));
+
+		(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, count);
+	}
+
+	// ----- round-1 review finding 3: unreadable vendor dir must warn, not swallow --
+
+	/// <summary>
+	/// Round-1 review finding 3: an unreadable vendor directory during orphan
+	/// scanning must surface a warning naming the vendor and the exception, not a
+	/// bare <c>continue</c> indistinguishable from "read successfully, zero
+	/// orphans". Skipped on Windows -- see the mode-0200 rationale above.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_UnreadableVendorDirectoryDuringOrphanScan_WarnsRatherThanSwallowing()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		// No read/execute: Directory.GetFiles on the vendor dir itself throws once
+		// the consolidated metadata index has already been (successfully) parsed
+		// during this same run -- deny only after index parsing, mirroring a
+		// permission change mid-run rather than a pre-existing unreadable vendor.
+		File.SetUnixFileMode(vendorDir, UnixFileMode.UserWrite);
+		try
+		{
+			EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+			Assert.True(report.Succeeded);
+			Assert.Equal(0, report.NewOrphanCount);
+			Assert.Contains(
+				report.ReconcilerWarnings,
+				w => w.Contains("vmw") && w.Contains("could not list zip files") && (w.Contains(nameof(UnauthorizedAccessException)) || w.Contains(nameof(IOException))));
+		}
+		finally
+		{
+			File.SetUnixFileMode(vendorDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+	}
 }

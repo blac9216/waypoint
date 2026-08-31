@@ -57,12 +57,19 @@ public sealed record EsxPatchStoreDiscrepancy(
 /// Outcome of one <see cref="IEsxPatchStoreReconciler.ReconcileAsync"/> call.
 /// <see cref="Succeeded"/> false mirrors <see cref="EsxPatchStoreParseResult.Failed"/>
 /// (a store-root-level problem the underlying parse could not get past); every count
-/// is then 0 and <see cref="ParserWarnings"/> empty, since no store content was ever
-/// read. On success, the counts describe what THIS call changed, not this store's
-/// running totals: <see cref="IndexedCount"/> is bundles upserted (new or re-seen),
+/// is then 0 and both warning lists empty, since no store content was ever read. On
+/// success, the counts describe what THIS call changed, not this store's running
+/// totals: <see cref="IndexedCount"/> is bundles upserted (new or re-seen),
 /// <see cref="NewMissingCount"/>/<see cref="NewOrphanCount"/> are newly opened
 /// discrepancies, and <see cref="ResolvedCount"/> is discrepancies this call closed
-/// because the condition no longer holds.
+/// because the condition no longer holds. <see cref="ParserWarnings"/> is
+/// #1446's parser's own non-fatal anomalies, passed through verbatim.
+/// <see cref="ReconcilerWarnings"/> is this reconciler's own -- degraded-scope
+/// notices (round-1 review finding 1: a read-failure-bearing parse must not have its
+/// empty/partial bundle list mistaken for ground truth, so missing-detection is
+/// skipped for the affected vendor(s)/store and that skip is surfaced here rather
+/// than converted into false <c>missing</c> rows) and per-occurrence warnings for a
+/// vendor directory this call could not list while orphan-scanning (finding 3).
 /// </summary>
 public sealed record EsxPatchStoreReconciliationReport(
 	bool Succeeded,
@@ -71,12 +78,13 @@ public sealed record EsxPatchStoreReconciliationReport(
 	int NewMissingCount,
 	int NewOrphanCount,
 	int ResolvedCount,
-	IReadOnlyList<string> ParserWarnings)
+	IReadOnlyList<string> ParserWarnings,
+	IReadOnlyList<string> ReconcilerWarnings)
 {
 	public static EsxPatchStoreReconciliationReport Failed(string reason)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-		return new EsxPatchStoreReconciliationReport(false, reason, 0, 0, 0, 0, []);
+		return new EsxPatchStoreReconciliationReport(false, reason, 0, 0, 0, 0, [], []);
 	}
 }
 
