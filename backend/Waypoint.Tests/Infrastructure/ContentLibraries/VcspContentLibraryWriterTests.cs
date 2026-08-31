@@ -254,29 +254,56 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 	}
 
 	[Fact]
-	public async Task WriteAsync_CancelledBeforeCompletion_LeavesPriorItemsJsonCompletelyUntouched()
+	public async Task WriteAsync_CancelledMidWrite_LeavesPriorLibraryTreeCompletelyUntouched()
 	{
 		ContentLibrary library = CreateLibrary();
 		VcspContentLibraryWriter writer = CreateWriter();
-		Guid itemId = Guid.NewGuid();
 
-		await writer.WriteAsync(library, [MakeItem(itemId)], CancellationToken.None);
+		await writer.WriteAsync(library, [MakeItem(Guid.NewGuid(), directoryName: "existing-item")], CancellationToken.None);
 		string itemsJsonPath = Path.Combine(library.DiskPath, "items.json");
-		byte[] before = File.ReadAllBytes(itemsJsonPath);
+		string libJsonPath = Path.Combine(library.DiskPath, "lib.json");
+		byte[] itemsBefore = File.ReadAllBytes(itemsJsonPath);
+		byte[] libBefore = File.ReadAllBytes(libJsonPath);
+
+		// A wide brand-new item set: per the write-order guarantee under test, the
+		// writer emits every item's own item.json -- one temp-file-then-rename per
+		// item -- strictly before it ever touches items.json/lib.json. Watching for
+		// the FIRST new item.json to land and cancelling the instant it does
+		// guarantees the cancellation fires genuinely mid-write (some item.json files
+		// committed, items.json/lib.json never reached), while the ~299 items still
+		// queued behind it give the writer's next per-item
+		// ThrowIfCancellationRequested a wide, reliable window to observe the
+		// cancellation before the loop could otherwise finish.
+		const int newItemCount = 300;
+		List<ContentLibraryItemWrite> newItems = Enumerable.Range(0, newItemCount)
+			.Select(i => MakeItem(Guid.NewGuid(), directoryName: $"new-item-{i:D4}"))
+			.ToList();
+		string firstNewItemJson = Path.Combine(library.DiskPath, "new-item-0000", "item.json");
 
 		using CancellationTokenSource cts = new();
-		await cts.CancelAsync();
+		Task cancelOnFirstItemWritten = Task.Run(async () =>
+		{
+			while (!File.Exists(firstNewItemJson))
+			{
+				await Task.Delay(1);
+			}
 
-		// Simulates a writer killed mid-run: a cancellation that fires before this
-		// call's documents are renamed into place must never leave items.json
-		// observably different from the last fully-committed write -- not truncated,
-		// not half-updated, byte-for-byte the same file.
+			await cts.CancelAsync();
+		});
+
+		// Simulates a writer killed mid-run: a cancellation that fires after some
+		// item.json files are committed but before items.json/lib.json are ever
+		// touched must leave both of those documents byte-for-byte the same file they
+		// were before this call, and must leave no partial temp artifact behind for
+		// any document the cancellation interrupted.
 		await Assert.ThrowsAnyAsync<OperationCanceledException>(
-			() => writer.WriteAsync(library, [MakeItem(itemId, contentHash: "hash-v2")], cts.Token));
+			() => writer.WriteAsync(library, newItems, cts.Token));
+		await cancelOnFirstItemWritten;
 
-		byte[] after = File.ReadAllBytes(itemsJsonPath);
-		Assert.Equal(before, after);
-		Assert.Empty(Directory.GetFiles(library.DiskPath, ".*.tmp", SearchOption.AllDirectories));
+		Assert.True(File.Exists(firstNewItemJson), "the cancellation fired before any new item.json was written -- this run did not exercise a mid-write cancellation");
+		Assert.Equal(itemsBefore, File.ReadAllBytes(itemsJsonPath));
+		Assert.Equal(libBefore, File.ReadAllBytes(libJsonPath));
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
 	}
 
 	[Fact]
