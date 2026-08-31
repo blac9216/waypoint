@@ -484,6 +484,29 @@ future exporter may include those images in the signed transfer package; importi
 newer image set stages an available appliance update, and applying it remains an
 explicit Admin action. See [ADR-0015](adr/0015-source-build-and-operator-export.md).
 
+### OCI bundle store and push-target consumer (planned)
+
+Some VCF/VVF 9.1+ content (Supervisor services incl. Harbor, VKS standard packages,
+VKR, VCF CLI plugins) ships as `imgpkg`-shaped OCI image bundles rather than plain
+files. Waypoint never hosts a registry itself; it acquires and stages a bundle as a
+tar file, computes its destination in the operator's own depot-registry from a
+deterministic component-key-to-repo-path map (a fixed, vendor-published prefix per
+component, modeled as data rather than an enum so new mapped components never need a
+schema change), and leaves the push into that registry as an explicit operator
+action. A staged bundle (`OciBundle`) carries its component key, source version, the
+computed target repo path, its local tar path and checksum, and a `staged` /
+`pushed` / `push_failed` status. A push-target consumer (`PushTargetConsumer`) is a
+configured destination registry (Software Depot / Harbor / Bootstrap Registry
+Appliance) -- the first consumer-shaped type in the Downloads domain, modeled
+standalone (no `content-library` or `mirror` consumer type exists in the codebase
+today) but named to anticipate the content-library / mirror consumers design record
+#1161 envisages, and carries a `write_mode_enabled` safety-flag placeholder mirroring
+the registry's own
+unauthenticated-write toggle -- vendor guidance is to bracket a single push between
+enabling and disabling it, since pushes are unauthenticated while it is on. See
+issue #1403 (model), #1413 (acquisition), and #1441 (the push operation and its
+enable/disable bracket).
+
 ### STIG Manager connection
 Global default connection, optional per-site override (different enclaves may report to
 different STIG Manager instances). Eligible CKL upload is job-owned and direct; its
