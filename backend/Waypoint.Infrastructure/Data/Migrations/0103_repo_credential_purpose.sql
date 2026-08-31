@@ -52,10 +52,19 @@
 --      store is CHECK-constrained to the six repo stores deploy/nginx/conf.d/
 --      default.conf's location blocks actually serve today (#1502, merged):
 --      depot, umds, photon, vmtools, vks, content-libraries. Kept in lockstep
---      with backend/Waypoint.Core/Secrets/RepoStores.cs by
---      RepoCredentialBindingRepositoryTests, the same convention
---      targets_kind_check/TargetKinds and
---      target_credential_bindings_purpose_check/CredentialPurposes already use.
+--      with backend/Waypoint.Core/Secrets/RepoStores.cs by the
+--      ParseCheckInList drift guard in
+--      RepoCredentialBindingConstraintDriftTests
+--      (RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet),
+--      the same convention targets_kind_check/TargetKinds and
+--      target_credential_bindings_purpose_check/CredentialPurposes already use
+--      (SchemaMigrationTests.Migration0050_/0051_CheckConstraintValueList(s)_
+--      MatchTheCSharpClosedVocabulary). The widened credentials_credential_type_check
+--      above is kept in lockstep with CredentialTypes.cs the same way, by
+--      RepoCredentialBindingConstraintDriftTests'
+--      CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet
+--      (which parses the LAST declaration across all migrations, since this
+--      constraint has been widened twice via the DROP/ADD idiom).
 --
 -- No new runner grant: this table has exactly one consumer today -- the API
 -- process (RepoCredentialsController, via RepoCredentialBindingRepository) --

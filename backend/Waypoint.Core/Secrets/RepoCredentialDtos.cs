@@ -20,9 +20,12 @@ namespace Waypoint.Core.Secrets;
 /// today -- the VCF depot proper, the ESX patch store (UMDS), the Photon mirror,
 /// VMTools, VKS, and content libraries. There is no DB-level "repo store" row (#1502
 /// stood up nginx <c>location</c> blocks and volume mounts, not a table) -- this is the
-/// literal set of <c>/repo/&lt;store&gt;/</c>-style path segments a repo-serving
-/// credential (<see cref="CredentialTypes.RepoBasicAuth"/>) can be bound to via
-/// <see cref="RepoCredentialBinding"/>. Same closed-set-as-inert-data convention
+/// closed set of repo stores a repo-serving credential
+/// (<see cref="CredentialTypes.RepoBasicAuth"/>) can be bound to via
+/// <see cref="RepoCredentialBinding"/>: five of the six are literal
+/// <c>/repo/&lt;store&gt;/</c>-style path segments, but photon is served at
+/// <c>location ^~ /photon/</c> (not <c>/repo/photon/</c>) in
+/// <c>deploy/nginx/conf.d/default.conf</c>. Same closed-set-as-inert-data convention
 /// <see cref="Waypoint.Core.Sites.TargetKinds"/> and <see cref="CredentialPurposes"/>
 /// already use: API-layer validation here, backed by migration 0103's DB CHECK for
 /// defense-in-depth.
