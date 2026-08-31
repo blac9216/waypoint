@@ -226,35 +226,32 @@ function Invoke-WaypointCatalogIndex {
 				[void]$ConsumedRelativePaths.Add($ExpandedRelativePath)
 			}
 
-			[pscustomobject]@{
-				RecordType   = 'ArtifactPresence'
-				RelativePath = $DepotRelativePath
-				ExternalId   = $DepotRelativePath
-				Sha256       = $CatalogEntry.Sha256
-				SizeBytes    = $CatalogEntry.SizeBytes
-				Status       = 'present'
-				Product      = $CatalogEntry.Product
-				Version      = $CatalogEntry.Version
-			}
+			# Round-3 review finding 1: the expanded tree is consumed above, but the zip
+			# binary's OWN depot-relative path must be consumed too -- a correctly staged
+			# depot holds the zip alongside its expanded tree, and without this the zip
+			# would fall through to the unknown-file enumeration and be reported both
+			# 'present' and UnknownFile (#1503 AC 2). New-ArtifactPresenceRecord consumes
+			# every emitted path so no future branch can reintroduce the class.
+			New-ArtifactPresenceRecord -ConsumedRelativePaths $ConsumedRelativePaths `
+				-RelativePath $DepotRelativePath `
+				-Sha256 $CatalogEntry.Sha256 `
+				-SizeBytes $CatalogEntry.SizeBytes `
+				-Status 'present' `
+				-Product $CatalogEntry.Product `
+				-Version $CatalogEntry.Version
 			continue
 		}
 
 		$DiskEntry = $Manifest[$DepotRelativePath]
 		$Status = Test-CatalogEntryPresent -CatalogEntry $CatalogEntry -DiskEntry $DiskEntry
-		if ($DiskEntry) {
-			[void]$ConsumedRelativePaths.Add($DepotRelativePath)
-		}
 
-		[pscustomobject]@{
-			RecordType   = 'ArtifactPresence'
-			RelativePath = $DepotRelativePath
-			ExternalId   = $DepotRelativePath
-			Sha256       = $CatalogEntry.Sha256
-			SizeBytes    = $CatalogEntry.SizeBytes
-			Status       = $Status
-			Product      = $CatalogEntry.Product
-			Version      = $CatalogEntry.Version
-		}
+		New-ArtifactPresenceRecord -ConsumedRelativePaths $ConsumedRelativePaths `
+			-RelativePath $DepotRelativePath `
+			-Sha256 $CatalogEntry.Sha256 `
+			-SizeBytes $CatalogEntry.SizeBytes `
+			-Status $Status `
+			-Product $CatalogEntry.Product `
+			-Version $CatalogEntry.Version
 
 		if ($PresenceCount % 25 -eq 0) {
 			Write-Log "Swept $PresenceCount catalog entries so far..." -Severity 'Verbose'
@@ -265,18 +262,14 @@ function Invoke-WaypointCatalogIndex {
 	foreach ($RelativePath in $Manifest.Keys) {
 		if ([System.IO.Path]::GetFileName($RelativePath) -ieq 'upgrade_info.xml') {
 			$Entry = $Manifest[$RelativePath]
-			[void]$ConsumedRelativePaths.Add($RelativePath)
 
-			[pscustomobject]@{
-				RecordType   = 'ArtifactPresence'
-				RelativePath = $RelativePath
-				ExternalId   = $RelativePath
-				Sha256       = $Entry.Hash
-				SizeBytes    = $Entry.Size
-				Status       = 'present'
-				Product      = $null
-				Version      = $null
-			}
+			New-ArtifactPresenceRecord -ConsumedRelativePaths $ConsumedRelativePaths `
+				-RelativePath $RelativePath `
+				-Sha256 $Entry.Hash `
+				-SizeBytes $Entry.Size `
+				-Status 'present' `
+				-Product $null `
+				-Version $null
 		}
 	}
 
@@ -438,6 +431,66 @@ function Get-ZipExpandDepotPrefix {
 
 	$TrimmedRelativePath = $RelativePath.Trim('/')
 	return "$Script:DepotRoot/$Script:ComponentBinariesDir/$Product/$TrimmedRelativePath/"
+}
+
+<#
+.SYNOPSIS
+    Builds one ArtifactPresence record AND registers its depot-relative path as
+    consumed, in a single step, so the sweep's core invariant is structural rather
+    than remembered: no path may ever be emitted as both an ArtifactPresence record
+    and an UnknownFile record. Rounds 1-3 of review each found one branch that had
+    emitted a presence record without consuming its path; routing every emit through
+    here removes the possibility instead of fixing the instance. Registering a path
+    the manifest does not contain (a 'missing' catalog entry) is harmless -- the
+    unknown-file enumeration only walks manifest keys.
+#>
+function New-ArtifactPresenceRecord {
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param(
+		# AllowEmptyCollection: the set is empty for the first entry of every sweep, and
+		# a Mandatory parameter otherwise rejects an empty collection outright.
+		[Parameter(Mandatory)]
+		[AllowEmptyCollection()]
+		[System.Collections.Generic.HashSet[string]]$ConsumedRelativePaths,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$RelativePath,
+
+		[Parameter()]
+		[AllowNull()]
+		$Sha256,
+
+		[Parameter()]
+		[AllowNull()]
+		$SizeBytes,
+
+		[Parameter(Mandatory)]
+		[ValidateSet('present', 'missing')]
+		[string]$Status,
+
+		[Parameter()]
+		[AllowNull()]
+		$Product,
+
+		[Parameter()]
+		[AllowNull()]
+		$Version
+	)
+
+	[void]$ConsumedRelativePaths.Add($RelativePath)
+
+	return [pscustomobject]@{
+		RecordType   = 'ArtifactPresence'
+		RelativePath = $RelativePath
+		ExternalId   = $RelativePath
+		Sha256       = $Sha256
+		SizeBytes    = $SizeBytes
+		Status       = $Status
+		Product      = $Product
+		Version      = $Version
+	}
 }
 
 <#

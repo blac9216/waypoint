@@ -57,6 +57,25 @@ function Get-FileManifest {
 }
 '@ | Set-Content -Path $script:FakeCommonPath -Encoding utf8
 
+	# Round-3 review finding 2 -- the class-killing invariant. Rounds 1-3 each closed a
+	# single branch that emitted a presence record without consuming its path, and each
+	# time the fixture agreed with the code. This asserts the property itself: no
+	# RelativePath may appear in BOTH an ArtifactPresence record and an UnknownFile
+	# record. It runs inside Invoke-Sweep, so it is enforced for EVERY scenario in this
+	# suite -- present and future -- not only for the case that named it.
+	function script:Assert-NoPresenceUnknownOverlap {
+		param([object[]]$Results)
+
+		$PresencePaths = [System.Collections.Generic.HashSet[string]]::new(
+			[string[]]@($Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' } | ForEach-Object { $_.RelativePath }),
+			[System.StringComparer]::OrdinalIgnoreCase)
+		$Overlap = @($Results |
+				Where-Object { $_.RecordType -eq 'UnknownFile' -and $PresencePaths.Contains($_.RelativePath) } |
+				ForEach-Object { $_.RelativePath })
+
+		$Overlap -join ', ' | Should -BeNullOrEmpty -Because 'no path may be reported as both an ArtifactPresence record and an UnknownFile record'
+	}
+
 	function script:Invoke-Sweep {
 		param([string]$CatalogJson, [hashtable]$Manifest)
 
@@ -69,7 +88,9 @@ function Get-FileManifest {
 
 		$Global:WaypointTest_Manifest = $Manifest
 
-		return Invoke-WaypointCatalogIndex -DepotPath $DepotDir -VcfDownloadManagerCommonPath $script:FakeCommonPath
+		$SweepResults = @(Invoke-WaypointCatalogIndex -DepotPath $DepotDir -VcfDownloadManagerCommonPath $script:FakeCommonPath)
+		script:Assert-NoPresenceUnknownOverlap -Results $SweepResults
+		return $SweepResults
 	}
 }
 
@@ -120,6 +141,11 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$script:Manifest = [ordered]@{
 			'PROD/COMP/VCENTER/vcsa-patch.iso'                                    = @{ Size = 100; Hash = 'AAAA' }
 			'PROD/COMP/VCENTER/vcsa-corrupt.iso'                                  = @{ Size = 999; Hash = 'DEAD' }
+			# Round-3 review finding 1/2: a correctly staged depot holds the zip binary
+			# ITSELF alongside its expanded tree -- the production steady state, which
+			# no fixture staged for three rounds, so the zip's double-report (present +
+			# UnknownFile) was unreachable by any test.
+			'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'                        = @{ Size = 5000; Hash = 'BBBB' }
 			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'       = @{ Size = 10; Hash = 'X' }
 			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'       = @{ Size = 20; Hash = 'Y' }
 			'PROD/metadata/upgrade_info.xml'                                      = @{ Size = 50; Hash = 'Z' }
@@ -166,6 +192,19 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
 	}
 
+	It 'reports a zip staged alongside its own expanded tree exactly once, never also as an unknown file (round-3 finding 1, issue #1503 AC 2)' {
+		$Rows = @($script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' })
+		$Rows.Count | Should -Be 1
+		$Rows[0].Status | Should -Be 'present'
+
+		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
+	}
+
+	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record (round-3 finding 2 invariant)' {
+		script:Assert-NoPresenceUnknownOverlap -Results $script:Results
+	}
+
 	It 'does not report the second same-version zip present just because the first one''s tree exists (round-1 finding 5)' {
 		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-b-updaterepo.zip' }
 		$Row | Should -Not -BeNullOrEmpty
@@ -196,6 +235,51 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$Output = script:Invoke-Sweep -CatalogJson $script:CatalogJson -Manifest $script:Manifest 6>&1
 		$InfoMessages = @($Output | Where-Object { $_ -is [System.Management.Automation.InformationRecord] })
 		($InfoMessages | ForEach-Object { $_.MessageData }) -join "`n" | Should -Match 'Sweep complete'
+	}
+}
+
+Describe 'Invoke-WaypointCatalogIndex on a fully and correctly staged depot (round-3 review finding 1)' {
+
+	# The partially-staged depot masks the defect; the fully staged one -- zip binary
+	# AND its expanded tree both on disk -- is the production steady state and is where
+	# the zip double-reported. Isolated here so the case cannot be diluted by the
+	# larger fixture's other rows.
+	BeforeAll {
+		$script:StagedCatalogJson = @'
+{
+  "patches": {
+    "VCENTER": [
+      {
+        "productVersion": "9.1.0.5210.25573614",
+        "artifacts": { "bundles": [ { "id": "b1", "binaries": [
+          { "fileName": "vcsa-full-a-updaterepo.zip", "checksum": "BBBB", "size": 5000,
+            "metadata": [ { "tag": "zip-expand",
+              "configuration": { "key": "relative", "value": "vmw/1111aaaa/9.1.0.5210" } } ] }
+        ] } ] }
+      }
+    ]
+  }
+}
+'@
+
+		$script:StagedManifest = [ordered]@{
+			'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'                       = @{ Size = 5000; Hash = 'BBBB' }
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'      = @{ Size = 10; Hash = 'X' }
+			'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'  = @{ Size = 1; Hash = 'CAT' }
+		}
+
+		$script:StagedResults = script:Invoke-Sweep -CatalogJson $script:StagedCatalogJson -Manifest $script:StagedManifest
+	}
+
+	It 'emits no UnknownFile record for the staged zip or any file of its expanded tree' {
+		$Unknown = @($script:StagedResults | Where-Object { $_.RecordType -eq 'UnknownFile' })
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'
+		$Unknown.Count | Should -Be 1
+	}
+
+	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record (round-3 finding 2 invariant)' {
+		script:Assert-NoPresenceUnknownOverlap -Results $script:StagedResults
 	}
 }
 
