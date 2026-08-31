@@ -118,8 +118,8 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 '@
 
 		$script:Manifest = [ordered]@{
-			'vcsa-patch.iso'                                                      = @{ Size = 100; Hash = 'AAAA' }
-			'vcsa-corrupt.iso'                                                    = @{ Size = 999; Hash = 'DEAD' }
+			'PROD/COMP/VCENTER/vcsa-patch.iso'                                    = @{ Size = 100; Hash = 'AAAA' }
+			'PROD/COMP/VCENTER/vcsa-corrupt.iso'                                  = @{ Size = 999; Hash = 'DEAD' }
 			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'       = @{ Size = 10; Hash = 'X' }
 			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'       = @{ Size = 20; Hash = 'Y' }
 			'PROD/metadata/upgrade_info.xml'                                      = @{ Size = 50; Hash = 'Z' }
@@ -131,10 +131,13 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 	}
 
 	It 'reports a matched present file with the DepotArtifactUpsert-shaped identity fields (issue #1488)' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-patch.iso' }
+		# Round-2 review finding 1: keyed depot-relative (PROD/COMP/<Product>/<fileName>),
+		# matching how Get-FileManifest keys a real depot -- not the bare catalog
+		# fileName the pre-fix module (and this row, before round 2) looked up by.
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-patch.iso' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'present'
-		$Row.ExternalId | Should -Be 'vcsa-patch.iso'
+		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-patch.iso'
 		$Row.Sha256 | Should -Be 'AAAA'
 		$Row.SizeBytes | Should -Be 100
 		$Row.Product | Should -Be 'VCENTER'
@@ -142,26 +145,29 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 	}
 
 	It 'reports a catalog entry absent from disk as missing' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'nsx-missing.ova' }
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/NSX/nsx-missing.ova' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'missing'
 	}
 
 	It 'reports a size/hash mismatch as missing, not merely path-present' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-corrupt.iso' }
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-corrupt.iso' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'missing'
 	}
 
 	It 'reports a vCenter zip-expand directory as its own zip catalog entry''s installed-form presence (issue #1027, round-1 finding 1/2)' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-full-a-updaterepo.zip' }
+		# Round-2 review finding 2: the zip binary's own identity is depot-relative too
+		# (PROD/COMP/<Product>/<fileName>), consistent with the ordinary-artifact rows --
+		# not the bare catalog fileName round 1 left unflagged.
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'present'
-		$Row.ExternalId | Should -Be 'vcsa-full-a-updaterepo.zip'
+		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
 	}
 
 	It 'does not report the second same-version zip present just because the first one''s tree exists (round-1 finding 5)' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'vcsa-full-b-updaterepo.zip' }
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-b-updaterepo.zip' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.Status | Should -Be 'missing'
 	}

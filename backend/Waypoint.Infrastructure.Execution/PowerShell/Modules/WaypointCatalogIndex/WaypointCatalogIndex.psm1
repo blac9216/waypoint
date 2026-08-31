@@ -81,6 +81,13 @@ $Script:DefaultCatalogRelativePath = 'PROD/metadata/productVersionCatalog/v1/pro
 # Get-BinaryZipExpandRelativePath) is joined onto this same PROD/COMP root
 # (round-1 review finding 1: the prior COMP/-anchored-at-root pattern never
 # matched, because manifest keys are DepotPath-relative, i.e. PROD-prefixed).
+# Round-2 review finding 1/4: this rule is applied by Get-CatalogEntryDepotRelativePath
+# (ordinary binaries) and Get-ZipExpandDepotPrefix (zip-expand binaries) to EVERY
+# catalog entry, not only the zip-expand prefix -- the manifest Get-FileManifest
+# returns is keyed DepotPath-relative for every file, plain artifacts included, so an
+# ordinary entry's manifest lookup and its emitted RelativePath/ExternalId must use the
+# same resolved path or a fully-staged depot reports every entry both missing and
+# unknown at once (round-2 finding 1).
 $Script:DepotRoot = 'PROD'
 $Script:ComponentBinariesDir = 'COMP'
 
@@ -198,6 +205,16 @@ function Invoke-WaypointCatalogIndex {
 	$PresenceCount = 0
 	foreach ($CatalogEntry in $CatalogEntries) {
 		$PresenceCount++
+
+		# Round-2 review findings 1/2: every catalog entry -- zip-expand and ordinary
+		# alike -- resolves to its depot-relative path (PROD/COMP/<Product>/<fileName>)
+		# for BOTH the manifest lookup and the emitted RelativePath/ExternalId. Manifest
+		# keys (Get-FileManifest) are DepotPath-relative for every on-disk file, so a
+		# bare-filename lookup never matches, and CatalogIndexJobHandler.cs persists
+		# ExternalId straight through as DepotArtifactUpsert.RelativePath (#1488) --
+		# emitting a bare filename there duplicates rows instead of updating them.
+		$DepotRelativePath = Get-CatalogEntryDepotRelativePath -Product $CatalogEntry.Product -FileName $CatalogEntry.RelativePath
+
 		$ExpandedRelativePaths = $null
 		if (-not [string]::IsNullOrWhiteSpace($CatalogEntry.ZipExpandRelativePath)) {
 			$ExpandPrefix = Get-ZipExpandDepotPrefix -Product $CatalogEntry.Product -RelativePath $CatalogEntry.ZipExpandRelativePath
@@ -211,8 +228,8 @@ function Invoke-WaypointCatalogIndex {
 
 			[pscustomobject]@{
 				RecordType   = 'ArtifactPresence'
-				RelativePath = $CatalogEntry.RelativePath
-				ExternalId   = $CatalogEntry.RelativePath
+				RelativePath = $DepotRelativePath
+				ExternalId   = $DepotRelativePath
 				Sha256       = $CatalogEntry.Sha256
 				SizeBytes    = $CatalogEntry.SizeBytes
 				Status       = 'present'
@@ -222,16 +239,16 @@ function Invoke-WaypointCatalogIndex {
 			continue
 		}
 
-		$DiskEntry = $Manifest[$CatalogEntry.RelativePath]
+		$DiskEntry = $Manifest[$DepotRelativePath]
 		$Status = Test-CatalogEntryPresent -CatalogEntry $CatalogEntry -DiskEntry $DiskEntry
 		if ($DiskEntry) {
-			[void]$ConsumedRelativePaths.Add($CatalogEntry.RelativePath)
+			[void]$ConsumedRelativePaths.Add($DepotRelativePath)
 		}
 
 		[pscustomobject]@{
 			RecordType   = 'ArtifactPresence'
-			RelativePath = $CatalogEntry.RelativePath
-			ExternalId   = $CatalogEntry.RelativePath
+			RelativePath = $DepotRelativePath
+			ExternalId   = $DepotRelativePath
 			Sha256       = $CatalogEntry.Sha256
 			SizeBytes    = $CatalogEntry.SizeBytes
 			Status       = $Status
@@ -370,6 +387,32 @@ function Get-BinaryZipExpandRelativePath {
 	}
 
 	return $null
+}
+
+<#
+.SYNOPSIS
+    Resolves an ordinary catalog binary's depot-relative path
+    (PROD/COMP/<Product>/<fileName>) -- the same DepotPath-relative root
+    Get-ZipExpandDepotPrefix anchors its zip-expand prefix to (round-2 review finding
+    1: applied here to every catalog entry's own identity, zip-expand and ordinary
+    alike, not only to the expanded tree's prefix), so the manifest lookup and the
+    emitted RelativePath/ExternalId agree with what Get-FileManifest actually keys the
+    on-disk manifest by.
+#>
+function Get-CatalogEntryDepotRelativePath {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[AllowNull()]
+		[string]$Product,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$FileName
+	)
+
+	return "$Script:DepotRoot/$Script:ComponentBinariesDir/$Product/$FileName"
 }
 
 <#

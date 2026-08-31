@@ -180,7 +180,13 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
 		Assert.Equal(1, total);
 		DepotArtifact artifact = Assert.Single(items);
-		Assert.Equal("vcsa-patch.iso", artifact.ExternalId);
+
+		// Round-2 review finding 2: ExternalId must be the depot-relative path
+		// (PROD/COMP/<Product>/<fileName>), not the bare catalog fileName -- the live
+		// CatalogIndexJobHandler.TryParseArtifact persists it straight through as
+		// DepotArtifactUpsert.RelativePath (#1488's rekeyed identity), so a bare value
+		// here would duplicate rows on every subsequent sweep instead of updating them.
+		Assert.Equal("PROD/COMP/VCENTER/vcsa-patch.iso", artifact.ExternalId);
 		Assert.Equal("present", artifact.Status);
 	}
 

@@ -48,7 +48,11 @@ function Get-FileManifest {
 		[string]$HashAlgorithm = 'SHA256'
 	)
 
+	# Round-2 review finding 3: keyed depot-relative (PROD/COMP/<Product>/<fileName>),
+	# matching how Get-FileManifest keys a real depot -- a bare-filename key here would
+	# let this fake pass against the pre-fix module's bare-filename lookup and hide
+	# round-2 finding 1's defect.
 	return [ordered]@{
-		'vcsa-patch.iso' = @{ Size = 100; Hash = 'AAAA' }
+		'PROD/COMP/VCENTER/vcsa-patch.iso' = @{ Size = 100; Hash = 'AAAA' }
 	}
 }
