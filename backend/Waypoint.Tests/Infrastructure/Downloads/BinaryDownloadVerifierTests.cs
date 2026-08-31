@@ -74,7 +74,7 @@ public sealed class BinaryDownloadVerifierTests : IDisposable
 	public async Task SizeMismatch_FailsVerification_RegardlessOfHash()
 	{
 		byte[] bytes = "genuine-vcf-binary"u8.ToArray();
-		WriteFile("bundle.tar", bytes);
+		string filePath = WriteFile("bundle.tar", bytes);
 		DepotArtifact artifact = ArtifactWith("bundle.tar", Sha256Hex(bytes), bytes.Length + 1);
 
 		BinaryDownloadVerificationResult result = await _verifier.VerifyAsync(artifact, _depotRoot, CancellationToken.None);
@@ -82,19 +82,24 @@ public sealed class BinaryDownloadVerifierTests : IDisposable
 		Assert.False(result.Verified);
 		Assert.Null(result.Sha256);
 		Assert.Contains("Size mismatch", result.FailureReason);
+		// Issue #1486 review round 1, finding 1: ResolvedPath must be populated on a
+		// content mismatch (the file exists, at a confined path) so a caller can
+		// quarantine it -- distinct from the missing-file/path-escape cases below.
+		Assert.Equal(filePath, result.ResolvedPath);
 	}
 
 	[Fact]
 	public async Task Sha256Mismatch_FailsVerification()
 	{
 		byte[] bytes = "genuine-vcf-binary"u8.ToArray();
-		WriteFile("bundle.tar", bytes);
-		DepotArtifact artifact = ArtifactWith("bundle.tar", "0000000000000000000000000000000000000000000000000000000000000", bytes.Length);
+		string filePath = WriteFile("bundle.tar", bytes);
+		DepotArtifact artifact = ArtifactWith("bundle.tar", new string('0', 64), bytes.Length);
 
 		BinaryDownloadVerificationResult result = await _verifier.VerifyAsync(artifact, _depotRoot, CancellationToken.None);
 
 		Assert.False(result.Verified);
 		Assert.Contains("SHA-256 mismatch", result.FailureReason);
+		Assert.Equal(filePath, result.ResolvedPath);
 	}
 
 	[Fact]
@@ -163,6 +168,8 @@ public sealed class BinaryDownloadVerifierTests : IDisposable
 
 		Assert.False(result.Verified);
 		Assert.Contains("not found", result.FailureReason);
+		// Nothing safe to quarantine when there was never a file at the resolved path.
+		Assert.Null(result.ResolvedPath);
 	}
 
 	[Fact]
@@ -183,6 +190,8 @@ public sealed class BinaryDownloadVerifierTests : IDisposable
 
 			Assert.False(result.Verified);
 			Assert.Contains("outside the configured depot store root", result.FailureReason);
+			// Never resolve (let alone quarantine) a path that escaped the depot root.
+			Assert.Null(result.ResolvedPath);
 		}
 		finally
 		{

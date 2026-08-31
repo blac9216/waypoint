@@ -232,7 +232,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 					: JobExecutionOutcome.Failed(result.FailureReason);
 			}
 
-			return await VerifyAndRecordAsync(context, depotArtifactId, payload.ExternalId, depotStorePath, cancellationToken)
+			string quarantineRoot = Path.Combine(toolOptions.ToolStatePath, toolOptions.BinariesDownloadQuarantineDirectoryName);
+			return await VerifyAndRecordAsync(context, depotArtifactId, payload.ExternalId, depotStorePath, quarantineRoot, cancellationToken)
 				.ConfigureAwait(false);
 		}
 		finally
@@ -265,7 +266,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 	/// reason leaves the catalog-supplied size untouched.
 	/// </summary>
 	private async Task<JobExecutionOutcome> VerifyAndRecordAsync(
-		JobExecutionContext context, Guid depotArtifactId, string externalId, string depotStorePath, CancellationToken cancellationToken)
+		JobExecutionContext context, Guid depotArtifactId, string externalId, string depotStorePath, string quarantineRoot,
+		CancellationToken cancellationToken)
 	{
 		DepotArtifact? artifact = await _artifacts.GetByIdAsync(depotArtifactId, cancellationToken).ConfigureAwait(false);
 		if (artifact is null)
@@ -282,12 +284,30 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 
 		if (!verification.Verified)
 		{
+			// Issue #1486 review (round 1, major finding 1): the other half of the
+			// convention this handler already claimed to mirror from
+			// DownloadJobHandler -- a failed-verification file must be quarantined out
+			// of the served/indexed tree BEFORE the "failed" upsert, never left at its
+			// depot path. Left in place, the next catalog-index disk walk re-indexes it
+			// (status='indexed', sha256 = the corrupt bytes' own hash) and the upsert's
+			// `sha256 = COALESCE(EXCLUDED.sha256, ...)` + `status = EXCLUDED.status`
+			// lets that hash silently overwrite the catalog's authenticated one and
+			// resurrect the row as indexed -- laundering a corrupt download into one a
+			// later re-download would verify "present" against. Quarantining first
+			// means the index walk can never see the file at all.
+			string? quarantinePath = verification.ResolvedPath is null
+				? null
+				: QuarantineFile(verification.ResolvedPath, quarantineRoot);
+			string failureReason = quarantinePath is null
+				? verification.FailureReason!
+				: $"{verification.FailureReason} (quarantined at '{quarantinePath}').";
+
 			await _artifacts.UpsertAsync(
 				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "failed", artifact.MetadataJson),
 				cancellationToken).ConfigureAwait(false);
-			await EmitVerificationAlertAsync(context, artifact.ExternalId, artifact.Id, verification.FailureReason!, cancellationToken)
+			await EmitVerificationAlertAsync(context, artifact.ExternalId, artifact.Id, failureReason, cancellationToken)
 				.ConfigureAwait(false);
-			return JobExecutionOutcome.Failed($"Download verification failed for '{artifact.ExternalId}': {verification.FailureReason}");
+			return JobExecutionOutcome.Failed($"Download verification failed for '{artifact.ExternalId}': {failureReason}");
 		}
 
 		// Grill decision Q8: the freshly computed self-hash is what gets recorded, not
@@ -301,15 +321,59 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			$"binaries download completed and verified for '{artifact.ExternalId}' (sha256 {verification.Sha256}).");
 	}
 
+	/// <summary>
+	/// Moves a failed-verification file into <paramref name="quarantineRoot"/>
+	/// (overwriting any stale quarantined copy from a previous failed attempt, so a
+	/// retry starts clean) -- mirroring <c>DownloadJobHandler.QuarantineAsync</c>'s
+	/// identical convention (move-out-of-the-served-tree before marking failed), but
+	/// deliberately NOT reusing that sibling's own
+	/// <c>&lt;ArtifactStorePath&gt;/quarantine/</c> path shape: see
+	/// <see cref="ManagedToolOptions.BinariesDownloadQuarantineDirectoryName"/>'s doc
+	/// comment for why a subdirectory of <c>CatalogOptions.DepotPath</c> would still
+	/// be re-indexed by the catalog-index disk walk, which is exactly the bug this
+	/// quarantine exists to close. A move failure (e.g. the file vanished between
+	/// verification and this call) is swallowed rather than thrown: the "failed"
+	/// upsert and alert must still happen even if quarantine itself could not complete.
+	/// </summary>
+	private static string? QuarantineFile(string resolvedPath, string quarantineRoot)
+	{
+		try
+		{
+			Directory.CreateDirectory(quarantineRoot);
+			string quarantinePath = Path.Combine(quarantineRoot, Path.GetFileName(resolvedPath));
+
+			if (File.Exists(quarantinePath))
+			{
+				File.Delete(quarantinePath);
+			}
+
+			File.Move(resolvedPath, quarantinePath);
+			return quarantinePath;
+		}
+		catch (IOException)
+		{
+			return null;
+		}
+		catch (UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
+
 	private static async Task EmitVerificationAlertAsync(
 		JobExecutionContext context, string externalId, Guid depotArtifactId, string reason, CancellationToken cancellationToken)
 	{
+		// Issue #1486 review round 1, note D (non-blocking, #1636 owns the repo-wide
+		// fix): the sole consumer (JobLogDrawer.tsx) renders `data.message`, not
+		// `data.reason` -- emitting under `message` here is a one-word change that
+		// keeps this alert from reaching the operator as a blank line, ahead of
+		// #1636's broader cleanup of the other four emitters.
 		string payload = JsonSerializer.Serialize(new
 		{
 			kind = "download.verification_failed",
 			depot_artifact_id = depotArtifactId,
 			external_id = externalId,
-			reason,
+			message = reason,
 		});
 		await context.Events.EmitAsync(JobEventTypes.SystemNotice, context.Job.Id, context.Job.RunId, payload, cancellationToken)
 			.ConfigureAwait(false);

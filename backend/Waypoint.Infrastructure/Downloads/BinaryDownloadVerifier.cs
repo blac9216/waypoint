@@ -44,7 +44,8 @@ public sealed class BinaryDownloadVerifier : IBinaryDownloadVerifier
 		if (artifact.SizeBytes is long expectedSize && actualSize != expectedSize)
 		{
 			return BinaryDownloadVerificationResult.Fail(
-				$"Size mismatch for '{artifact.ExternalId}': catalog expects {expectedSize} bytes, downloaded file is {actualSize} bytes.");
+				$"Size mismatch for '{artifact.ExternalId}': catalog expects {expectedSize} bytes, downloaded file is {actualSize} bytes.",
+				resolvedPath);
 		}
 
 		// Grill decision Q8: ALWAYS self-hash SHA-256 at download, regardless of
@@ -62,10 +63,11 @@ public sealed class BinaryDownloadVerifier : IBinaryDownloadVerifier
 			&& !string.Equals(actualSha256, artifact.Sha256, StringComparison.OrdinalIgnoreCase))
 		{
 			return BinaryDownloadVerificationResult.Fail(
-				$"SHA-256 mismatch for '{artifact.ExternalId}': catalog expects {artifact.Sha256}, downloaded file is {actualSha256}.");
+				$"SHA-256 mismatch for '{artifact.ExternalId}': catalog expects {artifact.Sha256}, downloaded file is {actualSha256}.",
+				resolvedPath);
 		}
 
-		return BinaryDownloadVerificationResult.Ok(actualSha256);
+		return BinaryDownloadVerificationResult.Ok(actualSha256, resolvedPath);
 	}
 
 	/// <summary>

@@ -57,18 +57,26 @@ public interface IBinaryDownloadVerifier
 }
 
 /// <summary>Outcome of <see cref="IBinaryDownloadVerifier.VerifyAsync"/>.</summary>
-public sealed record BinaryDownloadVerificationResult(bool Verified, string? Sha256, string? FailureReason)
+public sealed record BinaryDownloadVerificationResult(bool Verified, string? Sha256, string? FailureReason, string? ResolvedPath)
 {
 	/// <summary><paramref name="sha256"/> is the freshly computed self-hash (Q8), lower-case hex.</summary>
-	public static BinaryDownloadVerificationResult Ok(string sha256)
+	public static BinaryDownloadVerificationResult Ok(string sha256, string resolvedPath)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(sha256);
-		return new(true, sha256, null);
+		ArgumentException.ThrowIfNullOrWhiteSpace(resolvedPath);
+		return new(true, sha256, null, resolvedPath);
 	}
 
-	public static BinaryDownloadVerificationResult Fail(string reason)
+	/// <summary>
+	/// <paramref name="resolvedPath"/> is the on-disk file the failure was evaluated
+	/// against (issue #1486 review finding 1) -- non-null for a size/hash mismatch
+	/// (the file exists, at a confined path, but its contents disagree with the
+	/// catalog) so the caller can quarantine it; null for a missing file or a path
+	/// that resolved outside the depot store root, where there is nothing safe to move.
+	/// </summary>
+	public static BinaryDownloadVerificationResult Fail(string reason, string? resolvedPath = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(reason);
-		return new(false, null, reason);
+		return new(false, null, reason, resolvedPath);
 	}
 }
