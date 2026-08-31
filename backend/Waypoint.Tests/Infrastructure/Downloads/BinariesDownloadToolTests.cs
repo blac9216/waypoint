@@ -83,6 +83,7 @@ public sealed class BinariesDownloadToolTests : IDisposable
 			  case "$arg" in
 			    --id=*) have_id=1 ;;
 			    --depot-store=*) have_depot_store=1 ;;
+			    --depot-download-activation-code-file=*) : ;;
 			    --ceip=ENABLE|--ceip=DISABLE) : ;;
 			    *)
 			      echo "Unknown option: $arg" 1>&2
@@ -92,6 +93,57 @@ public sealed class BinariesDownloadToolTests : IDisposable
 			  esac
 			done
 			if [ "$have_id" -ne 1 ] || [ "$have_depot_store" -ne 1 ]; then
+			  echo "Missing required option" 1>&2
+			  echo "{{usage}}" 1>&2
+			  exit 2
+			fi
+			cat <<'STDOUT_EOF'
+			{{stdout}}
+			STDOUT_EOF
+			exit {{exitCode}}
+			""");
+	}
+
+	/// <summary>
+	/// Mirrors <see cref="RealContractStub"/>'s argv shape but additionally REJECTS
+	/// (usage + exit 2) any invocation missing
+	/// <c>--depot-download-activation-code-file=&lt;path&gt;</c> or whose value does not
+	/// match <paramref name="expectedActivationCodePath"/> exactly -- issue #1482 round-1
+	/// review Finding 1's class-killer: removing the flag from
+	/// <c>BinariesDownloadTool.DownloadAsync</c>'s constructed argv (the exact regression
+	/// under review) makes this stub exit 2 and the result NOT be Ok.
+	/// </summary>
+	private string ActivationCodeRequiringStub(string expectedActivationCodePath, int exitCode = 0, string stdout = "")
+	{
+		string logAppend = $"echo \"$*\" >> \"{Path.Combine(_root, "calls.log")}\"";
+		string usage = "Usage: vcf-download-tool binaries download --id=<id> --depot-store=<depotStore> --depot-download-activation-code-file=<path> [--ceip=<ceip>]";
+
+		return Script(
+			$$"""
+			{{logAppend}}
+			sub1="$1"; sub2="$2"
+			shift 2 2>/dev/null || true
+			if [ "$sub1" != "binaries" ] || [ "$sub2" != "download" ]; then
+			  echo "{{usage}}" 1>&2
+			  exit 2
+			fi
+			have_id=0
+			have_depot_store=0
+			have_activation_code=0
+			for arg in "$@"; do
+			  case "$arg" in
+			    --id=*) have_id=1 ;;
+			    --depot-store=*) have_depot_store=1 ;;
+			    --depot-download-activation-code-file={{expectedActivationCodePath}}) have_activation_code=1 ;;
+			    --ceip=ENABLE|--ceip=DISABLE) : ;;
+			    *)
+			      echo "Unknown option: $arg" 1>&2
+			      echo "{{usage}}" 1>&2
+			      exit 2
+			      ;;
+			  esac
+			done
+			if [ "$have_id" -ne 1 ] || [ "$have_depot_store" -ne 1 ] || [ "$have_activation_code" -ne 1 ]; then
 			  echo "Missing required option" 1>&2
 			  echo "{{usage}}" 1>&2
 			  exit 2
@@ -307,5 +359,75 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		Assert.Equal("asset-AAA", machineIdA);
 		Assert.Equal("asset-BBB", machineIdB);
 		Assert.NotEqual(machineIdA, machineIdB);
+	}
+
+	/// <summary>
+	/// Issue #1482 round-1 review Finding 1 (blocker): <c>DownloadAsync</c> validates
+	/// <c>activationCodePath</c> but the prior shape never put it into argv, so the tool
+	/// ran with no credential at all. This is mutation-grade against exactly that
+	/// regression: <see cref="ActivationCodeRequiringStub"/> exits 2 unless argv carries
+	/// <c>--depot-download-activation-code-file=&lt;the exact path passed in&gt;</c> --
+	/// the same live-audited flag spelling <c>DepotIdentityTool.cs</c> uses for
+	/// <c>metadata download</c> (issue #791). Removing the flag from production code (or
+	/// mismatching its value) makes this stub reject the call and the result stop being
+	/// Ok, so this test cannot pass against the pre-fix code.
+	/// </summary>
+	[Fact]
+	public async Task WellFormedInvocation_PutsTheActivationCodeFlagAndPathInArgv()
+	{
+		string codeFile = WriteCodeFile();
+		BinariesDownloadTool tool = CreateTool(
+			ActivationCodeRequiringStub(codeFile, exitCode: 0, stdout: "download complete"), out string callLogPath);
+		string depotDir = Path.Combine(_root, "depot");
+		string identityHome = Path.Combine(_root, "identity", "job-a");
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-9.1.0-bundle-01", depotDir, codeFile, identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.True(result.Succeeded);
+
+		string invocation = File.ReadAllText(callLogPath);
+		Assert.Contains($"--depot-download-activation-code-file={codeFile}", invocation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1482 round-1 review Finding 2 (blocker): <c>RunAsync</c> previously awaited
+	/// <c>WaitForExitAsync</c> with both pipes redirected and unread -- a child writing
+	/// more than the OS pipe buffer (~64 KiB) to either stream would fill it and block
+	/// forever, since nothing was draining it and the process could never exit. This
+	/// stub writes 200 KiB (well past that threshold) to BOTH stdout and stderr before
+	/// exiting; the test bounds itself to a fraction of the tool's own configured
+	/// timeout, so a regression back to the deadlock shows up as this test timing out
+	/// long before the real 4-hour tool timeout would ever fire, not as a silent hang.
+	/// </summary>
+	[Fact]
+	public async Task LargeStdoutAndStderr_PastPipeBufferSize_NeverDeadlocksAndCapturesVerbatim()
+	{
+		const int lineCount = 4000; // ~200 KiB per stream at 50 bytes/line, several times the ~64 KiB OS pipe buffer.
+		string line = new string('x', 45);
+		string genLoop =
+			$$"""
+			i=0
+			while [ "$i" -lt {{lineCount}} ]; do
+			  echo "{{line}}"
+			  echo "{{line}}" 1>&2
+			  i=$((i + 1))
+			done
+			""";
+		string stub = Script(genLoop + "\nexit 0\n");
+
+		BinariesDownloadTool tool = CreateTool(stub, out _);
+		string depotDir = Path.Combine(_root, "depot");
+		string identityHome = Path.Combine(_root, "identity", "job-large-output");
+		string codeFile = WriteCodeFile();
+
+		using CancellationTokenSource boundedTimeout = new(TimeSpan.FromSeconds(20));
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle-large", depotDir, codeFile, identityHome, "asset-aaa", boundedTimeout.Token);
+
+		Assert.True(result.Succeeded);
+		int expectedLength = lineCount * (line.Length + 1);
+		Assert.Equal(expectedLength, result.Stdout.Length);
+		Assert.All(result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries), l => Assert.Equal(line, l));
 	}
 }

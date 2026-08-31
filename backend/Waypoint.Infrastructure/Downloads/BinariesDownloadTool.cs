@@ -79,7 +79,15 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 		// download --help` has not been separately live-audited for this issue; this
 		// shape is exactly what the issue specifies and is flagged pending-live like the
 		// rest of this issue's tool-invocation surface.
-		string arguments = $"binaries download --id=\"{externalId}\" --depot-store=\"{depotStorePath}\" --ceip=DISABLE";
+		//
+		// The Activation Code MUST reach the tool the same way #791's live-audited
+		// `metadata download` contract does -- `--depot-download-activation-code-file=
+		// <path>` (see DepotIdentityTool.cs's identical flag, verified against the live
+		// `metadata download --help`) -- otherwise the tool has no credential and every
+		// call fails auth regardless of a validated enrollment.
+		string arguments =
+			$"binaries download --id=\"{externalId}\" --depot-store=\"{depotStorePath}\" " +
+			$"\"--depot-download-activation-code-file={activationCodePath}\" --ceip=DISABLE";
 
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
 			ExecutablePath(options), arguments, identityHome, options, cancellationToken).ConfigureAwait(false);
@@ -193,6 +201,16 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 		{
 			process.StandardInput.Close();
 
+			// Both pipes are read concurrently, started BEFORE the wait -- a child that
+			// writes more than the OS pipe buffer (~64 KiB) to either stream would
+			// otherwise block forever on a full pipe while nothing is draining it, and
+			// WaitForExitAsync would never observe the exit: a deadlock, not merely a
+			// slow read, that the BinariesDownloadTimeout can't rescue since the process
+			// itself is stuck, not just uncooperative. Reading concurrently with (not
+			// after) the wait is the standard fix.
+			Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+			Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
 			try
 			{
 				await process.WaitForExitAsync(linkedSource.Token).ConfigureAwait(false);
@@ -205,8 +223,8 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 					timedOut ? $"did not complete within {options.BinariesDownloadTimeout}" : "cancelled");
 			}
 
-			string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-			string stderr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+			string stdout = await stdoutTask.ConfigureAwait(false);
+			string stderr = await stderrTask.ConfigureAwait(false);
 			return (true, process.ExitCode, stdout, stderr);
 		}
 	}

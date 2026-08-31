@@ -138,43 +138,51 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		string activationCodePath = Path.Combine(stagingRoot, "activation-code.txt");
 		string identityHome = Path.Combine(toolOptions.ToolStatePath, toolOptions.BinariesDownloadIdentityDirectoryName, $"job-{context.Job.Id:N}");
 
-		string? assetId;
-		DecryptedSecret? decrypted = null;
+		// Issue #1482 review (round 1, major): the staging root's decrypted-Activation-
+		// Code secret file must never survive on disk regardless of WHERE this method
+		// exits -- including an IOException thrown by WriteRestrictedFileAsync itself,
+		// which the prior shape did not catch, so it propagated straight out of the
+		// method and skipped every cleanup call below it. A single try/finally owning
+		// the staging root's (and identity home's) entire lifetime, wrapping every use
+		// of activationCodePath, closes that gap: whatever exits this block -- a
+		// classified failure, a thrown exception, a successful run -- the finally always
+		// runs.
 		try
 		{
-			CreateRestrictedDirectory(stagingRoot);
+			string? assetId;
+			DecryptedSecret? decrypted = null;
+			try
+			{
+				CreateRestrictedDirectory(stagingRoot);
 
-			decrypted = await _secrets
-				.DecryptAsync(activationCode.Id, "system", context.Job.Id, context.Job.RunId, cancellationToken)
-				.ConfigureAwait(false);
-			await WriteRestrictedFileAsync(activationCodePath, decrypted.Value, cancellationToken).ConfigureAwait(false);
+				decrypted = await _secrets
+					.DecryptAsync(activationCode.Id, "system", context.Job.Id, context.Job.RunId, cancellationToken)
+					.ConfigureAwait(false);
+				await WriteRestrictedFileAsync(activationCodePath, decrypted.Value, cancellationToken).ConfigureAwait(false);
 
-			// Issue #787: identity follows the code -- derive the non-secret asset_id
-			// from THIS code and seed this job's own identity home from it (never the
-			// shared enrollment home) immediately before invoking the tool.
-			assetId = DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value);
-		}
-		catch (CredentialSecretNotFoundException exception)
-		{
-			return JobExecutionOutcome.Failed($"Activation Code credential has no stored secret: {exception.Message}");
-		}
-		catch (MasterKeyUnavailableException exception)
-		{
-			return JobExecutionOutcome.Failed($"Activation Code could not be decrypted: {exception.Message}");
-		}
-		finally
-		{
-			decrypted?.Dispose();
-		}
+				// Issue #787: identity follows the code -- derive the non-secret asset_id
+				// from THIS code and seed this job's own identity home from it (never the
+				// shared enrollment home) immediately before invoking the tool.
+				assetId = DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value);
+			}
+			catch (CredentialSecretNotFoundException exception)
+			{
+				return JobExecutionOutcome.Failed($"Activation Code credential has no stored secret: {exception.Message}");
+			}
+			catch (MasterKeyUnavailableException exception)
+			{
+				return JobExecutionOutcome.Failed($"Activation Code could not be decrypted: {exception.Message}");
+			}
+			finally
+			{
+				decrypted?.Dispose();
+			}
 
-		if (string.IsNullOrWhiteSpace(assetId))
-		{
-			TryDeleteDirectory(stagingRoot);
-			return JobExecutionOutcome.Failed("The configured Activation Code does not decode a usable asset_id; cannot seed identity.");
-		}
+			if (string.IsNullOrWhiteSpace(assetId))
+			{
+				return JobExecutionOutcome.Failed("The configured Activation Code does not decode a usable asset_id; cannot seed identity.");
+			}
 
-		try
-		{
 			BinariesDownloadResult result = await _tool
 				.DownloadAsync(payload.ExternalId, depotStorePath, activationCodePath, identityHome, assetId, cancellationToken)
 				.ConfigureAwait(false);
