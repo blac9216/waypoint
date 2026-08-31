@@ -165,6 +165,13 @@ public sealed class EndpointRoleMatrixTests
 		["ConfigDocsController.GetVersion"] = WaypointRole.Viewer,
 		["ConfigDocsController.Save"] = WaypointRole.Admin,
 
+		// ContentLibrariesController (issue #1391) -- reads Viewer+; Create/Delete Admin,
+		// matching Sites/Trust/Credentials' RBAC shape for Configuration-like resources.
+		["ContentLibrariesController.List"] = WaypointRole.Viewer,
+		["ContentLibrariesController.Get"] = WaypointRole.Viewer,
+		["ContentLibrariesController.Create"] = WaypointRole.Admin,
+		["ContentLibrariesController.Delete"] = WaypointRole.Admin,
+
 		// CredentialsController -- reads Viewer+; every write (including the
 		// shared-credential-only Create per ADR-0011) Admin. Update additionally step-up
 		// gates a secret overwrite in-action -- see class doc comment; not re-checked here.

@@ -20,6 +20,7 @@ using Waypoint.Core.Audit;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Configuration;
+using Waypoint.Core.ContentLibraries;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
@@ -30,6 +31,7 @@ using Waypoint.Infrastructure.Audit;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.ConfigDocs;
+using Waypoint.Infrastructure.ContentLibraries;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Downloads;
@@ -114,6 +116,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<DownloadOptions>()
 			.Bind(configuration.GetSection(DownloadOptions.SectionName));
+
+		services.AddOptions<ContentLibraryOptions>()
+			.Bind(configuration.GetSection(ContentLibraryOptions.SectionName));
 
 		services.AddOptions<Waypoint.Core.Downloads.ManagedToolOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Downloads.ManagedToolOptions.SectionName));
@@ -367,6 +372,15 @@ public static class ServiceCollectionExtensions
 			// (consumption is this issue's stated remainder).
 			services.AddSingleton<Waypoint.Core.Trust.ITrustRepository>(
 				new Waypoint.Infrastructure.Trust.TrustRepository(connectionString));
+			// Issue #1391: the content-library registry (migration 0090, epic #1185).
+			// Admin-only writes run through the owner connection string (this
+			// repository) -- no runner grant exists yet (#1057's depot-fed sync is the
+			// nearest future consumer, per the migration's own header).
+			services.AddSingleton<IContentLibraryRepository>(serviceProvider =>
+			{
+				ContentLibraryOptions options = serviceProvider.GetRequiredService<IOptions<ContentLibraryOptions>>().Value;
+				return new ContentLibraryRepository(connectionString, options.RootPath);
+			});
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
