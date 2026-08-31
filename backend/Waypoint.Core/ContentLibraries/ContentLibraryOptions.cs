@@ -29,10 +29,12 @@ public sealed class ContentLibraryOptions
 	/// Root directory every library's own directory is created directly under.
 	/// <see cref="Waypoint.Infrastructure.ContentLibraries.ContentLibraryRepository"/>
 	/// derives each library's disk path as <c>RootPath/{name}</c> -- the operator
-	/// chooses the name, never a free-form path, so a library can never resolve
-	/// outside this root and two libraries can never collide on the same directory
-	/// (the DB's own unique constraint on <c>name</c> already forbids two rows
-	/// sharing a leaf).
+	/// supplies <c>name</c>, not a free-form path, so it is validated at that
+	/// repository layer (single-path-segment check plus a resolved-path prefix check
+	/// against this root) before it is ever combined with <c>RootPath</c>; a library
+	/// resolving outside this root is rejected, not merely undesired by convention.
+	/// Two libraries can never collide on the same directory either (the DB's own
+	/// unique constraint on <c>name</c> already forbids two rows sharing a leaf).
 	/// </summary>
 	public string RootPath { get; set; } = "/var/lib/waypoint/content-libraries";
 }

@@ -146,4 +146,117 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 		Assert.NotNull(await _libraries.GetAsync(library.Id, CancellationToken.None));
 		Assert.True(Directory.Exists(library.DiskPath));
 	}
+
+	/// <summary>
+	/// PR #1649 round 1 (S1): the create-race fix makes the DB's UNIQUE constraint on
+	/// <c>name</c> the sole serializer, with <c>Directory.CreateDirectory</c> gated on a
+	/// winning insert -- so no caller ever samples <c>Directory.Exists</c> before the
+	/// insert resolves, and there is no interleaving left in which a losing caller can
+	/// delete a winner's live directory. Two real connections (one per concurrent
+	/// <see cref="ContentLibraryRepository.CreateAsync"/> call), asserted
+	/// deterministically: whichever interleaving the scheduler picks, exactly one call
+	/// must win, exactly one must lose, and the winner's directory must still be there
+	/// afterwards -- this holds every run, not just a lucky one.
+	/// </summary>
+	[Fact]
+	public async Task CreateAsync_TwoConcurrentCallsForTheSameName_ExactlyOneWinsAndTheWinnersDirectorySurvives()
+	{
+		const string name = "vcsp-race";
+
+		(ContentLibraryCreateOutcome Outcome, ContentLibrary? Library)[] results = await Task.WhenAll(
+			_libraries.CreateAsync(name, CancellationToken.None),
+			_libraries.CreateAsync(name, CancellationToken.None));
+
+		Assert.Equal(1, results.Count(r => r.Outcome == ContentLibraryCreateOutcome.Created));
+		Assert.Equal(1, results.Count(r => r.Outcome == ContentLibraryCreateOutcome.NameTaken));
+
+		ContentLibrary winner = results.Single(r => r.Outcome == ContentLibraryCreateOutcome.Created).Library!;
+		Assert.True(Directory.Exists(winner.DiskPath));
+		Assert.Single(Directory.EnumerateDirectories(_rootPath));
+
+		IReadOnlyList<ContentLibrary> all = await _libraries.ListAsync(CancellationToken.None);
+		Assert.Single(all, l => l.Name == name);
+	}
+
+	/// <summary>PR #1649 round 1 (S2): the same forms the reviewer ran <c>Path.Combine</c> against.</summary>
+	[Theory]
+	[InlineData("../../../etc/waypoint")]
+	[InlineData("../x")]
+	[InlineData("/etc/waypoint")]
+	[InlineData("/etc/x")]
+	[InlineData("a/b")]
+	[InlineData("")]
+	[InlineData("..")]
+	[InlineData(".")]
+	public async Task CreateAsync_rejects_path_traversal_and_invalid_name_forms_without_touching_the_filesystem(string name)
+	{
+		await Assert.ThrowsAsync<ArgumentException>(() => _libraries.CreateAsync(name, CancellationToken.None));
+		Assert.Empty(Directory.EnumerateFileSystemEntries(_rootPath));
+	}
+
+	/// <summary>
+	/// PR #1649 round 1 (S3a): if the row insert wins but provisioning the directory
+	/// then fails, the compensating delete must remove the row again rather than
+	/// leaving the documented-impossible row-without-a-directory state.
+	/// </summary>
+	[Fact]
+	public async Task CreateAsync_WhenDirectoryProvisioningFails_RemovesTheInsertedRowAgain()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		UnixFileMode originalRootMode = File.GetUnixFileMode(_rootPath);
+		File.SetUnixFileMode(_rootPath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+		try
+		{
+			await Assert.ThrowsAsync<UnauthorizedAccessException>(
+				() => _libraries.CreateAsync("vcsp-unwritable", CancellationToken.None));
+		}
+		finally
+		{
+			File.SetUnixFileMode(_rootPath, originalRootMode);
+		}
+
+		IReadOnlyList<ContentLibrary> all = await _libraries.ListAsync(CancellationToken.None);
+		Assert.DoesNotContain(all, l => l.Name == "vcsp-unwritable");
+	}
+
+	/// <summary>
+	/// PR #1649 round 1 (S3b): the directory is removed BEFORE the row, so a failed
+	/// unlink must leave both intact -- never the row gone with the directory behind.
+	/// Removing write permission on the ROOT (not the library's own directory) denies
+	/// the unlink: on Linux, removing a directory entry needs write permission on its
+	/// PARENT, not the entry itself.
+	/// </summary>
+	[Fact]
+	public async Task DeleteAsync_WhenTheDirectoryUnlinkFails_LeavesBothTheRowAndDirectoryIntact()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		(_, ContentLibrary? library) = await _libraries.CreateAsync("vcsp-lockeddelete", CancellationToken.None);
+
+		UnixFileMode originalRootMode = File.GetUnixFileMode(_rootPath);
+		File.SetUnixFileMode(_rootPath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+		try
+		{
+			// .NET surfaces a denied directory removal on Linux as IOException (via
+			// Directory.Delete -> RemoveEmptyDirectory), not UnauthorizedAccessException
+			// -- unlike File.* APIs, which do throw UnauthorizedAccessException for the
+			// analogous EACCES.
+			await Assert.ThrowsAsync<IOException>(
+				() => _libraries.DeleteAsync(library!.Id, CancellationToken.None));
+		}
+		finally
+		{
+			File.SetUnixFileMode(_rootPath, originalRootMode);
+		}
+
+		Assert.NotNull(await _libraries.GetAsync(library!.Id, CancellationToken.None));
+		Assert.True(Directory.Exists(library.DiskPath));
+	}
 }

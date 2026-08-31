@@ -13,11 +13,17 @@
 --
 -- disk_path is derived by the API from `name` (RootPath/{name}, see
 -- Waypoint.Core.ContentLibraries.ContentLibraryOptions), never a free-form
--- operator-supplied path -- this keeps every library's directory inside the
--- configured root by construction, with no path-traversal validation needed. Both
--- `name` and `disk_path` carry their own UNIQUE constraint: `name` is the one an
--- operator-facing 409 hangs off, `disk_path` is a belt-and-suspenders invariant that
--- should never itself be reachable while the derivation above holds.
+-- operator-supplied path -- but `name` itself is still operator input, so keeping
+-- every library's directory inside the configured root is an ENFORCED invariant, not
+-- a by-construction one: Waypoint.Infrastructure.ContentLibraries.
+-- ContentLibraryRepository.ResolveDiskPath validates `name` as a single path segment
+-- (rejecting `..`, any `/`, and rooted input) and re-checks the resolved path against
+-- the root via Path.GetFullPath before it is ever combined with RootPath, at the same
+-- layer that touches the filesystem -- the controller's NamePattern regex is a
+-- second, operator-facing 400 one layer up, not the only guard. Both `name` and
+-- `disk_path` carry their own UNIQUE constraint: `name` is the one an operator-facing
+-- 409 hangs off, `disk_path` is a belt-and-suspenders invariant that should never
+-- itself be reachable while the derivation above holds.
 CREATE TABLE IF NOT EXISTS content_libraries (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,

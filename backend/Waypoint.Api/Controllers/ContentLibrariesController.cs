@@ -42,10 +42,19 @@ public sealed class ContentLibrariesController : ControllerBase
 	/// <see cref="ContentLibraryOptions"/>), so it is restricted to a single safe path
 	/// segment: no <c>/</c>, no leading <c>.</c> (rules out both a hidden directory and
 	/// <c>.</c>/<c>..</c>), letters/digits/underscore/hyphen only. This is stricter than
-	/// a general display name needs to be, deliberately -- it is the only validation
-	/// standing between an operator's input and a real filesystem path.
+	/// a general display name needs to be, deliberately -- it is the operator-facing
+	/// 400 for the same input a name-traversal attempt would otherwise reach; the
+	/// repository layer that actually touches the filesystem
+	/// (<c>ContentLibraryRepository.ResolveDiskPath</c>) enforces the same
+	/// single-segment invariant independently rather than trusting this regex alone.
 	/// </summary>
-	private static readonly Regex NamePattern = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$", RegexOptions.Compiled);
+	/// <remarks>
+	/// <c>internal</c> (not <c>private</c>) so <c>ContentLibrariesControllerNamePatternTests</c>
+	/// in <c>Waypoint.Tests</c> can exercise this pattern directly rather than only
+	/// indirectly through an HTTP-shaped test, matching this controller's existing
+	/// no-per-endpoint-HTTP-test precedent (see class remarks).
+	/// </remarks>
+	internal static readonly Regex NamePattern = new("^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$", RegexOptions.Compiled);
 
 	private readonly IContentLibraryRepository _libraries;
 

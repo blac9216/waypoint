@@ -359,8 +359,13 @@ public sealed class SchemaMigrationTests
 	/// design #16 section 6; slot pre-assigned 2026-08-30) adds
 	/// <c>content_libraries</c> -- the content-library REGISTRY: one row per named,
 	/// flat-on-disk VCSP library and the single directory it owns, derived
-	/// (<c>RootPath/{name}</c>) rather than operator-supplied, so no path-traversal
-	/// validation is needed. Deliberately inert -- no VCSP <c>lib.json</c>/
+	/// (<c>RootPath/{name}</c>) rather than operator-supplied. `name` is still
+	/// operator input, though, so path-traversal is foreclosed by an ENFORCED
+	/// single-path-segment check plus a resolved-path root-prefix check in
+	/// <c>ContentLibraryRepository.ResolveDiskPath</c> (the layer that touches the
+	/// filesystem), not merely by the controller's input regex or by construction of
+	/// the derivation alone (round 1 of PR #1649 corrected this paragraph, which
+	/// originally claimed the latter). Deliberately inert -- no VCSP <c>lib.json</c>/
 	/// <c>items.json</c> file semantics (#1393) or item rows (#1396) land here, only
 	/// the minimal CRUD API (POST/GET/DELETE) every later step resolves "which
 	/// library, which path" through. No new runner grants (this repo's #556

@@ -36,14 +36,7 @@ public sealed class ContentLibraryRepository : IContentLibraryRepository
 	public async Task<(ContentLibraryCreateOutcome Outcome, ContentLibrary? Library)> CreateAsync(string name, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(name);
-
-		string diskPath = Path.Combine(_rootPath, name);
-		// Directory.CreateDirectory is idempotent -- when this call loses a create race
-		// against an already-existing library of the same name, diskPath is that SAME
-		// directory, not a fresh one. Remember whether it pre-existed so the orphan
-		// cleanup below can never delete a real library's directory out from under it.
-		bool diskPathAlreadyExisted = Directory.Exists(diskPath);
-		Directory.CreateDirectory(diskPath);
+		string diskPath = ResolveDiskPath(name);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -57,33 +50,88 @@ public sealed class ContentLibraryRepository : IContentLibraryRepository
 		command.Parameters.AddWithValue(name);
 		command.Parameters.AddWithValue(diskPath);
 
-		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		// The DB's own UNIQUE constraints are the SOLE serializer for a concurrent
+		// create/create race -- nothing on disk is touched, read, or sampled before
+		// this INSERT resolves. `ON CONFLICT (name) DO NOTHING` is the arbiter for the
+		// `name` constraint and yields a losing caller a graceful zero-row result; but
+		// `disk_path` is deterministically derived from `name` (ResolveDiskPath), so
+		// two concurrent inserts for the same name ALSO collide on `disk_path` --  a
+		// second, distinct UNIQUE constraint the ON CONFLICT clause's single arbiter
+		// cannot cover (Postgres accepts only one conflict target per INSERT). That
+		// collision surfaces as a genuine 23505 unique_violation rather than a
+		// zero-row result; it means exactly the same thing (this call lost the race)
+		// and is handled identically. Either way, a losing caller returns NameTaken
+		// having never created a directory of its own, so there is nothing for it to
+		// clean up and no way for it to reach (let alone delete) the winner's
+		// directory.
+		ContentLibrary library;
+		try
 		{
-			return (ContentLibraryCreateOutcome.Created, Map(reader));
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				return (ContentLibraryCreateOutcome.NameTaken, null);
+			}
+
+			library = Map(reader);
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+		{
+			return (ContentLibraryCreateOutcome.NameTaken, null);
 		}
 
-		// Name already taken. Only remove diskPath when THIS call created it fresh
-		// (diskPathAlreadyExisted is false) -- otherwise diskPath is an existing
-		// library's real directory (created by an earlier CreateAsync, or racing
-		// concurrently for the same name) and must never be touched here. Best-effort:
-		// a failure to remove a genuinely orphaned empty directory is swallowed, not
-		// thrown -- it is harmless clutter, not a correctness problem.
-		if (!diskPathAlreadyExisted)
+		try
 		{
-			try
-			{
-				Directory.Delete(diskPath);
-			}
-			catch (IOException)
-			{
-			}
-			catch (UnauthorizedAccessException)
-			{
-			}
+			Directory.CreateDirectory(diskPath);
+		}
+		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+		{
+			// This call won the name and its row exists, but the directory that row
+			// promises could not be provisioned. Compensate by removing the row again
+			// (best effort against a further failure here would just re-litigate the
+			// same problem) so a failed create never leaves a row without a
+			// directory -- the interface's documented contract -- then rethrow so the
+			// caller still observes the failure.
+			await using NpgsqlCommand cleanup = new("DELETE FROM content_libraries WHERE id = $1", connection);
+			cleanup.Parameters.AddWithValue(library.Id);
+			await cleanup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			throw;
 		}
 
-		return (ContentLibraryCreateOutcome.NameTaken, null);
+		return (ContentLibraryCreateOutcome.Created, library);
+	}
+
+	/// <summary>
+	/// Derives a library's on-disk directory from its operator-supplied name and
+	/// validates it before any filesystem or database call is made. Two independent
+	/// checks, not one: <see cref="Path.GetFileName"/> equality (plus the literal
+	/// <c>.</c>/<c>..</c> segments, which <see cref="Path.GetFileName"/> alone does not
+	/// reject) enforces that <paramref name="name"/> is a single path segment with no
+	/// separators, and the resolved-path prefix check catches anything the segment
+	/// check might miss (belt-and-suspenders, not a substitute for it) --
+	/// <see cref="ContentLibrariesController"/>'s <c>NamePattern</c> regex is the
+	/// operator-facing 400 for the same input one layer up, but this is the guard that
+	/// actually stands between an operator-controlled string and a real filesystem
+	/// path, because this is the code that touches the filesystem.
+	/// </summary>
+	private string ResolveDiskPath(string name)
+	{
+		if (name is "." or ".." || Path.GetFileName(name) != name || Path.IsPathRooted(name))
+		{
+			throw new ArgumentException($"'{name}' is not a valid content library name.", nameof(name));
+		}
+
+		string rootFullPath = Path.GetFullPath(_rootPath);
+		string diskPath = Path.GetFullPath(Path.Combine(rootFullPath, name));
+		string rootWithSeparator = rootFullPath.EndsWith(Path.DirectorySeparatorChar)
+			? rootFullPath
+			: rootFullPath + Path.DirectorySeparatorChar;
+		if (!diskPath.StartsWith(rootWithSeparator, StringComparison.Ordinal))
+		{
+			throw new ArgumentException($"'{name}' does not resolve inside the content-library root.", nameof(name));
+		}
+
+		return diskPath;
 	}
 
 	public async Task<ContentLibrary?> GetAsync(Guid id, CancellationToken cancellationToken)
@@ -130,22 +178,24 @@ public sealed class ContentLibraryRepository : IContentLibraryRepository
 			return ContentLibraryDeleteOutcome.NotEmpty;
 		}
 
-		await using NpgsqlConnection connection = new(_connectionString);
-		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("DELETE FROM content_libraries WHERE id = $1 RETURNING id", connection);
-		command.Parameters.AddWithValue(id);
-		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		if (result is null)
-		{
-			return ContentLibraryDeleteOutcome.NotFound;
-		}
-
+		// Directory removed BEFORE the row, deliberately unguarded: if a file appears
+		// between the emptiness check above and this call, or the unlink is denied,
+		// Directory.Delete throws HERE and the row delete below never runs -- the row
+		// and the (still real) directory both survive, which is recoverable. The
+		// alternative order (row first) is what turns the same failure into an
+		// unrecoverable row-gone-directory-behind orphan, which is the state this
+		// repository's documented contract says a delete never produces.
 		if (Directory.Exists(existing.DiskPath))
 		{
 			Directory.Delete(existing.DiskPath);
 		}
 
-		return ContentLibraryDeleteOutcome.Deleted;
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("DELETE FROM content_libraries WHERE id = $1 RETURNING id", connection);
+		command.Parameters.AddWithValue(id);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result is null ? ContentLibraryDeleteOutcome.NotFound : ContentLibraryDeleteOutcome.Deleted;
 	}
 
 	private static ContentLibrary Map(NpgsqlDataReader reader) => new(
