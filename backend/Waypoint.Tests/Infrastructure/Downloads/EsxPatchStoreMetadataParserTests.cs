@@ -374,6 +374,57 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		Assert.Contains(result.Metadata.Warnings, w => w.Contains("Consolidated index not found"));
 	}
 
+	/// <summary>
+	/// #1638 round-1 review finding 1: an unreadable <c>hostupdate/</c> root (a
+	/// permissions/mount problem, not an empty store) must not look like a
+	/// successful parse of an empty store, and the emitted warning must not
+	/// misattribute the enumeration failure to a missing consolidated index. Skipped
+	/// on Windows -- <see cref="UnixFileMode"/> does not model Windows ACLs, and this
+	/// repro depends on denying directory traversal via Unix permission bits.
+	/// </summary>
+	[Fact]
+	public void Parse_UnreadableHostupdateRoot_WarnsAndIsDistinguishableFromAnEmptyStore()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a7f3.zip");
+
+		// Write-only, no execute/traverse bit: denies both listing hostupdate/'s
+		// subdirectories and stat'ing files directly inside it -- the reviewer's
+		// mode-0200 reproduction.
+		File.SetUnixFileMode(hostupdateDir, UnixFileMode.UserWrite);
+		try
+		{
+			EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+			Assert.True(result.Succeeded);
+			Assert.Empty(result.Metadata!.Bundles);
+			Assert.Empty(result.Metadata.VendorCodes);
+			Assert.Contains(
+				result.Metadata.Warnings,
+				w => w.Contains("Could not list vendor directories") && w.Contains(hostupdateDir));
+
+			// The empty-store case (Parse_EmptyStore_SucceedsWithNoBundlesAndAWarning)
+			// produces exactly one warning; an unreadable store must produce a second,
+			// distinguishing warning naming the enumeration failure -- not just the
+			// "not found" warning that an empty store would also emit.
+			Assert.True(
+				result.Metadata.Warnings.Count >= 2,
+				$"expected an enumeration-failure warning in addition to any consolidated-index warning, got: {string.Join(" | ", result.Metadata.Warnings)}");
+		}
+		finally
+		{
+			// Restore a permissive mode so the fixture's temp-directory cleanup in
+			// Dispose() can actually delete this subtree.
+			File.SetUnixFileMode(hostupdateDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+	}
+
 	// ----- fallback VIB parsing (no vibs/*.xml entries) --------------------------
 
 	[Fact]

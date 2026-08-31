@@ -91,7 +91,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 
 		List<EsxPatchStoreMetadataBundle> bundles = [];
 
-		foreach (string vendorDir in SafeEnumerateDirectories(hostupdateRoot))
+		foreach (string vendorDir in SafeEnumerateDirectories(hostupdateRoot, warnings))
 		{
 			string vendorCode = Path.GetFileName(vendorDir);
 
@@ -282,6 +282,17 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			warnings.Add($"Vendor '{vendorCode}': '{displayRelativePath}' is not a valid zip archive: {ex.Message}");
 			return new EsxPatchStoreMetadataBundle(vendorCode, contentKey, displayRelativePath, productId, version, channelName, []);
 		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			// The content-key read above already opened and hashed the file
+			// successfully; a failure here means it became unreadable in the
+			// window between that read and this one (concurrent vendor-tool sync
+			// deleting/locking it). Never let that escape -- it is exactly the
+			// kind of transient store condition this parser's "never throws"
+			// contract exists for.
+			warnings.Add($"Vendor '{vendorCode}': could not open '{displayRelativePath}' to read its VIB references: {ex.GetType().Name}: {ex.Message}");
+			return new EsxPatchStoreMetadataBundle(vendorCode, contentKey, displayRelativePath, productId, version, channelName, []);
+		}
 
 		return new EsxPatchStoreMetadataBundle(vendorCode, contentKey, displayRelativePath, productId, version, channelName, vibs);
 	}
@@ -462,7 +473,16 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		return document;
 	}
 
-	private static string[] SafeEnumerateDirectories(string path)
+	/// <summary>
+	/// Lists the immediate subdirectories of <paramref name="path"/>, or an empty
+	/// list with a warning if the directory cannot be enumerated (permissions,
+	/// transient I/O). This must never be silent: an unreadable
+	/// <c>hostupdate/</c> root is otherwise indistinguishable from a legitimately
+	/// empty one, and the caller's other warnings (e.g. "consolidated index not
+	/// found") would misattribute the failure to a missing file rather than a
+	/// denied directory listing.
+	/// </summary>
+	private static string[] SafeEnumerateDirectories(string path, List<string> warnings)
 	{
 		try
 		{
@@ -470,6 +490,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		}
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
 		{
+			warnings.Add($"Could not list vendor directories under '{path}': {ex.GetType().Name}: {ex.Message}");
 			return [];
 		}
 	}
