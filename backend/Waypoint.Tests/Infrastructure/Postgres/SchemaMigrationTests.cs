@@ -103,6 +103,7 @@ public sealed class SchemaMigrationTests
 		"esx_acquisition_subscriptions",
 		"download_retention_policies",
 		"download_retained_content_state",
+		"download_out_of_scope_content",
 		"oci_bundles",
 		"push_target_consumers",
 		"content_libraries",
@@ -465,8 +466,14 @@ public sealed class SchemaMigrationTests
 	/// <c>RetentionSweepService</c>'s doc comment), proven alongside a "must still
 	/// fail" negative by <c>RetentionSweepRunnerRoleGrantTests</c> (this repo's #556
 	/// convention) --
+	/// 0128 (issue #1440, epic #1182; slot 0128 -- the next free slot after
+	/// #1436's 0127): adds <c>download_out_of_scope_content</c> -- the
+	/// out-of-scope half of the review-list mechanism (the orphan half already
+	/// exists as <c>unknown_catalog_files</c>, 0100/#1488), same insert-or-touch,
+	/// no-delete-path shape. No new runner grants -- no consumer, runner or
+	/// otherwise, exists yet; real out-of-scope discovery is deferred to #1421 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 88;
+	private const int ExpectedMigrationCount = 89;
 
 	private readonly PostgresFixture _fixture;
 

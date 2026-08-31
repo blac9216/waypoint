@@ -316,6 +316,17 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.Downloads.IRetainedContentStateRepository>(new Downloads.RetainedContentStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IRetentionPolicyRepository>(new Downloads.RetentionPolicyRepository(connectionString));
 
+			// Issue #1440: the review-list mechanism (migration 0128) -- orphans
+			// (existing IUnknownCatalogFileRepository, resolved above) plus
+			// out-of-scope content, both API-process-owned (no runner consumer
+			// exists yet; real out-of-scope discovery is deferred to #1421, same
+			// pattern this file's own #1436 comment documents for the sweep).
+			services.AddSingleton<Waypoint.Core.Downloads.IReviewListService>(serviceProvider => new Downloads.ReviewListService(
+				connectionString,
+				serviceProvider.GetRequiredService<IUnknownCatalogFileRepository>(),
+				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
+				serviceProvider.GetRequiredService<IJobEventPublisher>()));
+
 			// Issue #241: depot-sync status is derived from the existing runs table
 			// (no dedicated appliance_state column), so this reads through the same
 			// connection string as the repository above rather than a separate table.
