@@ -294,6 +294,16 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IDepotEnrollmentRepository>(new Downloads.DepotEnrollmentRepository(connectionString));
 
+			// Issue #1436: #1406's own migration 0107 landed these two repositories'
+			// implementations without a DI registration -- there was no consumer yet
+			// (its own header: "no sweep job, no dial, no API surface"). #1436 is the
+			// first real consumer (RetentionSweepService, registered by
+			// AddWaypointExecution below), so both are registered here, same
+			// connection-string-gated composition root as every other Downloads-domain
+			// repository above.
+			services.AddSingleton<Waypoint.Core.Downloads.IRetainedContentStateRepository>(new Downloads.RetainedContentStateRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Downloads.IRetentionPolicyRepository>(new Downloads.RetentionPolicyRepository(connectionString));
+
 			// Issue #241: depot-sync status is derived from the existing runs table
 			// (no dedicated appliance_state column), so this reads through the same
 			// connection string as the repository above rather than a separate table.

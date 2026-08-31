@@ -91,7 +91,8 @@ public static class JobCapabilities
 		"tool-install",
 		"depot-enrollment",
 		"catalog-pull",
-		"binaries-download"
+		"binaries-download",
+		"retention-sweep"
 	};
 
 	/// <summary>

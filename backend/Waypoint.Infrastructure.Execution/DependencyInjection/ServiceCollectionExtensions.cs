@@ -134,6 +134,16 @@ public static class ServiceCollectionExtensions
 		// require to be mounted (ADR-0015), never compliance-runner.
 		services.AddSingleton<IJobHandler, Downloads.DepotEnrollmentJobHandler>();
 
+		// Issue #1436 (epic #1182): the retention grace-window auto-prune driver over
+		// #1406's download_retained_content_state/download_retention_policies model.
+		// RetentionSweepService (Waypoint.Infrastructure.Downloads) is registered here,
+		// not in AddWaypointInfrastructure, because it is only ever consumed by this
+		// runner-side job handler -- unlike the repositories it depends on
+		// (IRetainedContentStateRepository/IRetentionPolicyRepository/IDepotArtifactRepository),
+		// which are control-plane-shared and registered by AddWaypointInfrastructure.
+		services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService, Waypoint.Infrastructure.Downloads.RetentionSweepService>();
+		services.AddSingleton<IJobHandler, Downloads.RetentionSweepJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 		// Issue #738: resolves a vCenter execution item's frozen catalog execution

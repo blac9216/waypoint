@@ -42,6 +42,7 @@ public static class DownloadRunnerJobTypes
 		"download",
 		"tool-install",
 		"depot-enrollment",
-		"catalog-pull"
+		"catalog-pull",
+		"retention-sweep"
 	};
 }

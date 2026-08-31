@@ -85,6 +85,17 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 		return (Guid)result!;
 	}
 
+	/// <inheritdoc/>
+	public async Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE id = $1", connection);
+		command.Parameters.AddWithValue(id);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
 	public async Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(
 		DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken)
 	{

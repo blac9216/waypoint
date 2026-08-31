@@ -73,6 +73,7 @@ public sealed class CatalogPullJobHandlerTests
 	private sealed class UnreachableArtifactRepository : IDepotArtifactRepository
 	{
 		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 

@@ -35,6 +35,15 @@ public interface IDepotArtifactRepository
 	Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Single-row lookup by id. Added for issue #1436 (the retention sweep), which
+	/// resolves a <c>download_retained_content_state.depot_artifact_id</c> row to its
+	/// <see cref="DepotArtifact.ExternalId"/> (the depot-relative path a purge deletes)
+	/// -- no prior caller needed a by-id lookup, only the filtered/paginated
+	/// <see cref="ListAsync"/>. Returns <c>null</c> when no row has that id.
+	/// </summary>
+	Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Filtered, paginated list plus the filtered total (for <c>X-Total-Count</c> --
 	/// the count reflects the filter, not the whole table, per every other paginated
 	/// resource in this codebase).
