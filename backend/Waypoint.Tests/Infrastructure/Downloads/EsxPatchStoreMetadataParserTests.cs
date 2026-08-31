@@ -493,6 +493,37 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		Assert.Contains(result.Metadata.Warnings, w => w.Contains("not valid/safe XML"));
 	}
 
+	/// <summary>
+	/// Round-3 review's non-blocking flag, decided as degradation: a well-formed index
+	/// whose metadata entry carries no usable location drops that bundle just as the
+	/// malformed shapes do, so it must set
+	/// <see cref="EsxPatchStoreVendorHealthKind.UnresolvableEntry"/> -- otherwise both
+	/// of the reconciler's diffs draw conclusions from a bundle list that is short by
+	/// an entry the index itself still names.
+	/// </summary>
+	[Theory]
+	[InlineData("<metadataList><metadata><productId>ESXi900</productId><url></url></metadata></metadataList>", "neither a relativePath nor a url")]
+	[InlineData("<metadataList><metadata><productId>ESXi900</productId><url>vendor-dir/</url></metadata></metadataList>", "did not resolve to a filename")]
+	public void Parse_MetadataEntryWithNoUsableLocation_SetsUnresolvableEntryVendorHealth(string indexXml, string expectedWarningFragment)
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"), [("vib20/esx-update/pkg-a.vib", "aa".PadRight(64, '0'))]);
+
+		File.WriteAllText(Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"), indexXml);
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Empty(result.Metadata!.Bundles);
+		Assert.True(result.Metadata.RootReadable);
+		EsxPatchStoreVendorHealth health = Assert.Single(result.Metadata.VendorHealth);
+		Assert.Equal("vmw", health.VendorCode);
+		Assert.Equal(EsxPatchStoreVendorHealthKind.UnresolvableEntry, health.Kind);
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains(expectedWarningFragment));
+	}
+
 	[Fact]
 	public void Parse_HealthyStore_HasNoVendorHealthEntries()
 	{

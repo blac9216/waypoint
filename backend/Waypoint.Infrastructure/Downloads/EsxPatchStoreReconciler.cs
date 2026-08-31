@@ -81,6 +81,39 @@ namespace Waypoint.Infrastructure.Downloads;
 /// staying silent -- a degraded run is retried in full on the next pass, so this
 /// never permanently suppresses real missing-detection, only this run's.
 ///
+/// Round 3 found the gate wired into exactly one of the two loops that consume
+/// <see cref="EsxPatchStoreMetadata.Bundles"/> (finding F6). The orphan pass built its
+/// <c>referencedZipNames</c> set from the same untrusted bundle list and recorded every
+/// zip under a degraded vendor as a new orphan -- worse than the missing side, because
+/// #1452 surfaces orphan rows to an operator as explicit deletion candidates. Both
+/// loops are now gated identically: a degraded vendor's orphan scan (detection *and*
+/// auto-resolve) is skipped, a degraded root skips the whole orphan pass, and each skip
+/// surfaces on <see cref="EsxPatchStoreReconciliationReport.ReconcilerWarnings"/>.
+///
+/// Consumer audit of the parse result, round 3 (every site that reads
+/// <c>result</c>/<c>metadata</c>, so the "gated one loop, not the other" mistake cannot
+/// recur silently):
+/// <list type="bullet">
+/// <item><b>Index upsert loop</b> -- <i>no gate needed, by construction</i>. It is
+/// insert-or-update only: a degraded parse contributes a subset of the store's real
+/// bundles, and a bundle absent from that subset is never row-deleted (the table is the
+/// cumulative "should exist" model, AC1/AC3). A degraded run can therefore only fail to
+/// add a row, which the next healthy run adds; it can never remove or corrupt one. Each
+/// degraded-parse test pins this by asserting <c>CountIndexRows</c> unchanged.</item>
+/// <item><b>Missing diff</b> -- gated per-vendor and whole-run (round 2, F4/F5).</item>
+/// <item><b>Orphan diff</b> -- gated per-vendor and whole-run (round 3, F6).</item>
+/// <item><b>Missing/orphan auto-resolve</b> -- both live inside their gated loop, so a
+/// degraded scope resolves nothing either. Resolving is as much a conclusion drawn from
+/// the bundle list as opening is.</item>
+/// <item><b><see cref="EsxPatchStoreMetadata.VendorCodes"/></b> (the orphan pass's
+/// iteration source) -- read only to pick directories to scan, and the scan itself is
+/// gated; a short vendor list under a degraded parse narrows this run's work, never its
+/// conclusions.</item>
+/// <item><b><see cref="EsxPatchStoreMetadata.Warnings"/> / <c>Layout</c> /
+/// <c>HostupdateRoot</c></b> -- reporting and path resolution only; no discrepancy
+/// state is derived from them.</item>
+/// </list>
+///
 /// Orphan detection separately confines each vendor code from the store's XML to a
 /// single path segment resolving strictly under <c>HostupdateRoot</c> (the
 /// <c>ContentLibraryRepository.ResolveDiskPath</c> pattern, #1391) before it is ever
@@ -179,8 +212,34 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 		}
 
 		int newOrphan = 0;
-		foreach (string vendorCode in metadata.VendorCodes)
+		HashSet<string> vendorsWithSkippedOrphanScan = new(StringComparer.Ordinal);
+		if (rootDegraded)
 		{
+			// Round-3 review finding F6, whole-run half: with the hostupdate root
+			// unenumerable, EVERY vendor's bundle list is empty, so every zip in the
+			// store would open as an orphan -- and #1452 surfaces orphan rows to an
+			// operator as explicit deletion candidates. "Unreferenced" is not a
+			// conclusion this run is entitled to draw.
+			reconcilerWarnings.Add(
+				"Orphan-discrepancy detection skipped entirely this run: the parse could not list vendor directories under this store's hostupdate root, so no zip on disk can be shown to be unreferenced. See ParserWarnings for the read failure; a healthy parse will detect real orphans on the next run.");
+		}
+
+		IReadOnlyList<string> orphanScanVendorCodes = rootDegraded ? [] : metadata.VendorCodes;
+		foreach (string vendorCode in orphanScanVendorCodes)
+		{
+			if (degradedVendorCodes.Contains(vendorCode))
+			{
+				// Round-3 review finding F6, per-vendor half: this vendor's index could
+				// not be read this run, so `referencedZipNames` below would be empty or
+				// partial and every zip under it would be recorded as a new orphan --
+				// the same transient-to-persistent conversion (#1656) the missing side
+				// is gated against, with a worse blast radius. The auto-resolve is
+				// skipped with it: resolving is equally a conclusion drawn from a
+				// bundle list this run cannot trust.
+				vendorsWithSkippedOrphanScan.Add(vendorCode);
+				continue;
+			}
+
 			string? vendorDir = TryResolveVendorDir(metadata.HostupdateRoot, vendorCode, reconcilerWarnings);
 			if (vendorDir is null || !Directory.Exists(vendorDir))
 			{
@@ -234,6 +293,15 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 			}
 		}
 
+		if (!rootDegraded && vendorsWithSkippedOrphanScan.Count > 0)
+		{
+			string orphanVendorDetail = string.Join(", ", vendorsWithSkippedOrphanScan
+				.Order(StringComparer.Ordinal)
+				.Select(code => $"{code} ({DescribeVendorDegradation(metadata.VendorHealth, code)})"));
+			reconcilerWarnings.Add(
+				$"Orphan-discrepancy detection skipped for vendor(s) {orphanVendorDetail}: that vendor's parse this run left it degraded, so the zips on its disk cannot be shown to be unreferenced by an index this run could not read. See ParserWarnings for the read failure; a healthy parse of that vendor will detect real orphans on a later run.");
+		}
+
 		return new EsxPatchStoreReconciliationReport(true, null, indexedCount, newMissing, newOrphan, resolved, metadata.Warnings, reconcilerWarnings);
 	}
 
@@ -282,6 +350,7 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 		EsxPatchStoreVendorHealthKind.EmptyIndex => "its consolidated metadata index is empty",
 		EsxPatchStoreVendorHealthKind.MalformedIndex => "its consolidated metadata index is not valid/safe XML (or exceeds the parse size bound)",
 		EsxPatchStoreVendorHealthKind.UnreadableZip => "could not read a metadata zip it names",
+		EsxPatchStoreVendorHealthKind.UnresolvableEntry => "one of its metadata entries carries no usable zip location",
 		_ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
 	};
 

@@ -201,7 +201,9 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// read means nothing was lost); every case below it that leaves this vendor with
 	/// zero or partial bundles despite reaching this point appends the matching
 	/// <see cref="EsxPatchStoreVendorHealth"/> entry at the exact site that also emits
-	/// today's warning text for humans (round-2 review finding F4).
+	/// today's warning text for humans (round-2 review finding F4). The one remaining
+	/// unflagged skip is a metadata entry naming a zip that is not on disk: that is
+	/// genuine absence and is precisely what missing-detection must still see.
 	/// </summary>
 	private static void ParseVendorMetadataIndex(
 		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
@@ -226,7 +228,15 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			string? rawLocation = FindValue(metadataElement, "relativePath") ?? FindValue(metadataElement, "url");
 			if (string.IsNullOrWhiteSpace(rawLocation))
 			{
+				// Round-3 review, deliberate decision: this is degradation, not genuine
+				// content change. The index names an entry whose location we cannot
+				// read, so we do not know which zip it referred to -- exactly the
+				// "cannot conclude" state the health contract exists for. Left ungated
+				// it would produce BOTH a false missing row (the entry's bundle never
+				// reaches Bundles) and a false orphan row (the zip it named stays
+				// unreferenced on disk).
 				warnings.Add($"Vendor '{vendorCode}': a metadata entry has neither a relativePath nor a url -- skipped.");
+				vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.UnresolvableEntry));
 				continue;
 			}
 
@@ -236,7 +246,11 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			string fileName = Path.GetFileName(rawLocation.Trim().Replace('\\', '/'));
 			if (string.IsNullOrWhiteSpace(fileName))
 			{
+				// Same decision as the no-location branch above: an entry that is
+				// present but unresolvable is a bundle this run could not read, not a
+				// bundle the store no longer has.
 				warnings.Add($"Vendor '{vendorCode}': metadata entry location '{rawLocation}' did not resolve to a filename -- skipped.");
+				vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.UnresolvableEntry));
 				continue;
 			}
 

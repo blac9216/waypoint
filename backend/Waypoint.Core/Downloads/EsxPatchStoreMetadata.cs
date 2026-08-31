@@ -89,6 +89,16 @@ public enum EsxPatchStoreVendorHealthKind
 
 	/// <summary>A metadata zip the vendor's index names could not be opened/read (the zip's bytes could not even be hashed for its content key).</summary>
 	UnreadableZip,
+
+	/// <summary>
+	/// The vendor's index is well-formed but one of its metadata entries carries no
+	/// usable location -- neither a <c>relativePath</c> nor a <c>url</c>, or a
+	/// location that does not resolve to a filename. Round-3 review's non-blocking
+	/// flag, decided deliberately as degradation rather than content change: the
+	/// entry exists, so the vendor's real bundle set is larger than what this run
+	/// resolved, and the zip that entry named cannot be recognised as referenced.
+	/// </summary>
+	UnresolvableEntry,
 }
 
 /// <summary>

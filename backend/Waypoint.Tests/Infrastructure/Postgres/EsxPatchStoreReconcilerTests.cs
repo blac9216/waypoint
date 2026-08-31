@@ -370,6 +370,15 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 			(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
 			Assert.Equal(0, count);
 
+			// Round-3 review finding F6: the orphan side of the same degraded parse.
+			// The vendor's index is unreadable, so metadata-a.zip -- a zip that index
+			// genuinely references -- must NOT be recorded as an orphan (an operator
+			// deletion candidate via #1452).
+			Assert.Equal(0, secondReport.NewOrphanCount);
+			Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped") && w.Contains("vmw"));
+			(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+			Assert.Equal(0, orphanCount);
+
 			// The index row this store already had for the vendor's bundle survives
 			// untouched -- the degraded run neither opened a false missing row nor
 			// dropped the prior index entry.
@@ -417,6 +426,14 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 
 		(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
 		Assert.Equal(0, count);
+
+		// Round-3 review finding F6, the reviewer's own probe scenario: before the
+		// orphan gate this run recorded NewOrphanCount == 1 for 'vmw/metadata-a.zip',
+		// a zip the truncated index genuinely references. Zero is the whole point.
+		Assert.Equal(0, secondReport.NewOrphanCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped") && w.Contains("vmw"));
+		(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, orphanCount);
 		Assert.Equal(1, await CountIndexRowsAsync());
 	}
 
@@ -451,6 +468,13 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 
 		(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
 		Assert.Equal(0, count);
+
+		// Round-3 review finding F6 on the third degraded shape: a half-written index
+		// is equally no basis for calling the vendor's zips unreferenced.
+		Assert.Equal(0, secondReport.NewOrphanCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped") && w.Contains("vmw"));
+		(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, orphanCount);
 		Assert.Equal(1, await CountIndexRowsAsync());
 	}
 
@@ -498,6 +522,18 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 			(int count, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
 			Assert.Equal(0, count);
 
+			// Round-3 review finding F6, whole-run half. The mode-0200 root makes
+			// Directory.Exists(vendorDir) false, so the ungated loop happened to be
+			// inert here -- but the reviewer's IOException-from-GetDirectories variant
+			// leaves the tree traversable and would orphan the entire store. The gate,
+			// not the accident of this fixture's permissions, is what is asserted.
+			Assert.Equal(0, secondReport.NewOrphanCount);
+			Assert.Contains(
+				secondReport.ReconcilerWarnings,
+				w => w.Contains("Orphan-discrepancy detection skipped entirely this run"));
+			(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+			Assert.Equal(0, orphanCount);
+
 			// The index row this store already had survives untouched -- a degraded
 			// whole-run skip neither opens a false missing row nor drops the prior
 			// index entry.
@@ -507,6 +543,50 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		{
 			File.SetUnixFileMode(_hostupdateDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 		}
+	}
+
+	// ----- round-3 review: the last two bundle-dropping parser paths -------------
+
+	/// <summary>
+	/// Round-3 review's non-blocking flag, decided deliberately as degradation: a
+	/// well-formed vendor index carrying a metadata entry with no usable location
+	/// (neither <c>relativePath</c> nor <c>url</c>, or one that does not resolve to a
+	/// filename) drops that bundle from the parse exactly as the malformed-index shapes
+	/// do. It now sets <see cref="EsxPatchStoreVendorHealthKind.UnresolvableEntry"/>, so
+	/// both diffs gate on it -- otherwise the entry's zip is a false missing row and the
+	/// zip still sitting on disk is a false orphan row from the same run.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_MetadataEntryWithNoUsableLocation_GatesBothDiffsForThatVendor()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// Same entry, location field emptied -- valid XML, unusable entry.
+		File.WriteAllText(
+			Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"),
+			"<metadataList><metadata><productId>ESXi900</productId><url></url></metadata></metadataList>");
+
+		EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(secondReport.Succeeded);
+		Assert.Equal(0, secondReport.IndexedCount);
+		Assert.Contains(secondReport.ParserWarnings, w => w.Contains("neither a relativePath nor a url"));
+		Assert.Equal(0, secondReport.NewMissingCount);
+		Assert.Equal(0, secondReport.NewOrphanCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Missing-discrepancy detection skipped") && w.Contains("no usable zip location"));
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped") && w.Contains("no usable zip location"));
+
+		(int missingCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+		Assert.Equal(0, missingCount);
+		(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, orphanCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
 	}
 
 	// ----- round-2 review finding F5: pin the parser/reconciler health contract ----
@@ -531,6 +611,7 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 			EsxPatchStoreVendorHealthKind.EmptyIndex,
 			EsxPatchStoreVendorHealthKind.MalformedIndex,
 			EsxPatchStoreVendorHealthKind.UnreadableZip,
+			EsxPatchStoreVendorHealthKind.UnresolvableEntry,
 		];
 
 		Assert.Equal(expected, Enum.GetValues<EsxPatchStoreVendorHealthKind>());
