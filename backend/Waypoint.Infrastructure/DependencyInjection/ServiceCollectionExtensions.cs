@@ -399,6 +399,10 @@ public static class ServiceCollectionExtensions
 				ContentLibraryOptions options = serviceProvider.GetRequiredService<IOptions<ContentLibraryOptions>>().Value;
 				return new ContentLibraryRepository(connectionString, options.RootPath);
 			});
+			// Issue #1393: the VCSP protocol writer (epic #1185). Stateless beyond the
+			// system clock -- every library/path it needs arrives as call arguments, so
+			// one shared instance is safe.
+			services.AddSingleton<Waypoint.Core.ContentLibraries.IContentLibraryWriter, Waypoint.Infrastructure.ContentLibraries.VcspContentLibraryWriter>();
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
