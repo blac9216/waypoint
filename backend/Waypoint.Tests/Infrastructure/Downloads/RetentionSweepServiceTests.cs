@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Pagination;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
@@ -99,10 +101,14 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
-	private RetentionSweepService CreateService(FakeTimeProvider clock, RecordingEventPublisher? events = null) => new(
+	private RetentionSweepService CreateService(
+		FakeTimeProvider clock,
+		RecordingEventPublisher? events = null,
+		IDepotArtifactRepository? artifacts = null,
+		IRetentionPolicyRepository? policies = null) => new(
 		_states,
-		_policies,
-		new DepotArtifactRepository(_fixture.ConnectionString),
+		policies ?? _policies,
+		artifacts ?? new DepotArtifactRepository(_fixture.ConnectionString),
 		events ?? new RecordingEventPublisher(),
 		Options.Create(new CatalogOptions { DepotPath = _depotRoot }),
 		NullLogger<RetentionSweepService>.Instance,
@@ -120,6 +126,49 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 			}
 			return Task.CompletedTask;
 		}
+	}
+
+	/// <summary>
+	/// Wraps a real <see cref="IDepotArtifactRepository"/> but reports <see cref="Missing"/>
+	/// as not-found from <see cref="GetByIdAsync"/> regardless of what the underlying
+	/// table actually holds -- lets a test force the "missing depot_artifacts row" purge
+	/// failure without needing to defeat the real FK (depot_artifact_id references
+	/// depot_artifacts(id) ON DELETE CASCADE, so that row cannot genuinely go missing out
+	/// from under a still-existing retained-content-state row in real Postgres).
+	/// </summary>
+	private sealed class MissingArtifactRepository(IDepotArtifactRepository inner, Guid missing) : IDepotArtifactRepository
+	{
+		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) =>
+			inner.UpsertAsync(artifact, cancellationToken);
+
+		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
+			id == missing ? Task.FromResult<DepotArtifact?>(null) : inner.GetByIdAsync(id, cancellationToken);
+
+		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
+			inner.ListAsync(filter, page, cancellationToken);
+	}
+
+	/// <summary>
+	/// Wraps a real <see cref="IRetentionPolicyRepository"/> but reports <see cref="Dangling"/>
+	/// as unresolvable from <see cref="GetAsync(Guid, CancellationToken)"/> -- lets a test
+	/// force the "row's explicit policy_id no longer resolves" purge-evaluation failure
+	/// without needing to defeat the real FK (policy_id references
+	/// download_retention_policies(id) ON DELETE RESTRICT, so a genuinely dangling
+	/// policy_id cannot be created in real Postgres).
+	/// </summary>
+	private sealed class DanglingPolicyRepository(IRetentionPolicyRepository inner, Guid dangling) : IRetentionPolicyRepository
+	{
+		public Task<Guid> UpsertAsync(string scopeKey, int gracePeriodDays, int graceMaxRefreshes, string manualDownloadDialDefault, CancellationToken cancellationToken) =>
+			inner.UpsertAsync(scopeKey, gracePeriodDays, graceMaxRefreshes, manualDownloadDialDefault, cancellationToken);
+
+		public Task<RetentionPolicy?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+			id == dangling ? Task.FromResult<RetentionPolicy?>(null) : inner.GetAsync(id, cancellationToken);
+
+		public Task<RetentionPolicy?> GetByScopeKeyAsync(string scopeKey, CancellationToken cancellationToken) =>
+			inner.GetByScopeKeyAsync(scopeKey, cancellationToken);
+
+		public Task<IReadOnlyList<RetentionPolicy>> ListAsync(CancellationToken cancellationToken) =>
+			inner.ListAsync(cancellationToken);
 	}
 
 	[Fact]
@@ -326,6 +375,249 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		Assert.False(outcome.Purged);
 		Assert.NotNull(outcome.Error);
+	}
+
+	// -- Finding 1 (round 1 review): a failed physical delete must not transition the
+	// row to the terminal `purged` state, and the error must reach the outcome. One
+	// test per failure cause DeletePhysicalFileAsync can produce.
+
+	[Fact]
+	public async Task PurgeImmediatelyAsync_UndeletableFile_LeavesRowNotPurgedAndSurfacesErrorThenIsRetryable()
+	{
+		if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+		{
+			// POSIX-permission-shaped trick, same skip PurgeJobHandlerTests uses --
+			// this repo's CI targets Linux containers (deploy/*, docs/testing.md).
+			return;
+		}
+
+		string lockedDirectory = Path.Combine(_depotRoot, "locked");
+		Directory.CreateDirectory(lockedDirectory);
+		string relativePath = "locked/undeletable-target";
+		File.WriteAllText(Path.Combine(_depotRoot, relativePath), "fixture bytes");
+		// Removing write on the *parent* directory (not the file) is what blocks
+		// unlink() on Linux -- same idiom PurgeJobHandlerTests.ExecuteAsync_UndeletableFile_ReportsFailureAndIsRetryable uses.
+		File.SetUnixFileMode(lockedDirectory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+
+		try
+		{
+			Guid artifactId = await InsertDepotArtifactAsync(relativePath);
+			Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+			RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+			RetentionPurgeOutcome outcome = await service.PurgeImmediatelyAsync(stateId, "operator-1", "policy violation", CancellationToken.None);
+
+			Assert.False(outcome.Purged);
+			Assert.NotNull(outcome.Error);
+			Assert.True(File.Exists(Path.Combine(_depotRoot, relativePath))); // bytes never removed
+
+			RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+			Assert.NotEqual(RetainedContentStates.Purged, state!.State); // never landed on the terminal state
+
+			// Revisitable: restore permissions (an operator fix, or the transient
+			// condition clearing) and retry the exact same call -- must now succeed.
+			File.SetUnixFileMode(lockedDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+			RetentionPurgeOutcome retryOutcome = await service.PurgeImmediatelyAsync(stateId, "operator-1", "policy violation", CancellationToken.None);
+
+			Assert.True(retryOutcome.Purged);
+			Assert.Null(retryOutcome.Error);
+			Assert.False(File.Exists(Path.Combine(_depotRoot, relativePath)));
+			RetainedContentState? finalState = await _states.GetAsync(stateId, CancellationToken.None);
+			Assert.Equal(RetainedContentStates.Purged, finalState!.State);
+		}
+		finally
+		{
+			File.SetUnixFileMode(lockedDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+	}
+
+	[Fact]
+	public async Task PurgeImmediatelyAsync_MissingDepotArtifactRow_LeavesRowNotPurgedAndSurfacesError()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("missing-artifact-row-target");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(
+			new FakeTimeProvider(DateTimeOffset.UtcNow),
+			artifacts: new MissingArtifactRepository(new DepotArtifactRepository(_fixture.ConnectionString), artifactId));
+
+		RetentionPurgeOutcome outcome = await service.PurgeImmediatelyAsync(stateId, "operator-1", null, CancellationToken.None);
+
+		Assert.False(outcome.Purged);
+		Assert.NotNull(outcome.Error);
+		Assert.Contains("not found", outcome.Error, StringComparison.OrdinalIgnoreCase);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.NotEqual(RetainedContentStates.Purged, state!.State);
+	}
+
+	[Fact]
+	public async Task PurgeImmediatelyAsync_PathEscapesDepotRoot_IsRefusedRowNotPurgedNothingOutsideRootTouched()
+	{
+		// A depot_artifacts row whose relative_path resolves outside the configured
+		// depot root -- the defense-in-depth confinement check DeletePhysicalFileAsync
+		// runs before any File.Delete.
+		string escapeTargetDirectory = Directory.CreateTempSubdirectory("waypoint-retention-escape-target-").FullName;
+		string escapeTargetFile = Path.Combine(escapeTargetDirectory, "outside-the-depot-root");
+		File.WriteAllText(escapeTargetFile, "must never be touched");
+
+		try
+		{
+			string traversal = Path.GetRelativePath(_depotRoot, escapeTargetFile);
+			Guid artifactId = await InsertDepotArtifactAsync(traversal);
+			Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+			RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+			RetentionPurgeOutcome outcome = await service.PurgeImmediatelyAsync(stateId, "operator-1", null, CancellationToken.None);
+
+			Assert.False(outcome.Purged);
+			Assert.NotNull(outcome.Error);
+			Assert.Contains("outside the configured depot root", outcome.Error);
+			Assert.True(File.Exists(escapeTargetFile)); // the confinement refusal actually held
+
+			RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+			Assert.NotEqual(RetainedContentStates.Purged, state!.State);
+		}
+		finally
+		{
+			Directory.Delete(escapeTargetDirectory, recursive: true);
+		}
+	}
+
+	[Fact]
+	public async Task RunSweepAsync_AutoPruneDeleteFailure_ReportedAsErrorNotCountedAsPruned()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("auto-prune-delete-failure-target");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(
+			new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), // window long elapsed
+			artifacts: new MissingArtifactRepository(new DepotArtifactRepository(_fixture.ConnectionString), artifactId));
+
+		RetentionSweepReport report = await service.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned);
+		Assert.NotEmpty(report.Errors);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.NotEqual(RetainedContentStates.Purged, state!.State);
+	}
+
+	// -- Finding 4 (round 1 review): a single clock source for the grace-window
+	// elapsed check, plus the exactly-at-expiry / one-tick-before boundary.
+
+	[Fact]
+	public async Task RunSweepAsync_AutoPrune_ExactlyAtExpiryPrunesOneTickBeforeDoesNot()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 2, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		// grace_started_at round-trips through Postgres timestamptz, whose finest
+		// resolution is one microsecond (10 ticks) -- truncate `start` to a
+		// microsecond boundary up front so the DB round-trip cannot silently shift it,
+		// and treat "one tick before" as "one microsecond before" (10 ticks), the
+		// finest offset the storage layer can actually distinguish.
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		DateTimeOffset start = now.AddTicks(-(now.Ticks % 10));
+
+		Guid exactArtifactId = await InsertDepotArtifactAsync("boundary-exactly-at-expiry");
+		Guid exactStateId = await _states.EnsureTrackedAsync(exactArtifactId, null, CancellationToken.None);
+		Guid beforeArtifactId = await InsertDepotArtifactAsync("boundary-one-tick-before-expiry");
+		Guid beforeStateId = await _states.EnsureTrackedAsync(beforeArtifactId, null, CancellationToken.None);
+		WriteDepotFile("boundary-exactly-at-expiry");
+		WriteDepotFile("boundary-one-tick-before-expiry");
+
+		// Both candidates enter grace through the service itself (not the repository
+		// directly), stamped by the same injected clock the later elapsed check reads
+		// -- proving the single-time-source fix, not just the boundary arithmetic.
+		RetentionSweepService atEntry = CreateService(new FakeTimeProvider(start));
+		await atEntry.RunSweepAsync(new RetentionSweepRequest([exactArtifactId, beforeArtifactId], ListingVerified: true), CancellationToken.None);
+
+		DateTimeOffset expiry = start.AddDays(2);
+
+		RetentionSweepService oneTickBefore = CreateService(new FakeTimeProvider(expiry.AddTicks(-10)));
+		RetentionSweepReport reportBefore = await oneTickBefore.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+		Assert.Equal(0, reportBefore.AutoPruned);
+
+		RetentionSweepService exactlyAtExpiry = CreateService(new FakeTimeProvider(expiry));
+		RetentionSweepReport reportAtExpiry = await exactlyAtExpiry.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+		Assert.Equal(2, reportAtExpiry.AutoPruned); // both due the instant the window elapses
+
+		RetainedContentState? exactState = await _states.GetAsync(exactStateId, CancellationToken.None);
+		RetainedContentState? beforeState = await _states.GetAsync(beforeStateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, exactState!.State);
+		Assert.Equal(RetainedContentStates.Purged, beforeState!.State);
+	}
+
+	// -- Finding 3 (round 1 review): RetentionSweepRequest.ScopeKey resolves a policy
+	// for newly-entering-grace candidates instead of being read-and-ignored.
+
+	[Fact]
+	public async Task RunSweepAsync_EntryPass_ResolvesScopeKeyToPolicyAndRecordsItOnTheRow()
+	{
+		Guid scopedPolicyId = await _policies.UpsertAsync("scope-a", gracePeriodDays: 7, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("scope-key-resolution-candidate");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([artifactId], ListingVerified: true, ScopeKey: "scope-a"), CancellationToken.None);
+
+		Assert.Equal(1, report.EnteredGrace);
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(scopedPolicyId, state!.PolicyId);
+	}
+
+	[Fact]
+	public async Task RunSweepAsync_EntryPass_UnresolvableScopeKeyFallsBackToDefaultPolicy()
+	{
+		Guid defaultPolicyId = await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 30, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("unresolvable-scope-key-candidate");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([artifactId], ListingVerified: true, ScopeKey: "no-such-scope"), CancellationToken.None);
+
+		Assert.Equal(1, report.EnteredGrace);
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(defaultPolicyId, state!.PolicyId);
+	}
+
+	// -- Finding 5 (round 1 review): a dangling explicit policy_id is a surfaced
+	// error, never a silent substitution of the Default scope's (possibly shorter)
+	// window.
+
+	[Fact]
+	public async Task RunSweepAsync_AutoPrune_DanglingPolicyId_SurfacesErrorAndDoesNotSubstituteDefault()
+	{
+		// A short Default window that WOULD prune immediately if silently substituted
+		// -- proving this is a real substitution-vs-error distinction, not a no-op.
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+		Guid explicitPolicyId = await _policies.UpsertAsync("scope-with-dangling-reference", gracePeriodDays: 90, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("dangling-policy-candidate");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, explicitPolicyId, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(
+			new FakeTimeProvider(DateTimeOffset.UtcNow.AddDays(5)), // past the (short) Default window, within the row's real 90-day one
+			policies: new DanglingPolicyRepository(_policies, explicitPolicyId));
+
+		RetentionSweepReport report = await service.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned); // not silently pruned against the Default window
+		Assert.Contains(report.Errors, error => error.Contains(explicitPolicyId.ToString()));
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not purged
 	}
 
 	private void WriteDepotFile(string relativePath) =>

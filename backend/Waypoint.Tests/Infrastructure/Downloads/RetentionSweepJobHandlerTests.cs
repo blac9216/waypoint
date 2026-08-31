@@ -94,6 +94,28 @@ public sealed class RetentionSweepJobHandlerTests
 	}
 
 	[Fact]
+	public async Task ExecuteAsync_SweepShape_MalformedCandidateId_FailsBeforeRunningSweep_ZeroSideEffects()
+	{
+		// One malformed guid alongside an otherwise-valid one -- finding 2 (round 1
+		// review): the whole payload must be rejected before RunSweepAsync is ever
+		// called, not run destructively first and reported afterwards.
+		Guid validCandidateId = Guid.NewGuid();
+		FakeSweepService service = new()
+		{
+			SweepResult = new RetentionSweepReport(false, null, EnteredGrace: 1, AutoPruned: 1, UntrackedCandidatesSkipped: 0, Errors: []),
+		};
+		RetentionSweepJobHandler handler = CreateHandler(service);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor($$"""{"candidate_depot_artifact_ids": ["{{validCandidateId}}", "not-a-guid"], "listing_verified": true}"""),
+			CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("not-a-guid", outcome.Note);
+		Assert.Null(service.LastRequest); // RunSweepAsync was never called -- zero side effects
+	}
+
+	[Fact]
 	public async Task ExecuteAsync_SweepShape_PassesListingVerifiedAndCandidatesThrough()
 	{
 		Guid candidateId = Guid.NewGuid();

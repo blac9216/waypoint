@@ -57,6 +57,31 @@ public interface IRetainedContentStateRepository
 	Task TransitionAsync(Guid id, string toState, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Same as <see cref="TransitionAsync(Guid, string, CancellationToken)"/>, but
+	/// stamps <c>grace_started_at</c>/<c>purged_at</c> with the caller-supplied
+	/// <paramref name="occurredAt"/> instead of the database's own <c>now()</c> --
+	/// added for #1436's retention sweep, which must evaluate a grace window's
+	/// elapsed time against the same clock it used to start that window (an
+	/// app-clock-stamped start compared against a DB-clock-stamped start drifts under
+	/// DB/app clock skew, in a destructive direction). Callers that do not need
+	/// single-source-of-truth clock consistency (nothing outside the sweep does today)
+	/// keep using the three-argument overload, which is unaffected by this one.
+	/// </summary>
+	Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Sets <c>policy_id</c> on the row identified by <paramref name="id"/> to
+	/// <paramref name="policyId"/>, independent of any state transition -- added for
+	/// #1436's retention sweep, which resolves a <see cref="RetentionSweepRequest.ScopeKey"/>-keyed
+	/// policy for a candidate entering grace and must record that resolution on the
+	/// row so a later auto-prune pass evaluates it against the same policy. Does not
+	/// validate <paramref name="policyId"/> against <c>download_retention_policies</c>
+	/// itself -- the caller resolves it first (<c>policy_id</c>'s own FK constraint is
+	/// the backstop).
+	/// </summary>
+	Task SetPolicyAsync(Guid id, Guid policyId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Pins the content identified by <paramref name="id"/> (moves it to
 	/// <see cref="RetainedContentStates.Pinned"/>, recording who and an optional
 	/// note). Throws <see cref="InvalidOperationException"/> when

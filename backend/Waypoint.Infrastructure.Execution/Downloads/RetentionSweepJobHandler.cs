@@ -30,7 +30,11 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <c>listing_verified</c> is required and has no default -- an omitted or malformed
 /// value fails the job rather than silently defaulting to either polarity, since
 /// defaulting to <c>true</c> would defeat the partial-listing safety contract and
-/// defaulting to <c>false</c> would silently no-op every unlabelled caller.
+/// defaulting to <c>false</c> would silently no-op every unlabelled caller. Every
+/// entry in <c>candidate_depot_artifact_ids</c> is parsed and validated before the
+/// sweep runs at all -- a payload with even one malformed guid is rejected up front,
+/// with zero deletions or state transitions, rather than running the (destructive)
+/// sweep first and reporting the parse failure afterwards.
 ///
 /// <b>Immediate purge</b> (skips the grace window for named rows, delegated to
 /// <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> -- the trigger #1453's
@@ -152,6 +156,18 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 			}
 		}
 
+		// Every candidate guid must parse before the sweep runs at all -- the sweep
+		// deletes real depot bytes, so a malformed payload (one bad guid among
+		// otherwise-valid ones) must fail fast with zero side effects rather than
+		// executing the full sweep (grace transitions, auto-prune deletions included)
+		// and only then reporting the parse failure. Same fail-fast contract as the
+		// `listing_verified` and `actor` gates above.
+		if (parseErrors.Count > 0)
+		{
+			return JobExecutionOutcome.Failed(
+				$"retention-sweep payload has {parseErrors.Count} invalid candidate depot artifact id(s), rejected before the sweep ran: {string.Join("; ", parseErrors)}");
+		}
+
 		RetentionSweepReport report = await _sweep.RunSweepAsync(
 			new RetentionSweepRequest(candidates, payload.ListingVerified.Value, payload.ScopeKey), cancellationToken).ConfigureAwait(false);
 
@@ -161,15 +177,14 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 			return JobExecutionOutcome.Succeeded(report.SkippedReason);
 		}
 
-		List<string> errors = [.. parseErrors, .. report.Errors];
 		string summary =
 			$"retention sweep entered {report.EnteredGrace} into grace, auto-pruned {report.AutoPruned}" +
 			(report.UntrackedCandidatesSkipped > 0 ? $", skipped {report.UntrackedCandidatesSkipped} untracked candidate(s)" : string.Empty) +
 			".";
 
-		if (errors.Count > 0)
+		if (report.Errors.Count > 0)
 		{
-			return JobExecutionOutcome.Failed($"{summary} {errors.Count} error(s): {string.Join("; ", errors)}");
+			return JobExecutionOutcome.Failed($"{summary} {report.Errors.Count} error(s): {string.Join("; ", report.Errors)}");
 		}
 
 		return JobExecutionOutcome.Succeeded(summary);
