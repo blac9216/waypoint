@@ -25,7 +25,8 @@ namespace Waypoint.Core.Jobs;
 /// (400 on an unknown value, same "never silently match zero rows and look like empty
 /// history" posture <see cref="JobEventTypes"/>'s <c>kind</c> filter established).
 /// <see cref="Waypoint.Tests.Core.Jobs.RunTypesConstraintDriftTests"/> asserts this list
-/// stays byte-identical to the CHECK constraint the migrations produce.
+/// stays byte-identical to the CHECK constraint the migrations produce. 0127 (issue
+/// #1436) appended <c>retention-sweep</c>.
 /// </summary>
 public static class RunTypes
 {
@@ -46,12 +47,13 @@ public static class RunTypes
 	public const string DepotEnrollment = "depot-enrollment";
 	public const string CatalogPull = "catalog-pull";
 	public const string BinariesDownload = "binaries-download";
+	public const string RetentionSweep = "retention-sweep";
 
 	public static readonly IReadOnlyList<string> All =
 	[
 		Scan, Remediate, Discover, Download, CatalogIndex, BundleExport, BundleImport,
 		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge, DepotEnrollment, CatalogPull,
-		BinariesDownload,
+		BinariesDownload, RetentionSweep,
 	];
 
 	public static bool IsValid(string runType) => All.Contains(runType, StringComparer.Ordinal);

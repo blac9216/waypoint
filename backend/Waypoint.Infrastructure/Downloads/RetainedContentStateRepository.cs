@@ -96,7 +96,10 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
 	}
 
-	public async Task TransitionAsync(Guid id, string toState, CancellationToken cancellationToken)
+	public Task TransitionAsync(Guid id, string toState, CancellationToken cancellationToken) =>
+		TransitionAsync(id, toState, DateTimeOffset.UtcNow, cancellationToken);
+
+	public async Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(toState);
 
@@ -115,17 +118,29 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 			"""
 			UPDATE download_retained_content_state SET
 				state = $1,
-				grace_started_at = CASE WHEN $1 = 'grace' THEN now() ELSE grace_started_at END,
-				purged_at = CASE WHEN $1 = 'purged' THEN now() ELSE purged_at END
+				grace_started_at = CASE WHEN $1 = 'grace' THEN $3 ELSE grace_started_at END,
+				purged_at = CASE WHEN $1 = 'purged' THEN $3 ELSE purged_at END
 			WHERE id = $2
 			""", connection, transaction))
 		{
 			command.Parameters.AddWithValue(toState);
 			command.Parameters.AddWithValue(id);
+			command.Parameters.AddWithValue(occurredAt);
 			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	public async Task SetPolicyAsync(Guid id, Guid policyId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"UPDATE download_retained_content_state SET policy_id = $1 WHERE id = $2", connection);
+		command.Parameters.AddWithValue(policyId);
+		command.Parameters.AddWithValue(id);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task PinAsync(Guid id, string pinnedBy, string? note, CancellationToken cancellationToken)

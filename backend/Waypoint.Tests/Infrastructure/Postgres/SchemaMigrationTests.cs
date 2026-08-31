@@ -434,8 +434,19 @@ public sealed class SchemaMigrationTests
 	/// turns out to need one, ships its own GRANT migration, 0100/#1484 precedent) --
 	/// proven by <c>RunnerRoleGrantDriftTests</c>' negative-direction cases for both
 	/// runner roles (SELECT and INSERT) --
+	/// 0127 (issue #1436, epic #1182; slot 0127 -- the next free slot named on epic
+	/// #1182's 2026-08-30 decision thread): no new tables -- widens
+	/// <c>jobs_job_type_check</c>/<c>runs_run_type_check</c> to admit
+	/// <c>retention-sweep</c> (the sweep's own job type, <c>RetentionSweepJobHandler</c>)
+	/// and grants <c>waypoint_download_runner</c> exactly <c>SELECT, UPDATE</c> on
+	/// <c>download_retained_content_state</c> and <c>SELECT</c> on
+	/// <c>download_retention_policies</c> -- the two operations the sweep actually
+	/// performs (it transitions existing rows, it never inserts one -- see
+	/// <c>RetentionSweepService</c>'s doc comment), proven alongside a "must still
+	/// fail" negative by <c>RetentionSweepRunnerRoleGrantTests</c> (this repo's #556
+	/// convention) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 86;
+	private const int ExpectedMigrationCount = 87;
 
 	private readonly PostgresFixture _fixture;
 

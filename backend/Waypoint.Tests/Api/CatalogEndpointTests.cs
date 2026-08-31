@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
@@ -232,6 +233,12 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 	{
 		_ = (artifact, cancellationToken);
 		return Task.FromResult(Guid.NewGuid());
+	}
+
+	public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_items.FirstOrDefault(item => item.Id == id));
 	}
 
 	public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(
