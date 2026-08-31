@@ -24,6 +24,17 @@ namespace Waypoint.Infrastructure.Downloads;
 /// only signals that genuinely indicate the credential was rejected mark auth failure.
 /// An ambiguous exit is classified conservatively as a non-auth failure carrying the
 /// tool's own message, so a bad code is never claimed on evidence the tool did not give.
+///
+/// Issue #1482 extends this with <see cref="FailureClass.Disk"/> and
+/// <see cref="FailureClass.Throttle"/>: a real <c>binaries download</c> writes
+/// (potentially large) artifacts to local disk and runs under the unbounded-concurrency
+/// model the 2026-08-28 grill decision (R2-8) fixed, so local disk exhaustion and
+/// vendor-side rate limiting are both distinct, actionable failure kinds a binary
+/// transfer can hit that the read-only metadata/validate calls above never could.
+/// Checked in Network -&gt; Disk -&gt; Throttle -&gt; Auth order: a disk-full message never
+/// contains an auth phrase, and a throttle response ("429", "too many requests") is
+/// checked before the generic "401"/"403" auth substrings so it is never miscategorized
+/// as a credential rejection.
 /// </summary>
 internal static class DownloadToolFailureClassifier
 {
@@ -45,11 +56,31 @@ internal static class DownloadToolFailureClassifier
 		"handshake failed", "certificate verify failed", "unknownhost", "socket",
 	];
 
+	/// <summary>Substrings that indicate local disk exhaustion or a filesystem write failure writing into the depot store -- never a vendor-side rejection.</summary>
+	private static readonly string[] DiskFailurePhrases =
+	[
+		"no space left on device", "disk full", "disk quota exceeded", "read-only file system",
+		"insufficient disk space", "not enough space", "device out of space",
+	];
+
+	/// <summary>Substrings that indicate Broadcom rate-limited/throttled this identity -- distinct from a hard auth rejection (issue #1482 AC: throttle-detection observability).</summary>
+	private static readonly string[] ThrottleFailurePhrases =
+	[
+		"429", "too many requests", "rate limit", "rate-limit", "throttl", "slow down",
+		"try again later", "quota exceeded",
+	];
+
 	/// <summary>Outcome class for a completed-but-nonzero invocation.</summary>
 	internal enum FailureClass
 	{
 		/// <summary>Unreachable/unresolvable/refused connectivity -- surface as a network problem, never auth.</summary>
 		Network,
+
+		/// <summary>Local disk exhaustion or a filesystem write failure -- never a vendor-side rejection.</summary>
+		Disk,
+
+		/// <summary>Broadcom rate-limited/throttled this identity -- retry-later guidance, never a hard credential rejection.</summary>
+		Throttle,
 
 		/// <summary>Explicit credential rejection (bad/expired/revoked code, missing portal role).</summary>
 		Auth,
@@ -59,9 +90,10 @@ internal static class DownloadToolFailureClassifier
 	}
 
 	/// <summary>
-	/// Classifies a completed-but-nonzero tool message. Network signals are checked FIRST so
-	/// a timeout/connect failure whose surrounding prose happens to mention a code is still
-	/// treated as connectivity, not a rejection.
+	/// Classifies a completed-but-nonzero tool message. Checked in Network -&gt; Disk -&gt;
+	/// Throttle -&gt; Auth order (see class doc comment) so a timeout/connect failure whose
+	/// surrounding prose happens to mention a code is still treated as connectivity, and a
+	/// throttle response is never miscategorized as a hard credential rejection.
 	/// </summary>
 	internal static FailureClass Classify(string toolMessage)
 	{
@@ -73,6 +105,16 @@ internal static class DownloadToolFailureClassifier
 		if (ContainsAny(toolMessage, NetworkFailurePhrases))
 		{
 			return FailureClass.Network;
+		}
+
+		if (ContainsAny(toolMessage, DiskFailurePhrases))
+		{
+			return FailureClass.Disk;
+		}
+
+		if (ContainsAny(toolMessage, ThrottleFailurePhrases))
+		{
+			return FailureClass.Throttle;
 		}
 
 		return ContainsAny(toolMessage, AuthFailurePhrases) ? FailureClass.Auth : FailureClass.Unknown;

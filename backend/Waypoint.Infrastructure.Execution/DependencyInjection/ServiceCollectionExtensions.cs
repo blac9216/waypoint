@@ -113,6 +113,12 @@ public static class ServiceCollectionExtensions
 		// convention.
 		services.AddSingleton<IJobHandler, Catalog.CatalogPullJobHandler>();
 
+		// Issue #1482 (epic #1181, split from #795): the actual VCF artifact
+		// acquisition -- registers in the SAME change that adds "binaries-download" to
+		// DownloadRunnerJobTypes.Allowed below, per that allowlist's own doc comment
+		// (the inverse of issue #619's failure mode).
+		services.AddSingleton<IJobHandler, Downloads.BinariesDownloadJobHandler>();
+
 		// Download execution always runs behind the ADR-0015 tool-presence gate now
 		// that the API no longer hosts an ungated download path (issue #443 removed
 		// the Combined/ungated branch this used to have -- see git history on this

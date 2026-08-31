@@ -33,6 +33,14 @@ namespace Waypoint.DownloadRunner;
 /// <c>Waypoint.Runner.Jobs.JobHandlerRegistry</c>). See
 /// <c>Waypoint.Tests.Runner.EveryRegisteredJobHandlerIsClaimableTests</c> for the
 /// convention test that now catches this class of gap for any future handler.
+///
+/// <c>binaries-download</c> (issue #1482, migration 0099 reserved it in
+/// <c>jobs_job_type_check</c>/<see cref="Waypoint.Core.Jobs.JobCapabilities.Download"/>
+/// without allowlisting it here -- see PR #1596 / issue #1479's scope note): this is
+/// the INVERSE of the <c>tool-install</c> gap above -- there, a handler existed and the
+/// allowlist lagged; here, the allowlist entry and <c>BinariesDownloadJobHandler</c>'s
+/// registration land together in this one change, so the type is never reserved
+/// without a claimer.
 /// </summary>
 public static class DownloadRunnerJobTypes
 {
@@ -43,6 +51,7 @@ public static class DownloadRunnerJobTypes
 		"tool-install",
 		"depot-enrollment",
 		"catalog-pull",
-		"retention-sweep"
+		"retention-sweep",
+		"binaries-download"
 	};
 }

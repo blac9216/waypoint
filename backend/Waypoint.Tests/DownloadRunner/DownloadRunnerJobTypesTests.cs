@@ -24,7 +24,7 @@ namespace Waypoint.Tests.DownloadRunner;
 /// Issue #441's registration acceptance criterion: "Catalog-index and download jobs
 /// execute only in the download runner" -- proven here as "this host's allowlist and
 /// registered handlers are exactly {catalog-index, download, tool-install,
-/// depot-enrollment, catalog-pull, retention-sweep}, nothing from
+/// depot-enrollment, catalog-pull, retention-sweep, binaries-download}, nothing from
 /// JobCapabilities.Compliance and none of Download's remaining unimplemented 'later'
 /// types." <c>tool-install</c> joined the set in issue #619, which fixed the
 /// handler-registered-but-never-claimable gap it had sat in since #39/#602;
@@ -34,15 +34,19 @@ namespace Waypoint.Tests.DownloadRunner;
 /// pull, distinct from the local credential-free <c>catalog-index</c> re-index);
 /// <c>retention-sweep</c> joined in issue #1436 (the grace-window auto-prune driver
 /// over #1406's retention model), handler and allowlist entry landing in the same
-/// change per issue #619's own convention.
+/// change per issue #619's own convention; <c>binaries-download</c> joined in issue
+/// #1482 (the actual VCF artifact acquisition), landing its handler registration and
+/// this allowlist entry in the same change per <c>DownloadRunnerJobTypes</c>'s own
+/// doc comment.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
 	[Fact]
-	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentAndCatalogPull()
+	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentCatalogPullRetentionSweepAndBinariesDownload()
 	{
 		Assert.Equal(
-			new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep" },
+			new HashSet<string>(StringComparer.Ordinal)
+				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download" },
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}
 
