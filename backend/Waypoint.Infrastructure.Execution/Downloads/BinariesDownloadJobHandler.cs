@@ -295,12 +295,23 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			// resurrect the row as indexed -- laundering a corrupt download into one a
 			// later re-download would verify "present" against. Quarantining first
 			// means the index walk can never see the file at all.
-			string? quarantinePath = verification.ResolvedPath is null
-				? null
-				: QuarantineFile(verification.ResolvedPath, quarantineRoot);
-			string failureReason = quarantinePath is null
-				? verification.FailureReason!
-				: $"{verification.FailureReason} (quarantined at '{quarantinePath}').";
+			QuarantineOutcome quarantine = QuarantineFile(verification.ResolvedPath, quarantineRoot);
+			string failureReason = quarantine.Kind switch
+			{
+				// Issue #1486 review (round 2, finding 1): NotNeeded (verification.ResolvedPath
+				// was null -- missing file or path-escape, nothing existed to move) and Failed
+				// (a file existed but the move itself threw) are NOT the same outcome and must
+				// not collapse to the same reason string -- Failed leaves the corrupt bytes at
+				// the depot path, which is the exact laundering exposure this quarantine step
+				// exists to close, so the operator MUST be told the file remains and must act.
+				QuarantineResultKind.NotNeeded => verification.FailureReason!,
+				QuarantineResultKind.Quarantined =>
+					$"{verification.FailureReason} (quarantined at '{quarantine.Path}').",
+				_ =>
+					$"{verification.FailureReason} (QUARANTINE FAILED: {quarantine.FailureDetail}; " +
+					$"the failed-verification file REMAINS at '{verification.ResolvedPath}' and will be " +
+					"re-indexed by the next catalog-index run -- remove it manually.)",
+			};
 
 			await _artifacts.UpsertAsync(
 				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "failed", artifact.MetadataJson),
@@ -331,12 +342,26 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 	/// <see cref="ManagedToolOptions.BinariesDownloadQuarantineDirectoryName"/>'s doc
 	/// comment for why a subdirectory of <c>CatalogOptions.DepotPath</c> would still
 	/// be re-indexed by the catalog-index disk walk, which is exactly the bug this
-	/// quarantine exists to close. A move failure (e.g. the file vanished between
-	/// verification and this call) is swallowed rather than thrown: the "failed"
-	/// upsert and alert must still happen even if quarantine itself could not complete.
+	/// quarantine exists to close.
+	///
+	/// <paramref name="resolvedPath"/> is null when there is genuinely nothing to
+	/// move (<see cref="BinaryDownloadVerificationResult.ResolvedPath"/> is null for a
+	/// missing file or a path-escape) -- that is <see cref="QuarantineResultKind.NotNeeded"/>,
+	/// not a failure. A move failure (e.g. issue #1486 review round 2 finding 1: the
+	/// tool-state volume this handler's job-scoped identity homes also live on is full)
+	/// is caught rather than thrown -- the caller still upserts <c>failed</c> and still
+	/// alerts -- but it is reported as <see cref="QuarantineResultKind.Failed"/>, NOT
+	/// folded into the same null the "nothing to quarantine" case returns: collapsing
+	/// them was round 2's finding, since the corrupt file stays at its depot path
+	/// either way, and only the Failed case needs the caller to say so.
 	/// </summary>
-	private static string? QuarantineFile(string resolvedPath, string quarantineRoot)
+	private static QuarantineOutcome QuarantineFile(string? resolvedPath, string quarantineRoot)
 	{
+		if (resolvedPath is null)
+		{
+			return QuarantineOutcome.NotNeeded;
+		}
+
 		try
 		{
 			Directory.CreateDirectory(quarantineRoot);
@@ -348,16 +373,41 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			}
 
 			File.Move(resolvedPath, quarantinePath);
-			return quarantinePath;
+			return QuarantineOutcome.Quarantined(quarantinePath);
 		}
-		catch (IOException)
+		catch (IOException ex)
 		{
-			return null;
+			return QuarantineOutcome.Failed(ex.Message);
 		}
-		catch (UnauthorizedAccessException)
+		catch (UnauthorizedAccessException ex)
 		{
-			return null;
+			return QuarantineOutcome.Failed(ex.Message);
 		}
+	}
+
+	/// <summary>
+	/// <see cref="QuarantineFile"/>'s outcome (issue #1486 review round 2, finding 1):
+	/// distinguishes "nothing to quarantine" (<see cref="NotNeeded"/>, the verifier
+	/// never resolved a path) from a move that was attempted and failed
+	/// (<see cref="Failed"/>) -- the two were collapsed to the same <c>null</c> before
+	/// this round, which silently reopened the round-1 laundering exposure on any
+	/// quarantine-move failure (most plausibly <c>IOException</c> from the small
+	/// <c>ToolStatePath</c> volume filling up, per <see cref="ManagedToolOptions.BinariesDownloadQuarantineDirectoryName"/>).
+	/// </summary>
+	private sealed record QuarantineOutcome(QuarantineResultKind Kind, string? Path, string? FailureDetail)
+	{
+		public static readonly QuarantineOutcome NotNeeded = new(QuarantineResultKind.NotNeeded, null, null);
+
+		public static QuarantineOutcome Quarantined(string path) => new(QuarantineResultKind.Quarantined, path, null);
+
+		public static QuarantineOutcome Failed(string detail) => new(QuarantineResultKind.Failed, null, detail);
+	}
+
+	private enum QuarantineResultKind
+	{
+		NotNeeded,
+		Quarantined,
+		Failed,
 	}
 
 	private static async Task EmitVerificationAlertAsync(

@@ -374,6 +374,14 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string liveTargetPath = Path.Combine(_depotPath, externalId);
 		Assert.False(File.Exists(liveTargetPath), "Failed-verification file must not remain at the live depot path.");
 
+		// ...and round 2 note B: gone from the depot is not proof it was quarantined --
+		// swapping the handler's File.Move for a File.Delete would also make the assert
+		// above pass. Assert the corrupt bytes actually landed in quarantine, and that
+		// the reason string says so, so that regression goes red here.
+		string quarantinedPath = Path.Combine(_toolStatePath, "binaries-download-quarantine", externalId);
+		Assert.True(File.Exists(quarantinedPath), "Failed-verification file must be preserved in quarantine, not merely deleted.");
+		Assert.Contains("quarantined at", outcome.Note, StringComparison.Ordinal);
+
 		// ...so a subsequent catalog-index-style walk of that same relative path finds
 		// nothing to upsert, and the authenticated hash is untouched by the COALESCE.
 		string? indexWalkHash = await IndexWalkHashOrNullAsync(_depotPath, externalId);
@@ -415,6 +423,65 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 
 		string liveTargetPath = Path.Combine(_depotPath, externalId);
 		Assert.False(File.Exists(liveTargetPath), "Failed-verification file must not remain at the live depot path.");
+
+		// Round 2 note B: prove preservation, not merely depot-absence -- see the sibling
+		// size-mismatch test's comment for why File.Delete would otherwise pass silently.
+		string quarantinedPath = Path.Combine(_toolStatePath, "binaries-download-quarantine", externalId);
+		Assert.True(File.Exists(quarantinedPath), "Failed-verification file must be preserved in quarantine, not merely deleted.");
+		Assert.Contains("quarantined at", outcome.Note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1486 review (round 2, finding 1): a failed-verification file must still
+	/// be reported degraded when the quarantine MOVE itself fails (not just when there
+	/// was nothing to move) -- before this fix, both outcomes collapsed to the same
+	/// <c>null</c>, so a full <c>ToolStatePath</c> volume (the most plausible real
+	/// trigger: multi-GB quarantined bundles on the small state volume, #1692) left the
+	/// corrupt file at its depot path with a job outcome byte-identical to a clean
+	/// "nothing to quarantine" case -- silently reopening the round-1 laundering chain.
+	/// Forces the failure the same way the review's own repro does: put a regular file
+	/// where the quarantine directory needs to be created, so <c>Directory.CreateDirectory</c>
+	/// throws. Still asserts "failed" (the swallow-and-still-fail half was already
+	/// correct); the new assertions are that the corrupt file REMAINS at the depot path
+	/// (the degraded state itself) and that the reason/alert names the quarantine
+	/// failure so an operator has a signal to act on.
+	/// </summary>
+	[Fact]
+	public async Task QuarantineMoveFails_StillFailsAndAlertsDegradedState_CorruptFileRemainsAtDepotPath()
+	{
+		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
+		byte[] bytes = "wrong-size-bytes-quarantine-move-fails"u8.ToArray();
+		string authenticatedSha256 = Convert.ToHexString(SHA256.HashData("authenticated-catalog-bytes"u8.ToArray())).ToLowerInvariant();
+		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
+		Guid artifactId = await SeedArtifactAsync(externalId, authenticatedSha256, bytes.Length + 1);
+
+		// Block quarantine directory creation: a regular file already sits at the exact
+		// path the handler needs to Directory.CreateDirectory, so the move throws
+		// IOException before it ever touches the depot file.
+		string quarantineRoot = Path.Combine(_toolStatePath, "binaries-download-quarantine");
+		File.WriteAllText(quarantineRoot, "blocks quarantine directory creation");
+
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		DepotArtifact? artifact = await GetArtifactAsync(artifactId);
+		Assert.Equal("failed", artifact!.Status);
+
+		// The degraded state itself: quarantine could not happen, so the corrupt file
+		// MUST still be sitting at its depot path -- this is what round 2 finding 1
+		// found silently unsignaled.
+		string liveTargetPath = Path.Combine(_depotPath, externalId);
+		Assert.True(File.Exists(liveTargetPath), "A failed quarantine move must leave the corrupt file at the depot path (the degraded state).");
+
+		// The signal: the reason/alert must carry the quarantine-failure text, distinct
+		// from both the "quarantined at" success phrasing and the plain failure reason
+		// used when there was nothing to quarantine at all.
+		Assert.Contains("QUARANTINE FAILED", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains(liveTargetPath, outcome.Note, StringComparison.Ordinal);
+		Assert.DoesNotContain("quarantined at", outcome.Note, StringComparison.Ordinal);
 	}
 
 	/// <summary>

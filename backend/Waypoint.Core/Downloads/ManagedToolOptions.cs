@@ -288,9 +288,8 @@ public sealed class ManagedToolOptions
 	public string BinariesDownloadIdentityDirectoryName { get; set; } = "binaries-download-identity";
 
 	/// <summary>
-	/// Directory, under <see cref="ToolStatePath"/> (same persistent volume, so a
-	/// same-filesystem <c>File.Move</c> quarantines a multi-GB artifact without a
-	/// copy), that a <c>binaries-download</c> job's failed-verification file is moved
+	/// Directory, under <see cref="ToolStatePath"/>, that a <c>binaries-download</c>
+	/// job's failed-verification file is moved
 	/// into (issue #1486 review round 1, major finding 1). Deliberately NOT under
 	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotPath"/> -- unlike the
 	/// sibling <c>DownloadJobHandler.QuarantineAsync</c>'s <c>&lt;ArtifactStorePath&gt;/quarantine/</c>
@@ -298,6 +297,11 @@ public sealed class ManagedToolOptions
 	/// <c>DepotPath</c> WOULD still be walked and re-indexed by
 	/// <c>WaypointCatalogIndex.psm1</c>'s recursive, unfiltered <c>Get-FileManifest</c>
 	/// -- quarantining there would just move the laundering bug rather than close it.
+	/// The source file lives under <c>CatalogOptions.DepotPath</c>, a distinct compose
+	/// volume from <see cref="ToolStatePath"/> (issue #1486 review round 2, note A) --
+	/// the move is cross-device, so .NET's <c>File.Move</c> falls back to
+	/// copy-then-delete rather than a same-filesystem rename; the destination choice
+	/// above is still correct, it just is not free of that copy.
 	/// This directory lives entirely outside the depot share the index walk enumerates.
 	/// </summary>
 	public string BinariesDownloadQuarantineDirectoryName { get; set; } = "binaries-download-quarantine";
