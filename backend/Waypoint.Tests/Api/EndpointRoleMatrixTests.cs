@@ -373,6 +373,14 @@ public sealed class EndpointRoleMatrixTests
 		["TargetsController.SetBinding"] = WaypointRole.Admin,
 		["TargetsController.ClearBinding"] = WaypointRole.Admin,
 
+		// RepoCredentialsController -- Admin-only in full (issue #1517's own AC: "A
+		// non-Admin cannot create, read, or rotate a repo-serving credential" --
+		// stricter than TargetsController's Viewer-readable binding reads above).
+		["RepoCredentialsController.List"] = WaypointRole.Admin,
+		["RepoCredentialsController.Get"] = WaypointRole.Admin,
+		["RepoCredentialsController.Set"] = WaypointRole.Admin,
+		["RepoCredentialsController.Clear"] = WaypointRole.Admin,
+
 		// UsersController -- Admin-only in full (domain-model.md: "users/roles" is an
 		// Admin capability; role itself is a read-only IdP mirror -- see class doc
 		// comment -- but the whole surface, including reads, is still Admin-gated).

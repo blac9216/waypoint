@@ -301,6 +301,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));
+			services.AddSingleton(new Secrets.RepoCredentialBindingRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
 			// Issue #732: stable compliance endpoint/component identity beneath a
 			// top-level target (migration 0054) -- distinct from InventoryRepository's

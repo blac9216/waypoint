@@ -55,7 +55,10 @@ public static class CredentialTypes
 	/// <summary>Legacy Broadcom Download Token (issue #690): substituted into <c>dl.broadcom.com</c> URL templates for UMDS/older VCF download workflows. Cannot authenticate VCF 9.1 <c>vcf-download-tool</c> commands.</summary>
 	public const string LegacyDownloadToken = "legacy-download-token";
 
-	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token, DepotToken, DepotActivationCode, LegacyDownloadToken];
+	/// <summary>Waypoint-managed repo Basic-auth pair (issue #1517, migration 0103, split from design record #1043): an Admin-created username/token bound to one <see cref="Waypoint.Core.Secrets.RepoStores"/> value via <see cref="Waypoint.Core.Secrets.RepoCredentialBinding"/>, enforced by the sibling B child's (#1510) nginx-side wiring. Rides this EXISTING credentials table/API unmodified -- not a <c>Waypoint.Core.Secrets.CredentialPurposes</c> value; that closed set is ADR-0021's unrelated target-kind x operation matrix.</summary>
+	public const string RepoBasicAuth = "repo-basic-auth";
+
+	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token, DepotToken, DepotActivationCode, LegacyDownloadToken, RepoBasicAuth];
 
 	public static bool IsValid(string? credentialType) => credentialType is not null && All.Contains(credentialType);
 }

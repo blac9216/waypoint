@@ -412,8 +412,30 @@ public sealed class SchemaMigrationTests
 	/// logic. No new runner grants: no runner process reads or writes either table
 	/// yet, so #1413/#1441 each add the GRANTs their own writer needs alongside the
 	/// runner-role-connects test proving them (this repo's #556 convention) --
+	/// 0103 (issue #1517, epic #1180, split from design record #1043; slot
+	/// pre-assigned 2026-08-30, inside the same 0082-0106 numbering gap 0107's own
+	/// comment above reserves for concurrently in-flight sibling issues): widens
+	/// <c>credentials_credential_type_check</c> to admit <c>repo-basic-auth</c> (a
+	/// <c>CredentialTypes</c> value -- distinct bounded context from the unrelated
+	/// <c>CredentialPurposes</c>/ADR-0021 matrix -- so it rides the EXISTING
+	/// <c>credentials</c> table/API unmodified: no new create/rotate code, per issue
+	/// #1517's own AC) and adds <c>repo_credential_bindings</c> (which repo store --
+	/// depot/umds/photon/vmtools/vks/content-libraries, the closed set
+	/// <c>deploy/nginx/conf.d/default.conf</c>'s #1502 location tree actually serves
+	/// -- a <c>repo-basic-auth</c> credential authenticates for), UNIQUE on
+	/// <c>store</c> alone (one purpose in this context, unlike
+	/// <c>target_credential_bindings</c>'s <c>(target_id, purpose)</c> pair) and
+	/// counted as its own <c>RepoCredentialBindings</c> delete-blocker category
+	/// (the identical shape #584/migration 0043 established for
+	/// <c>TargetCredentialBindings</c>, not a new pattern). No new runner grant:
+	/// exactly one consumer today, the API process itself -- the HONEST no-grant
+	/// rationale (no consumer yet), not the wrong one issue #1406's review round 1
+	/// finding 5 corrected (a future runner-claimed consumer, if #1510 as filed
+	/// turns out to need one, ships its own GRANT migration, 0100/#1484 precedent) --
+	/// proven by <c>RunnerRoleGrantDriftTests</c>' negative-direction cases for both
+	/// runner roles (SELECT and INSERT) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 85;
+	private const int ExpectedMigrationCount = 86;
 
 	private readonly PostgresFixture _fixture;
 
@@ -891,11 +913,12 @@ public sealed class SchemaMigrationTests
 	}
 
 	/// <summary>
-	/// Issue #252, extended by issue #690 (migration 0047): every value in the closed
-	/// <c>CredentialTypes.All</c> set -- including the deprecated legacy
-	/// <c>depot-token</c> alias (retained, non-destructively, for pre-#690 rows) and its
-	/// two replacements <c>depot-activation-code</c>/<c>legacy-download-token</c> --
-	/// must still insert cleanly under the CHECK.
+	/// Issue #252, extended by issue #690 (migration 0047) and issue #1517 (migration
+	/// 0103): every value in the closed <c>CredentialTypes.All</c> set -- including
+	/// the deprecated legacy <c>depot-token</c> alias (retained, non-destructively,
+	/// for pre-#690 rows), its two replacements
+	/// <c>depot-activation-code</c>/<c>legacy-download-token</c>, and the repo-serving
+	/// <c>repo-basic-auth</c> type -- must still insert cleanly under the CHECK.
 	/// </summary>
 	[Theory]
 	[InlineData("vcenter")]
@@ -905,6 +928,7 @@ public sealed class SchemaMigrationTests
 	[InlineData("depot-token")]
 	[InlineData("depot-activation-code")]
 	[InlineData("legacy-download-token")]
+	[InlineData("repo-basic-auth")]
 	public async Task Migrations_Credentials_AcceptsEveryClosedSetCredentialType(string credentialType)
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
