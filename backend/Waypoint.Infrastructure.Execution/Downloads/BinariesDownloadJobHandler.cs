@@ -52,6 +52,17 @@ namespace Waypoint.Infrastructure.Downloads;
 /// doc comment. That home, and the job-scoped decrypted-Activation-Code temp file
 /// (issue #760's atomic-restrictive-mode pattern, mirroring <c>CatalogPullJobHandler</c>),
 /// are always removed in <c>finally</c>.
+///
+/// Verification (issue #1486): a tool-reported success is not, by itself, grounds to
+/// report the artifact present -- <see cref="_verifier"/> checks the downloaded file
+/// against the <see cref="Waypoint.Core.Catalog.DepotArtifact"/> row's already-
+/// authenticated size/SHA-256 (<see cref="IBinaryDownloadVerifier"/>'s doc comment) and
+/// ONLY a passing verification results in a <c>present</c> upsert. A verification
+/// failure never reports presence; it upserts <c>status = "failed"</c> (mirroring
+/// <c>DownloadJobHandler</c>'s identical convention) and raises a
+/// <see cref="JobEventTypes.SystemNotice"/> alert (design decision Q11/R2-9: alert
+/// instead of drop -- a failed/partial download must never be silently absorbed as if
+/// nothing happened).
 /// </summary>
 public sealed class BinariesDownloadJobHandler : IJobHandler
 {
@@ -64,6 +75,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 	private readonly IBinariesDownloadTool _tool;
 	private readonly ICredentialSecretStore _secrets;
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
+	private readonly IDepotArtifactRepository _artifacts;
+	private readonly IBinaryDownloadVerifier _verifier;
 	private readonly IOptions<ManagedToolOptions> _toolOptions;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 
@@ -72,6 +85,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		IBinariesDownloadTool tool,
 		ICredentialSecretStore secrets,
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
+		IDepotArtifactRepository artifacts,
+		IBinaryDownloadVerifier verifier,
 		IOptions<ManagedToolOptions> toolOptions,
 		IOptions<CatalogOptions> catalogOptions)
 	{
@@ -79,6 +94,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(tool);
 		ArgumentNullException.ThrowIfNull(secrets);
 		ArgumentNullException.ThrowIfNull(credentials);
+		ArgumentNullException.ThrowIfNull(artifacts);
+		ArgumentNullException.ThrowIfNull(verifier);
 		ArgumentNullException.ThrowIfNull(toolOptions);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 
@@ -86,6 +103,8 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		_tool = tool;
 		_secrets = secrets;
 		_credentials = credentials;
+		_artifacts = artifacts;
+		_verifier = verifier;
 		_toolOptions = toolOptions;
 		_catalogOptions = catalogOptions;
 	}
@@ -109,6 +128,16 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		if (payload is null || string.IsNullOrWhiteSpace(payload.ExternalId))
 		{
 			return JobExecutionOutcome.Failed("binaries-download payload requires a non-empty 'external_id'.");
+		}
+
+		if (!Guid.TryParse(payload.DepotArtifactId, out Guid depotArtifactId))
+		{
+			// Issue #1486: verification resolves the catalog's authenticated
+			// size/SHA-256 by id -- without a valid depot_artifact_id there is nothing
+			// to verify the eventual download against, so this fails before the tool
+			// is ever invoked rather than downloading a file this handler could never
+			// honestly report present.
+			return JobExecutionOutcome.Failed("binaries-download payload requires a valid GUID 'depot_artifact_id'.");
 		}
 
 		DepotEnrollment? enrollment = await _enrollment.GetAsync(cancellationToken).ConfigureAwait(false);
@@ -196,14 +225,15 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 					.ConfigureAwait(false);
 			}
 
-			if (result.Succeeded)
+			if (!result.Succeeded)
 			{
-				return JobExecutionOutcome.Succeeded($"binaries download completed for '{payload.ExternalId}'.");
+				return result.IsAuthFailure
+					? JobExecutionOutcome.AuthFailed(result.FailureReason)
+					: JobExecutionOutcome.Failed(result.FailureReason);
 			}
 
-			return result.IsAuthFailure
-				? JobExecutionOutcome.AuthFailed(result.FailureReason)
-				: JobExecutionOutcome.Failed(result.FailureReason);
+			return await VerifyAndRecordAsync(context, depotArtifactId, payload.ExternalId, depotStorePath, cancellationToken)
+				.ConfigureAwait(false);
 		}
 		finally
 		{
@@ -216,6 +246,73 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 	{
 		string payload = JsonSerializer.Serialize(new { severity, line });
 		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #1486: the tool reporting success is not, on its own, grounds to report
+	/// the artifact present -- this looks up the authenticated catalog row the tool's
+	/// output claims to have satisfied, runs <see cref="_verifier"/> against the file
+	/// it actually wrote, and only upserts <c>status = "present"</c> when that passes.
+	/// A missing catalog row (deleted mid-flight) or a failed verification both raise
+	/// a <see cref="JobEventTypes.SystemNotice"/> alert (Q11/R2-9: alert instead of
+	/// drop) and fail the job outcome; a failed verification additionally upserts
+	/// <c>status = "failed"</c> so the catalog itself reflects the outcome, mirroring
+	/// <c>DownloadJobHandler</c>'s identical convention. <paramref name="sha256"/> is
+	/// passed through as-is (<c>artifact.Sha256</c> when the catalog already had one)
+	/// on failure, and COALESCEs safely (never null) since the DB upsert only
+	/// overwrites <c>size_bytes</c>/<c>sha256</c> when the incoming value is non-null
+	/// (issue #1488 review finding 1) -- omitting <c>size_bytes</c> here for the same
+	/// reason leaves the catalog-supplied size untouched.
+	/// </summary>
+	private async Task<JobExecutionOutcome> VerifyAndRecordAsync(
+		JobExecutionContext context, Guid depotArtifactId, string externalId, string depotStorePath, CancellationToken cancellationToken)
+	{
+		DepotArtifact? artifact = await _artifacts.GetByIdAsync(depotArtifactId, cancellationToken).ConfigureAwait(false);
+		if (artifact is null)
+		{
+			string missingReason =
+				$"binaries download reported success for '{externalId}' but depot artifact '{depotArtifactId}' " +
+				"no longer exists in the catalog -- cannot verify against authenticated metadata; refusing to report presence.";
+			await EmitVerificationAlertAsync(context, externalId, depotArtifactId, missingReason, cancellationToken).ConfigureAwait(false);
+			return JobExecutionOutcome.Failed(missingReason);
+		}
+
+		BinaryDownloadVerificationResult verification = await _verifier
+			.VerifyAsync(artifact, depotStorePath, cancellationToken).ConfigureAwait(false);
+
+		if (!verification.Verified)
+		{
+			await _artifacts.UpsertAsync(
+				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "failed", artifact.MetadataJson),
+				cancellationToken).ConfigureAwait(false);
+			await EmitVerificationAlertAsync(context, artifact.ExternalId, artifact.Id, verification.FailureReason!, cancellationToken)
+				.ConfigureAwait(false);
+			return JobExecutionOutcome.Failed($"Download verification failed for '{artifact.ExternalId}': {verification.FailureReason}");
+		}
+
+		// Grill decision Q8: the freshly computed self-hash is what gets recorded, not
+		// an echo of artifact.Sha256 -- when the catalog row had no vendor hash yet
+		// (size-only), this is the write that gives it one.
+		await _artifacts.UpsertAsync(
+			new DepotArtifactUpsert(artifact.ExternalId, verification.Sha256, "present", artifact.MetadataJson),
+			cancellationToken).ConfigureAwait(false);
+
+		return JobExecutionOutcome.Succeeded(
+			$"binaries download completed and verified for '{artifact.ExternalId}' (sha256 {verification.Sha256}).");
+	}
+
+	private static async Task EmitVerificationAlertAsync(
+		JobExecutionContext context, string externalId, Guid depotArtifactId, string reason, CancellationToken cancellationToken)
+	{
+		string payload = JsonSerializer.Serialize(new
+		{
+			kind = "download.verification_failed",
+			depot_artifact_id = depotArtifactId,
+			external_id = externalId,
+			reason,
+		});
+		await context.Events.EmitAsync(JobEventTypes.SystemNotice, context.Job.Id, context.Job.RunId, payload, cancellationToken)
+			.ConfigureAwait(false);
 	}
 
 	/// <summary>Issue #760: atomic 0700 <c>mkdir</c>, never create-then-chmod -- mirrors <c>CatalogPullJobHandler</c>'s identical helper.</summary>

@@ -186,6 +186,11 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolSignatureVerifier, Downloads.RsaManagedToolSignatureVerifier>();
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolCatalogVerifier, Downloads.BroadcomManagedToolCatalogVerifier>();
 
+		// Issue #1486: the binaries-download post-download check against the already-
+		// authenticated depot_artifacts row -- pure filesystem/crypto, unconditional
+		// shape, same as the checker/verifiers above.
+		services.AddSingleton<Waypoint.Core.Downloads.IBinaryDownloadVerifier, Downloads.BinaryDownloadVerifier>();
+
 		// Issue #686: safe extraction/layout-validation/smoke-test/atomic activation of
 		// a verified distribution archive -- same filesystem-only, unconditional shape
 		// as the checker/verifiers above.

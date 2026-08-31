@@ -26,15 +26,17 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Downloads;
 
 /// <summary>
-/// The <c>binaries-download</c> job handler (issue #1482): payload validation and the
-/// enrollment gate, which are fully fake-able without a real Postgres or process
-/// invocation -- mirrors <c>CatalogPullJobHandlerTests</c>'s own split (the full
-/// connected success/failure path resolves a real
-/// <see cref="Waypoint.Infrastructure.Secrets.CredentialRepository"/> and spawns a
-/// process, out of scope for this fast unit file; see the PR description's deferred-
-/// coverage note). <see cref="BinariesDownloadToolTests"/> covers the tool-invocation
-/// behavior (argv shape, failure classification, identity isolation) this handler
-/// delegates to once past the gates tested here.
+/// The <c>binaries-download</c> job handler (issue #1482, verification wiring issue
+/// #1486): payload validation and the enrollment gate, which are fully fake-able
+/// without a real Postgres or process invocation -- mirrors
+/// <c>CatalogPullJobHandlerTests</c>'s own split (the full connected success/failure
+/// path resolves a real <see cref="Waypoint.Infrastructure.Secrets.CredentialRepository"/>
+/// and spawns a process, out of scope for this fast unit file; see the PR description's
+/// deferred-coverage note). <see cref="BinariesDownloadToolTests"/> covers the
+/// tool-invocation behavior (argv shape, failure classification, identity isolation)
+/// this handler delegates to once past the gates tested here; <see cref="Waypoint.Tests.Infrastructure.Downloads.BinaryDownloadVerifierTests"/>
+/// covers the post-download verification decision this handler consumes once past the
+/// tool-invocation step (also deferred here for the same real-process reason).
 /// </summary>
 public sealed class BinariesDownloadJobHandlerTests
 {
@@ -62,6 +64,18 @@ public sealed class BinariesDownloadJobHandlerTests
 		public Task<bool> DeleteAsync(Guid credentialId, string actor, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
+	private sealed class UnreachableArtifactRepository : IDepotArtifactRepository
+	{
+		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, Waypoint.Core.Pagination.PageRequest page, CancellationToken cancellationToken) => throw new InvalidOperationException();
+	}
+
+	private sealed class UnreachableVerifier : IBinaryDownloadVerifier
+	{
+		public Task<BinaryDownloadVerificationResult> VerifyAsync(DepotArtifact artifact, string depotStorePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
+	}
+
 	private sealed class FakeEventPublisher : IJobEventPublisher
 	{
 		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -84,6 +98,8 @@ public sealed class BinariesDownloadJobHandlerTests
 			tool ?? new UnreachableTool(),
 			new UnreachableCredentialSecretStore(),
 			new CredentialRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
+			new UnreachableArtifactRepository(),
+			new UnreachableVerifier(),
 			Options.Create(new ManagedToolOptions()),
 			Options.Create(new CatalogOptions()));
 
@@ -127,6 +143,29 @@ public sealed class BinariesDownloadJobHandlerTests
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("external_id", outcome.Note);
+	}
+
+	[Fact]
+	public async Task MissingDepotArtifactId_FailsBeforeCheckingEnrollment()
+	{
+		BinariesDownloadJobHandler handler = CreateHandler(enrollment: null);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor("{\"external_id\":\"vcf-bundle-01\"}"), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("depot_artifact_id", outcome.Note);
+	}
+
+	[Fact]
+	public async Task MalformedDepotArtifactId_FailsBeforeCheckingEnrollment()
+	{
+		BinariesDownloadJobHandler handler = CreateHandler(enrollment: null);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor("{\"depot_artifact_id\":\"not-a-guid\",\"external_id\":\"vcf-bundle-01\"}"), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("depot_artifact_id", outcome.Note);
 	}
 
 	// The "Validated enrollment but no credential stored" branch and the full

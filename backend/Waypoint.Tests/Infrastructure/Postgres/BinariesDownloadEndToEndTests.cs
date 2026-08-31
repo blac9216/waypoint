@@ -22,6 +22,7 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
+using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
@@ -140,7 +141,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 	{
 		Guid runId = await _repository.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, "test-actor", CancellationToken.None);
 		JobSpec spec = new(RunTypes.BinariesDownload, 1, TargetId: null, TargetName: "bundle-01",
-			Payload: """{"external_id":"vcf-bundle-01"}""");
+			Payload: $$"""{"depot_artifact_id":"{{Guid.NewGuid()}}","external_id":"vcf-bundle-01"}""");
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, [spec], "test-actor", CancellationToken.None);
 		ClaimedJob? claimed = await _repository.ClaimJobAsync(
 			"worker-test", TimeSpan.FromMinutes(5), new HashSet<string>(StringComparer.Ordinal) { RunTypes.BinariesDownload }, CancellationToken.None);
@@ -152,6 +153,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 	private BinariesDownloadJobHandler CreateHandler() =>
 		new(
 			_enrollment, new UnreachableTool(), _secretStore, _credentials,
+			new DepotArtifactRepository(_fixture.ConnectionString), new BinaryDownloadVerifier(),
 			Options.Create(new ManagedToolOptions { ToolStatePath = _toolStatePath }),
 			Options.Create(new CatalogOptions { DepotPath = _depotPath }));
 
