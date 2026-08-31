@@ -208,6 +208,13 @@ public static class ServiceCollectionExtensions
 		// already populated).
 		services.AddSingleton<Waypoint.Core.Downloads.IEsxPatchStoreMetadataParser, Downloads.EsxPatchStoreMetadataParser>();
 
+		// Issue #1482: the binaries-download job's actual `binaries download`
+		// invocation -- the same pure process/filesystem shape as the two registrations
+		// immediately above, but deliberately does NOT share their identity-home
+		// preparation (see BinariesDownloadTool's doc comment): every call seeds a
+		// caller-supplied, job-scoped identity home instead of the shared one.
+		services.AddSingleton<Waypoint.Core.Downloads.IBinariesDownloadTool, Downloads.BinariesDownloadTool>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.

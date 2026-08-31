@@ -265,4 +265,25 @@ public sealed class ManagedToolOptions
 	/// prior-good on-disk catalog the local re-index and download queue both read.
 	/// </summary>
 	public string CatalogPullStagingDirectoryName { get; set; } = "catalog-pull-staging";
+
+	/// <summary>
+	/// Wall-clock budget for the <c>binaries-download</c> job's <c>binaries download</c>
+	/// invocation (issue #1482) -- a real VCF artifact transfer, meaningfully larger and
+	/// slower than a metadata pull, so it gets its own, longer budget rather than reusing
+	/// <see cref="CatalogPullTimeout"/>.
+	/// </summary>
+	public TimeSpan BinariesDownloadTimeout { get; set; } = TimeSpan.FromHours(4);
+
+	/// <summary>
+	/// Directory, under <see cref="ToolStatePath"/> (same persistent volume), that a
+	/// <c>binaries-download</c> job's job-scoped identity home is created under (issue
+	/// #1482: "job-scoped isolated identity home per invocation" -- the grill decision's
+	/// hard requirement for safe unbounded concurrency, independent of whether issue #790's
+	/// shared-identity-home fix has landed). Distinct from <see cref="IdentityStatePath"/>
+	/// (the shared enrollment/catalog-pull identity home): every binaries-download job gets
+	/// its own <c>&lt;this&gt;/job-&lt;job id&gt;</c> subdirectory, seeded and torn down for
+	/// that one invocation only, so two concurrent jobs can never observe each other's
+	/// <c>machine_id</c>.
+	/// </summary>
+	public string BinariesDownloadIdentityDirectoryName { get; set; } = "binaries-download-identity";
 }
