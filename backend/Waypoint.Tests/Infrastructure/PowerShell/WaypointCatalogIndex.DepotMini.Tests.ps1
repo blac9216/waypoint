@@ -48,6 +48,12 @@ BeforeAll {
 	}
 
 	$script:Results = @(Get-Content -LiteralPath $OutputPath -Raw | ConvertFrom-Json)
+
+	# PR #1742 review round-2 relay finding F1a: the real materialized size of
+	# vcsa-patch.iso, read directly from its checked-in placeholder (stripping the
+	# `.placeholder` suffix never changes the bytes), so the assertion below checks
+	# the SAME real value the sweep computed rather than a hand-typed literal.
+	$script:VcsaPatchIsoSize = (Get-Item -LiteralPath (Join-Path $RepoRoot 'backend/Waypoint.Tests/Fixtures/depot-mini/PROD/COMP/VCENTER/vcsa-patch.iso.placeholder')).Length
 }
 
 Describe 'Invoke-WaypointCatalogIndex against the shared depot-mini fixture (issue #1696)' {
@@ -77,6 +83,9 @@ Describe 'Invoke-WaypointCatalogIndex against the shared depot-mini fixture (iss
 		$Rows = @($script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' })
 		$Rows.Count | Should -Be 1
 		$Rows[0].Status | Should -Be 'present'
+		# PR #1742 review round-2 relay finding F1b: the zip binary's own depot-relative
+		# identity (PR #1629 round-2 finding 2's exact subject) must be asserted here too.
+		$Rows[0].ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
 
 		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
 		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
@@ -92,6 +101,9 @@ Describe 'Invoke-WaypointCatalogIndex against the shared depot-mini fixture (iss
 		$Row = $script:Results | Where-Object { $_.RelativePath -eq 'PROD/metadata/upgrade_info.xml' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.RecordType | Should -Be 'ArtifactPresence'
+		# PR #1742 review round-2 relay finding F1c: a regression to 'missing' must fail
+		# this case, not just a regression to RecordType 'UnknownFile'.
+		$Row.Status | Should -Be 'present'
 	}
 
 	It 'reports the deliberately-staged unknown file exactly once, at its depot-relative path' {
@@ -109,6 +121,7 @@ Describe 'Invoke-WaypointCatalogIndex against the shared depot-mini fixture (iss
 		$Row.Status | Should -Be 'present'
 		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-patch.iso'
 		$Row.Sha256 | Should -Match '^[0-9A-Fa-f]{64}$'
+		$Row.SizeBytes | Should -Be $script:VcsaPatchIsoSize
 		$Row.Product | Should -Be 'VCENTER'
 		$Row.Version | Should -Be '9.1.0.5210.25573614'
 	}
