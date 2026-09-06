@@ -66,7 +66,7 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 					options.DefaultForbidScheme = TestAuthHandler.SchemeName;
 				});
 
-				services.AddSingleton(new ContentLibraryFolderRepository(_connectionString));
+				services.AddSingleton<Waypoint.Core.ContentLibraries.IContentLibraryFolderRepository>(new ContentLibraryFolderRepository(_connectionString));
 			});
 		}
 	}
