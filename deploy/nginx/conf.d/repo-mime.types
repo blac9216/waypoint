@@ -1,5 +1,14 @@
 # VCSP MIME map for the repo path-space (`include`d into each repo
 # location in default.conf -- never duplicated per location).
+#
+# An nginx `types { }` block REPLACES the compiled-in default MIME table
+# for the location it is included into -- it does not extend it. Any
+# extension not listed below is served as `application/octet-stream`
+# (the `default_type` line), including extensions the compiled-in table
+# would otherwise know (`.html`, `.xml`, `.gz`, `.rpm`, `.zip`, ...).
+# Every extension a repo store may need to serve with a real
+# Content-Type must therefore be listed explicitly here, not assumed
+# from nginx's own defaults.
 # why: docs/rationale/deploy.md#nginx-repo-vcsp-mime-map
 types {
 	application/json            json;
@@ -7,6 +16,19 @@ types {
 	application/x-vmdk          vmdk;
 	application/x-iso9660-image iso;
 	application/x-x509-ca-cert  cert;
-	text/plain                  mf;
+	text/plain                  mf txt;
+
+	# Re-included compiled-in `mime.types` entries a browser-facing index
+	# or repository metadata may need (issue #1591): a subscribed-library
+	# `.html` index page, and `repodata/*.xml`/`*.xml.gz` on a future
+	# VCSP-style store with real repository metadata.
+	text/html                   html;
+	text/xml                    xml;
+	application/gzip            gz;
+	application/x-redhat-package-manager rpm;
+	application/vnd.debian.binary-package deb;
+	application/zip              zip;
+	# .ova has no compiled-in or IANA-registered type; left at the
+	# default_type (application/octet-stream) deliberately.
 }
 default_type application/octet-stream;
