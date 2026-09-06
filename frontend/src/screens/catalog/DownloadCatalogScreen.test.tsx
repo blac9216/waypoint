@@ -53,7 +53,7 @@ const ARTIFACTS: CatalogArtifact[] = [
 		product: "VCF Installer",
 		version: "5.2.1",
 		size_bytes: 4_294_967_296,
-		status: "not_downloaded",
+		status: "indexed",
 	},
 	{
 		id: "art-2",
@@ -80,7 +80,7 @@ function dominantVkrArtifacts(vkrCount: number): CatalogArtifact[] {
 		product: "VKR",
 		version: `1.${i}.0`,
 		size_bytes: 1_000_000,
-		status: "not_downloaded" as const,
+		status: "indexed" as const,
 	}));
 	return [
 		{
@@ -90,7 +90,7 @@ function dominantVkrArtifacts(vkrCount: number): CatalogArtifact[] {
 			product: "VCENTER",
 			version: "8.0U3",
 			size_bytes: 2_000_000,
-			status: "not_downloaded",
+			status: "indexed",
 		},
 		{
 			id: "art-esx",
@@ -99,7 +99,7 @@ function dominantVkrArtifacts(vkrCount: number): CatalogArtifact[] {
 			product: "ESX_HOST",
 			version: "8.0U3",
 			size_bytes: 1_500_000,
-			status: "not_downloaded",
+			status: "indexed",
 		},
 		...vkr,
 	];
@@ -854,6 +854,147 @@ describe("DownloadCatalogScreen", () => {
 		for (const call of artifactCalls) {
 			expect(new URL(call.url, "http://localhost").searchParams.get("limit")).toBe("200");
 		}
+	});
+
+	/**
+	 * Issue #1592: replaces the mock's `/catalog/artifacts` branch with one
+	 * whose promises the test resolves by hand, so a superseded walk can be
+	 * made to resolve strictly after the walk that superseded it — the exact
+	 * race the stale-response guard exists for. Also records every request's
+	 * `AbortSignal` so a test can assert a superseded walk's own signal was
+	 * aborted, independent of whether/when its promise ever resolves.
+	 */
+	function installDeferredArtifactsFetchMock(): {
+		deferred: Array<(response: Response) => void>;
+		signals: AbortSignal[];
+	} {
+		const deferred: Array<(response: Response) => void> = [];
+		const signals: AbortSignal[] = [];
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			fetchCalls.push({ url, init });
+			if (url.startsWith("/api/v1/catalog/artifacts")) {
+				if (init?.signal) {
+					signals.push(init.signal as AbortSignal);
+				}
+				return new Promise<Response>((resolve) => {
+					deferred.push(resolve);
+				});
+			}
+			if (url.startsWith("/api/v1/events") || /^\/api\/v1\/runs\/[^/]+\/events/.test(url)) {
+				return sse.response;
+			}
+			if (url === "/api/v1/downloads" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse([]);
+			}
+			throw new Error(`unexpected fetch (deferred artifacts mock): ${url}`);
+		}) as unknown as typeof fetch;
+		return { deferred, signals };
+	}
+
+	it("issue #1592: a slower earlier catalog walk resolving after a newer one does not overwrite state", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		const { deferred } = installDeferredArtifactsFetchMock();
+
+		fireEvent.change(screen.getByLabelText("Filter by product"), { target: { value: "VCF Installer" } });
+		await waitFor(() => expect(deferred.length).toBe(1));
+
+		fireEvent.change(screen.getByLabelText("Filter by product"), { target: { value: "ESXi" } });
+		await waitFor(() => expect(deferred.length).toBe(2));
+
+		// Resolve the NEWER (second) request first...
+		await act(async () => {
+			deferred[1](pagedArtifactsResponse("/api/v1/catalog/artifacts?product=ESXi&limit=200&offset=0", [ARTIFACTS[1]]));
+		});
+		await waitFor(() => expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument());
+
+		// ...then the OLDER, superseded request, whose result must be discarded.
+		await act(async () => {
+			deferred[0](
+				pagedArtifactsResponse("/api/v1/catalog/artifacts?product=VCF+Installer&limit=200&offset=0", [ARTIFACTS[0]]),
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument();
+		expect(screen.queryByText("VCF-Installer-5.2.1.iso")).not.toBeInTheDocument();
+	});
+
+	it("issue #1592: a superseded walk's request signal is aborted by the next load", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		const { deferred, signals } = installDeferredArtifactsFetchMock();
+
+		fireEvent.change(screen.getByLabelText("Filter by product"), { target: { value: "VCF Installer" } });
+		await waitFor(() => expect(signals.length).toBe(1));
+		expect(signals[0].aborted).toBe(false);
+
+		fireEvent.change(screen.getByLabelText("Filter by product"), { target: { value: "ESXi" } });
+		await waitFor(() => expect(signals.length).toBe(2));
+
+		expect(signals[0].aborted).toBe(true);
+		expect(signals[1].aborted).toBe(false);
+
+		// Resolve both so no promise/act warning leaks past this test.
+		await act(async () => {
+			deferred[0](
+				pagedArtifactsResponse("/api/v1/catalog/artifacts?product=VCF+Installer&limit=200&offset=0", [ARTIFACTS[0]]),
+			);
+			deferred[1](pagedArtifactsResponse("/api/v1/catalog/artifacts?product=ESXi&limit=200&offset=0", [ARTIFACTS[1]]));
+		});
+	});
+
+	it("issue #1592: changing only the search filter issues no additional catalog fetches", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		const countBefore = fetchCalls.filter((c) => c.url.startsWith("/api/v1/catalog/artifacts")).length;
+
+		fireEvent.change(screen.getByLabelText("Search artifacts"), { target: { value: "ESXi" } });
+		await waitFor(() => expect(screen.queryByText("VCF-Installer-5.2.1.iso")).not.toBeInTheDocument());
+
+		const countAfter = fetchCalls.filter((c) => c.url.startsWith("/api/v1/catalog/artifacts")).length;
+		expect(countAfter).toBe(countBefore);
+	});
+
+	it("issue #1780: a failing GET /downloads seed renders an inline notice instead of an empty queue, without throwing", async () => {
+		fetchCalls = [];
+		sse = createDriveableSse();
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			fetchCalls.push({ url, init });
+			if (url.startsWith("/api/v1/events") || /^\/api\/v1\/runs\/[^/]+\/events/.test(url)) return sse.response;
+			if (url.startsWith("/api/v1/catalog/artifacts")) return pagedArtifactsResponse(url, ARTIFACTS);
+			if (url === "/api/v1/catalog/pull" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse(READY_PULL_STATUS);
+			}
+			if (url === "/api/v1/downloads" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse({ error: { code: "internal", message: "Could not load the download queue." } }, 500);
+			}
+			if (url === "/api/v1/system") {
+				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null });
+			}
+			if (url === "/api/v1/stigman") {
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Operator",
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+
+		await mount();
+		await waitFor(() => expect(screen.getByText("Could not load the download queue.")).toBeInTheDocument());
+		expect(screen.queryByText("No active downloads.")).not.toBeInTheDocument();
 	});
 
 	it("mode-gating stub hides the screen when mode=disconnected", async () => {

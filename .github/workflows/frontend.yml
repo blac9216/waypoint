@@ -13,6 +13,14 @@ name: frontend
 #
 # scripts/check-coverage-floor.py is a shared input that controls the
 # coverage gate below — issue #412.
+#
+# backend/Waypoint.Core/Jobs/RunTypes.cs and
+# backend/Waypoint.Core/Catalog/DepotArtifact.cs (DepotArtifactStatuses) are
+# shared inputs too: frontend/src/screens/livejobs/runTypes.test.ts and
+# frontend/src/screens/catalog/artifactStatus.test.ts each read one of these
+# backend sources off disk at test time to guard against frontend/backend
+# vocabulary drift, so a change to either file must run this job on the same
+# PR that introduces the drift, not incidentally on a later one.
 on:
   pull_request:
   push:
@@ -58,6 +66,8 @@ jobs:
               - "frontend/**"
               - "scripts/check-coverage-floor.py"
               - ".github/workflows/frontend.yml"
+              - "backend/Waypoint.Core/Jobs/RunTypes.cs"
+              - "backend/Waypoint.Core/Catalog/DepotArtifact.cs"
 
   frontend:
     name: "build, test, lint (job)"

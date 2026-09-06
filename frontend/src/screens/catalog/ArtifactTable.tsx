@@ -7,7 +7,9 @@
  *   Status is `not downloaded` `--txt3` · `queued` `--warn` ·
  *   `downloading 43%` `--acc` with an inline progress bar · `verified`
  *   `--ok` · `failed — checksum mismatch` `--bad`. Selected rows get
- *   `--accd`."
+ *   `--accd`." `missing` (issue #1768's #1744-added backend value — a
+ *   presence-swept entry not found on disk) renders `--bad`, same tone as
+ *   `failed`, since both mean "not present" from an operator's view.
  *
  * Plus "Layout Rules Learned the Hard Way": percentage columns sum to 100%
  * on a `table-layout:fixed` table; nowrap cells get `overflow:hidden`;
@@ -16,7 +18,7 @@
  */
 import type { DownloadQueueItem } from "./catalog";
 import type { CatalogArtifact } from "./catalog";
-import { formatBytes } from "./catalog";
+import { displayStatus, formatBytes } from "./catalog";
 import "./ArtifactTable.css";
 
 export interface ArtifactTableProps {
@@ -47,15 +49,20 @@ function statusLabel(artifact: CatalogArtifact, live: DownloadQueueItem | undefi
 			return { text: "queued", tone: "warn" };
 		}
 	}
-	switch (artifact.status) {
-		case "queued":
-			return { text: "queued", tone: "warn" };
+	// Issue #1768: the backend's own `status` vocabulary (indexed/downloading/
+	// present/failed/missing) has no `queued` value — that state only ever
+	// comes from the live SSE overlay above — so this switches on
+	// `displayStatus`, the UI-only rendering vocabulary catalog.ts derives
+	// from it, rather than on the raw wire value.
+	switch (displayStatus(artifact.status)) {
 		case "downloading":
 			return { text: `downloading ${artifact.progress_percent ?? 0}%`, tone: "acc" };
 		case "verified":
 			return { text: "verified", tone: "ok" };
 		case "failed":
 			return { text: `failed — ${artifact.failure_reason ?? "checksum mismatch"}`, tone: "bad" };
+		case "missing":
+			return { text: "missing", tone: "bad" };
 		default:
 			return { text: "not downloaded", tone: "txt3" };
 	}
