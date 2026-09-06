@@ -332,6 +332,37 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 
+			// Issue #1453: the API process's IRetentionSweepService consumer
+			// (RetentionController's purge-now endpoint and the review-list deletion
+			// service below). The API host never calls AddWaypointExecution, so this
+			// is the only registration it ever sees. A runner host calls both this
+			// method and AddWaypointExecution (whose own comment registers the same
+			// interface for the scheduled retention-sweep job) against one shared
+			// container -- there the *last* registration wins the resolve, per
+			// Microsoft.Extensions.DependencyInjection's documented last-registration-
+			// wins rule for a single (non-IEnumerable) resolve, so a runner host never
+			// actually constructs this file's RetentionSweepService instance; only its
+			// registration exists, unused. Either way there is exactly one live
+			// instance per process, not two side-by-side ones, which is what keeps
+			// this safe despite the type carrying no per-call mutable state.
+			services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService>(serviceProvider => new Downloads.RetentionSweepService(
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionPolicyRepository>(),
+				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
+				serviceProvider.GetRequiredService<IJobEventPublisher>(),
+				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<Downloads.RetentionSweepService>>()));
+
+			// Issue #1453: the sole explicit, Admin-gated deletion path for a
+			// review-list entry -- see IReviewListDeletionService's own doc comment for
+			// why this is a separate interface from IReviewListService.
+			services.AddSingleton<Waypoint.Core.Downloads.IReviewListDeletionService>(serviceProvider => new Downloads.ReviewListDeletionService(
+				connectionString,
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionSweepService>(),
+				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<Downloads.ReviewListDeletionService>>()));
+
 			// Issue #241: depot-sync status is derived from the existing runs table
 			// (no dedicated appliance_state column), so this reads through the same
 			// connection string as the repository above rather than a separate table.
