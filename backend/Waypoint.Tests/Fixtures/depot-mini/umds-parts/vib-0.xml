@@ -2,5 +2,5 @@
 <vib>
 	<relative-path>vib20/esx-update/invented-fixture-pkg.vib</relative-path>
 	<packed-size>1024</packed-size>
-	<checksum checksum-type="sha-256">0000000000000000000000000000000000000000000000000000000000aa</checksum>
+	<checksum checksum-type="sha-256">0000000000000000000000000000000000000000000000000000000000aa0000</checksum>
 </vib>

@@ -72,7 +72,7 @@ public sealed class DepotMiniFixture : IDisposable
 		}
 	}
 
-	/// <summary>Copies every file under <paramref name="sourceDir"/> into <paramref name="destDir"/>, skipping <c>README.md</c> and <c>umds-parts/</c> (source-only), and stripping a trailing <c>.placeholder</c> suffix from any copied filename.</summary>
+	/// <summary>Copies every file under <paramref name="sourceDir"/> into <paramref name="destDir"/>, skipping <c>README.md</c>, <c>umds-parts/</c> (source-only), and the loader script itself (mirrors <c>New-DepotMiniFixture.ps1</c>'s own <c>-ne 'New-DepotMiniFixture.ps1'</c> exclusion, so both loaders materialize the SAME tree -- <see cref="Parity.DepotMiniLoaderParityTests"/>), and stripping a trailing <c>.placeholder</c> suffix from any copied filename.</summary>
 	private static void CopyStrippingPlaceholders(string sourceDir, string destDir)
 	{
 		Directory.CreateDirectory(destDir);
@@ -90,7 +90,7 @@ public sealed class DepotMiniFixture : IDisposable
 		foreach (string file in Directory.GetFiles(sourceDir))
 		{
 			string name = Path.GetFileName(file);
-			if (name == "README.md")
+			if (name is "README.md" or "New-DepotMiniFixture.ps1")
 			{
 				continue;
 			}

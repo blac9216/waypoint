@@ -5,28 +5,38 @@
         "productVersion": "9.1.0.5210.25573614",
         "artifacts": { "bundles": [ { "id": "b1", "binaries": [
           { "fileName": "vcsa-patch.iso", "checksum": "{{sha256:PROD/COMP/VCENTER/vcsa-patch.iso}}", "size": "{{size:PROD/COMP/VCENTER/vcsa-patch.iso}}" },
-          { "fileName": "vcsa-corrupt.iso", "checksum": "DEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDEADDE", "size": 999999 },
+          { "fileName": "vcsa-corrupt.iso", "checksum": "deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead", "size": 999999 },
           { "fileName": "vcsa-full-a-updaterepo.zip", "checksum": "{{sha256:PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip}}", "size": "{{size:PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip}}",
             "metadata": [ { "tag": "zip-expand",
               "configuration": { "key": "relative", "value": "vmw/1111aaaa/9.1.0.5210" } } ] },
-          { "fileName": "vcsa-full-b-updaterepo.zip", "checksum": "FABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFABCFA", "size": 6000000,
+          { "fileName": "vcsa-full-b-updaterepo.zip", "checksum": "fabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabcfabc", "size": 6000000,
             "metadata": [ { "tag": "zip-expand",
               "configuration": [ { "key": "unrelated", "value": "ignored" }, { "key": "relative", "value": "vmw/2222bbbb/9.1.0.5210" } ] } ] }
         ] } ] }
       },
       {
         "productVersion": "9.1.0.6543",
-        "artifacts": { "bundles": [ { "id": "b2", "binaries": [
-          { "fileName": "vcsa-fixture-9.1.0.6543.iso", "checksum": "CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECA", "size": 4200000 }
-        ] } ] }
+        "artifacts": { "bundles": [
+          { "id": "b2", "binaries": [
+            { "fileName": "vcsa-fixture-9.1.0.6543.iso", "checksum": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe", "size": 4200000 }
+          ] },
+          { "id": "b2b", "binaries": [
+            { "fileName": "vcsa-fixture-9.1.0.6543-patch.iso", "checksum": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef", "size": 500000 }
+          ] }
+        ] }
       }
     ],
     "NSX": [
       {
         "productVersion": "4.2.0",
-        "artifacts": { "bundles": [ { "id": "b3", "binaries": [
-          { "fileName": "nsx-missing.ova", "checksum": "BADD00BADD00BADD00BADD00BADD00BADD00BADD00BADD00BADD00BADD00BA", "size": 300000 }
-        ] } ] }
+        "artifacts": { "bundles": [
+          { "id": "b3", "binaries": [
+            { "fileName": "nsx-missing.ova", "checksum": "badd00badd00badd00badd00badd00badd00badd00badd00badd00badd00badd", "size": 300000 }
+          ] },
+          { "id": "b3b", "binaries": [
+            { "fileName": "nsx-missing.ova", "checksum": "0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b", "size": 999000 }
+          ] }
+        ] }
       }
     ],
     "ESXI": [
@@ -41,27 +51,27 @@
       { "productVersion": "1.2.0", "artifacts": { "bundles": [ { "id": "t0", "binaries": [
         { "fileName": "tkg-1.2.0.tar.gz", "checksum": "{{sha256:PROD/COMP/TKG/tkg-1.2.0.tar.gz}}", "size": "{{size:PROD/COMP/TKG/tkg-1.2.0.tar.gz}}" } ] } ] } },
       { "productVersion": "1.2.1", "artifacts": { "bundles": [ { "id": "t1", "binaries": [
-        { "fileName": "tkg-1.2.1.tar.gz", "checksum": "1111111111111111111111111111111111111111111111111111111111aa", "size": 111 } ] } ] } },
+        { "fileName": "tkg-1.2.1.tar.gz", "checksum": "111111111111111111111111111111111111111111111111111111111111aa11", "size": 111 } ] } ] } },
       { "productVersion": "1.2.2", "artifacts": { "bundles": [ { "id": "t2", "binaries": [
-        { "fileName": "tkg-1.2.2.tar.gz", "checksum": "2222222222222222222222222222222222222222222222222222222222aa", "size": 222 } ] } ] } },
+        { "fileName": "tkg-1.2.2.tar.gz", "checksum": "222222222222222222222222222222222222222222222222222222222222aa22", "size": 222 } ] } ] } },
       { "productVersion": "1.2.3", "artifacts": { "bundles": [ { "id": "t3", "binaries": [
         { "fileName": "tkg-1.2.3.tar.gz", "checksum": "{{sha256:PROD/COMP/TKG/tkg-1.2.3.tar.gz}}", "size": "{{size:PROD/COMP/TKG/tkg-1.2.3.tar.gz}}" } ] } ] } },
       { "productVersion": "1.2.4", "artifacts": { "bundles": [ { "id": "t4", "binaries": [
-        { "fileName": "tkg-1.2.4.tar.gz", "checksum": "4444444444444444444444444444444444444444444444444444444444aa", "size": 444 } ] } ] } },
+        { "fileName": "tkg-1.2.4.tar.gz", "checksum": "444444444444444444444444444444444444444444444444444444444444aa44", "size": 444 } ] } ] } },
       { "productVersion": "1.2.5", "artifacts": { "bundles": [ { "id": "t5", "binaries": [
-        { "fileName": "tkg-1.2.5.tar.gz", "checksum": "5555555555555555555555555555555555555555555555555555555555aa", "size": 555 } ] } ] } },
+        { "fileName": "tkg-1.2.5.tar.gz", "checksum": "555555555555555555555555555555555555555555555555555555555555aa55", "size": 555 } ] } ] } },
       { "productVersion": "1.2.6", "artifacts": { "bundles": [ { "id": "t6", "binaries": [
-        { "fileName": "tkg-1.2.6.tar.gz", "checksum": "6666666666666666666666666666666666666666666666666666666666aa", "size": 666 } ] } ] } },
+        { "fileName": "tkg-1.2.6.tar.gz", "checksum": "666666666666666666666666666666666666666666666666666666666666aa66", "size": 666 } ] } ] } },
       { "productVersion": "1.2.7", "artifacts": { "bundles": [ { "id": "t7", "binaries": [
-        { "fileName": "tkg-1.2.7.tar.gz", "checksum": "7777777777777777777777777777777777777777777777777777777777aa", "size": 777 } ] } ] } },
+        { "fileName": "tkg-1.2.7.tar.gz", "checksum": "777777777777777777777777777777777777777777777777777777777777aa77", "size": 777 } ] } ] } },
       { "productVersion": "1.2.8", "artifacts": { "bundles": [ { "id": "t8", "binaries": [
-        { "fileName": "tkg-1.2.8.tar.gz", "checksum": "8888888888888888888888888888888888888888888888888888888888aa", "size": 888 } ] } ] } },
+        { "fileName": "tkg-1.2.8.tar.gz", "checksum": "888888888888888888888888888888888888888888888888888888888888aa88", "size": 888 } ] } ] } },
       { "productVersion": "1.2.9", "artifacts": { "bundles": [ { "id": "t9", "binaries": [
-        { "fileName": "tkg-1.2.9.tar.gz", "checksum": "9999999999999999999999999999999999999999999999999999999999aa", "size": 999 } ] } ] } },
+        { "fileName": "tkg-1.2.9.tar.gz", "checksum": "999999999999999999999999999999999999999999999999999999999999aa99", "size": 999 } ] } ] } },
       { "productVersion": "1.2.10", "artifacts": { "bundles": [ { "id": "t10", "binaries": [
-        { "fileName": "tkg-1.2.10.tar.gz", "checksum": "1010101010101010101010101010101010101010101010101010101010aa", "size": 1010 } ] } ] } },
+        { "fileName": "tkg-1.2.10.tar.gz", "checksum": "1010101010101010101010101010101010101010101010101010101010aa1010", "size": 1010 } ] } ] } },
       { "productVersion": "1.2.11", "artifacts": { "bundles": [ { "id": "t11", "binaries": [
-        { "fileName": "tkg-1.2.11.tar.gz", "checksum": "1111101110111011101110111011101110111011101110111011101110aa", "size": 1111 } ] } ] } }
+        { "fileName": "tkg-1.2.11.tar.gz", "checksum": "1111101110111011101110111011101110111011101110111011101110aa1111", "size": 1111 } ] } ] } }
     ]
   }
 }

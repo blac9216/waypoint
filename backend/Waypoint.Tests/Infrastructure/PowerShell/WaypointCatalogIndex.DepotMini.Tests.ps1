@@ -14,15 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Issue #1696 deliverable 6 (additive): drives the REAL Invoke-WaypointCatalogIndex
-# against the SHARED depot-mini fixture (New-DepotMiniFixture.ps1), rather than the
-# hand-typed catalog JSON/manifest WaypointCatalogIndex.PresenceSweep.Tests.ps1 builds
-# inline. That suite is left untouched (its own hand-built fixture already covers
-# every one of PR #1629's round-1/2/3 findings, restated in this file's own
-# revert-verify recipe in the PR body) -- this file adds coverage the shared fixture
-# uniquely offers: a K8s-dominant product with many versions, a build-suffixed version
-# whose numeric segments exceed 255 (docs issue #1694's sanitize-scanner probe), and a
-# size-only catalog row.
+# Issue #1696 deliverable 6: drives the REAL Invoke-WaypointCatalogIndex against the
+# SHARED depot-mini fixture (New-DepotMiniFixture.ps1), rather than the hand-typed
+# catalog JSON/manifest WaypointCatalogIndex.PresenceSweep.Tests.ps1 builds inline.
+# This file adds coverage the shared fixture uniquely offers (a K8s-dominant product
+# with many versions, a build-suffixed version whose numeric segments exceed 255 --
+# docs issue #1694's sanitize-scanner probe -- and a size-only catalog row), AND, per
+# PR #1742 review round-1 finding 1, now also carries the layout-asserting cases
+# migrated from WaypointCatalogIndex.PresenceSweep.Tests.ps1 (present-file identity
+# fields, absent-from-disk, size/hash mismatch, zip-expand directory contents not
+# unknown) -- that suite's own remaining ~20 cases (fail-closed behavior, the
+# WaypointLogging adapter, and the module-internal Get-BinaryZipExpandRelativePath/
+# Get-ZipExpandDepotPrefix unit tests, none of which touch a depot tree) stay
+# hand-built; see #1740.
 
 BeforeAll {
 	# Shelled out to the SAME runner Parity/DepotMiniCatalogParityContractTests.cs uses
@@ -88,5 +92,42 @@ Describe 'Invoke-WaypointCatalogIndex against the shared depot-mini fixture (iss
 		$Row = $script:Results | Where-Object { $_.RelativePath -eq 'PROD/metadata/upgrade_info.xml' }
 		$Row | Should -Not -BeNullOrEmpty
 		$Row.RecordType | Should -Be 'ArtifactPresence'
+	}
+
+	It 'reports the deliberately-staged unknown file exactly once, at its depot-relative path' {
+		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' -and $_.RelativePath -eq 'stray/unexpected-file.bin' })
+		$Unknown.Count | Should -Be 1
+	}
+
+	It 'reports a matched present file with the DepotArtifactUpsert-shaped identity fields (issue #1488)' {
+		# Migrated from WaypointCatalogIndex.PresenceSweep.Tests.ps1 (PR #1742 review
+		# round-1 finding 1): keyed depot-relative (PROD/COMP/<Product>/<fileName>),
+		# matching how Get-FileManifest keys a real depot -- not the bare catalog
+		# fileName a pre-#1503 module looked up by.
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-patch.iso' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be 'present'
+		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-patch.iso'
+		$Row.Sha256 | Should -Match '^[0-9A-Fa-f]{64}$'
+		$Row.Product | Should -Be 'VCENTER'
+		$Row.Version | Should -Be '9.1.0.5210.25573614'
+	}
+
+	It 'reports a catalog entry absent from disk as missing (migrated from PresenceSweep.Tests.ps1)' {
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/NSX/nsx-missing.ova' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be 'missing'
+	}
+
+	It 'reports a size/hash mismatch as missing, not merely path-present (migrated from PresenceSweep.Tests.ps1)' {
+		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-corrupt.iso' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be 'missing'
+	}
+
+	It 'does not enumerate the zip-expand directory''s own contents as unknown files (migrated from PresenceSweep.Tests.ps1)' {
+		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'
 	}
 }

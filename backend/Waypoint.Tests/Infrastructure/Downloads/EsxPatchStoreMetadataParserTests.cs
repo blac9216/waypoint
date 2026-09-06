@@ -173,48 +173,14 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 	}
 
 	// ----- AC2: both store-root layouts -----------------------------------------
-
-	[Fact]
-	public void Parse_LegacyLayout_ResolvesHostupdateAtStoreRoot()
-	{
-		string hostupdateDir = Path.Combine(_root, "hostupdate");
-		WriteConsolidatedIndex(hostupdateDir, "vmw");
-		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "vmw-ESXi-9.1-metadata.zip");
-		WriteMetadataZip(Path.Combine(vendorDir, "vmw-ESXi-9.1-metadata.zip"), [("vib20/esx-update/pkg.vib", "cc".PadRight(64, '0'))]);
-
-		EsxPatchStoreParseResult result = _parser.Parse(_root);
-
-		Assert.True(result.Succeeded);
-		Assert.Equal(EsxPatchStoreLayout.Legacy, result.Metadata!.Layout);
-		Assert.Equal(hostupdateDir, result.Metadata.HostupdateRoot);
-		Assert.Single(result.Metadata.Bundles);
-	}
-
-	[Fact]
-	public void Parse_Depot91Layout_ResolvesHostupdateInsideDepotTree()
-	{
-		// Rooted exactly as the real 9.1 depot lays it out: PROD/COMP/ESX_HOST/patch-store/hostupdate.
-		string hostupdateDir = Path.Combine(_root, "PROD", "COMP", "ESX_HOST", "patch-store", "hostupdate");
-		WriteConsolidatedIndex(hostupdateDir, "vmw");
-		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-3.zip");
-		WriteMetadataZip(Path.Combine(vendorDir, "metadata-3.zip"), [("vib20/esx-update/pkg.vib", "dd".PadRight(64, '0'))]);
-
-		// 9.1-only siblings of hostupdate/ at the patch-store root, per research #1028 --
-		// version.txt, the vvs compatibility bundle, and the symlink-hostupdate symlink.
-		// None of these must ever be walked or surfaced by this parser.
-		string patchStoreRoot = Path.Combine(_root, "PROD", "COMP", "ESX_HOST", "patch-store");
-		File.WriteAllText(Path.Combine(patchStoreRoot, "version.txt"), "9.1.0.0100.12345678");
-		Directory.CreateDirectory(Path.Combine(patchStoreRoot, "vvs"));
-		File.WriteAllBytes(Path.Combine(patchStoreRoot, "vvs", "vvs-consolidated-bundle.zip"), [1, 2, 3]);
-
-		EsxPatchStoreParseResult result = _parser.Parse(_root);
-
-		Assert.True(result.Succeeded);
-		Assert.Equal(EsxPatchStoreLayout.Depot91, result.Metadata!.Layout);
-		Assert.Equal(hostupdateDir, result.Metadata.HostupdateRoot);
-		Assert.Single(result.Metadata.Bundles);
-		Assert.DoesNotContain(result.Metadata.VendorCodes, code => code.Contains("vvs", StringComparison.OrdinalIgnoreCase));
-	}
+	//
+	// The dual-layout structural cases that used to live here
+	// (Parse_LegacyLayout_ResolvesHostupdateAtStoreRoot /
+	// Parse_Depot91Layout_ResolvesHostupdateInsideDepotTree) are retired: PR #1742
+	// review round-1 finding 1 migrated them onto the shared depot-mini fixture --
+	// see EsxPatchStoreMetadataParserDepotMiniTests.Parse_LegacyLayout_FindsVendorAtStoreRoot
+	// and .Parse_Depot91Layout_FindsVendorAndSkipsStagingTree, which now assert the
+	// same Layout/HostupdateRoot/Bundles-count facts against depot-mini's tree.
 
 	[Fact]
 	public void Parse_ForcedLayout_OnlyProbesThatLayoutsPath()

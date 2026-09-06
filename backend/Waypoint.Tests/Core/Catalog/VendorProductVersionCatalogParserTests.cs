@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Waypoint.Core.Catalog;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Core.Catalog;
@@ -22,72 +23,52 @@ namespace Waypoint.Tests.Core.Catalog;
 /// Issue #687: <see cref="VendorProductVersionCatalogParser"/> against Broadcom's real
 /// <c>productVersionCatalog.json</c> shape (the same document
 /// <c>BroadcomManagedToolCatalogVerifier</c> authenticates for the VCFDT tool
-/// distribution).
+/// distribution). Per PR #1742 review round-1 finding 1, the two layout-asserting
+/// cases that used to hand-type their own catalog JSON now run against the shared
+/// <c>depot-mini</c> fixture (issue #1696) instead -- the flatten-across-components/
+/// bundles shape and the dedup-by-filename rule are both structural facts the shared
+/// catalog document already encodes; the edge-case behaviour tests below (malformed
+/// JSON, missing keys, a binary with no fileName) stay hand-typed since they assert
+/// parser tolerance, not depot layout.
 /// </summary>
 public sealed class VendorProductVersionCatalogParserTests
 {
 	[Fact]
 	public void Parse_FlattensBinariesAcrossComponentsAndBundles()
 	{
-		const string json = """
-			{
-			  "patches": {
-			    "VCENTER": [
-			      {
-			        "productVersion": "8.0.3.00900-25413364",
-			        "artifacts": { "bundles": [
-			          { "id": "b1", "binaries": [
-			            { "fileName": "a.iso", "checksum": "aa", "size": 100 },
-			            { "fileName": "b.zip", "checksum": "bb", "size": 200 }
-			          ] }
-			        ] }
-			      }
-			    ],
-			    "NSX": [
-			      {
-			        "productVersion": "4.2.0",
-			        "artifacts": { "bundles": [
-			          { "id": "b2", "binaries": [ { "fileName": "c.ova", "checksum": "cc", "size": 300 } ] }
-			        ] }
-			      }
-			    ]
-			  }
-			}
-			""";
+		using DepotMiniFixture fixture = new();
 
-		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(json);
+		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
 
-		Assert.Equal(3, result.Count);
-		DepotArtifactUpsert a = Assert.Single(result, r => r.RelativePath == "a.iso");
-		Assert.Equal("aa", a.Sha256);
-		Assert.Equal("indexed", a.Status);
-		Assert.Contains("\"product\":\"VCENTER\"", a.MetadataJson);
-		Assert.Contains("\"version\":\"8.0.3.00900-25413364\"", a.MetadataJson);
-		Assert.Contains("\"size_bytes\":100", a.MetadataJson);
+		// Flattens across components: VCENTER and NSX both contribute.
+		DepotArtifactUpsert vcenterBinary = Assert.Single(result, r => r.RelativePath == "vcsa-patch.iso");
+		Assert.Equal("indexed", vcenterBinary.Status);
+		Assert.Contains("\"product\":\"VCENTER\"", vcenterBinary.MetadataJson);
+		Assert.Contains("\"version\":\"9.1.0.5210.25573614\"", vcenterBinary.MetadataJson);
+		long materializedSize = new FileInfo(Path.Combine(fixture.RootPath, "PROD", "COMP", "VCENTER", "vcsa-patch.iso")).Length;
+		Assert.Contains($"\"size_bytes\":{materializedSize}", vcenterBinary.MetadataJson);
+		Assert.Equal(64, vcenterBinary.Sha256!.Length);
+
+		Assert.Single(result, r => r.RelativePath == "nsx-missing.ova");
+
+		// Flattens across bundles of the SAME entry: 9.1.0.6543 has two bundles
+		// (b2, b2b), each contributing its own binary.
+		Assert.Single(result, r => r.RelativePath == "vcsa-fixture-9.1.0.6543.iso");
+		Assert.Single(result, r => r.RelativePath == "vcsa-fixture-9.1.0.6543-patch.iso");
 	}
 
 	[Fact]
 	public void Parse_SameFileNameAcrossBundles_DeduplicatesByFileName()
 	{
-		const string json = """
-			{
-			  "patches": {
-			    "VCENTER": [
-			      {
-			        "productVersion": "8.0.3",
-			        "artifacts": { "bundles": [
-			          { "id": "install", "binaries": [ { "fileName": "shared.iso", "checksum": "aa", "size": 100 } ] },
-			          { "id": "patch", "binaries": [ { "fileName": "shared.iso", "checksum": "aa", "size": 100 } ] }
-			        ] }
-			      }
-			    ]
-			  }
-			}
-			""";
+		using DepotMiniFixture fixture = new();
 
-		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(json);
+		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
 
-		Assert.Single(result);
+		// NSX's "4.2.0" entry carries "nsx-missing.ova" in two bundles (b3, b3b) with
+		// different checksums -- the parser must keep exactly one entry, the LAST
+		// bundle in document order (b3b's checksum), never two rows for one filename.
+		DepotArtifactUpsert nsxBinary = Assert.Single(result, r => r.RelativePath == "nsx-missing.ova");
+		Assert.Equal("0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b", nsxBinary.Sha256);
 	}
 
 	[Fact]

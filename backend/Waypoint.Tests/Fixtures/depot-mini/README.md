@@ -31,6 +31,8 @@ and would pass either way).
 | `metadata[]` entry with `tag: "zip-expand"`, `configuration: { key: "relative", value: "vmw/<uuid>/<version>" }` (VCENTER's two zip binaries) | #1027 comment (same URL) ratified zip-expand scope addition; PR #1629 round-1 finding 1/5 (two same-version zips each carry their own distinct `relative` value and must not collide) |
 | `configuration` as a single object (zip a) AND as an array of key/value pairs (zip b) | `Get-BinaryZipExpandRelativePath`'s own doc comment: "read defensively as either... the catalog document's own shape is not ours to assume beyond what #1027 documented" |
 | Zip binary staged alongside its own expanded tree (round-3 steady state) | PR #1629 round-3 review finding 1 -- the fully-staged case no prior fixture round staged |
+| `vcsa-fixture-9.1.0.6543-patch.iso`: a second bundle (`b2b`) in the SAME catalog entry as `b2` | issue #687's flattening contract (`VendorProductVersionCatalogParser`'s own doc comment: "flattens every binary across every component/entry") -- a distinct binary contributed by a second bundle of one entry, not only by a separate entry/component |
+| `nsx-missing.ova` listed in two bundles (`b3`, `b3b`) of the same entry with different checksums | `VendorProductVersionCatalogParser.Parse`'s dedup-by-filename rule (issue #687, `byFileName[upsert.RelativePath] = upsert`) / `ConvertFrom-WaypointCatalogJson`'s identical `$ByFileName[$Binary.fileName] = ...` overwrite -- both consumers keep the LAST bundle in document order, proven here against a real document instead of only a hand-typed JSON string |
 | `vcsa-corrupt.iso`: on-disk bytes present but size/hash disagree with the catalog | `Test-CatalogEntryPresent` -- a mismatch is "missing", not merely path-present |
 | `esxi-image.iso`: size-only catalog row (no `checksum` field) | issue #1696 dispatch requirement; exercises the null-safe hash comparison in `Test-CatalogEntryPresent` / `TryParseBinary` |
 | `TKG` component: 12 versions, only 2 staged on disk | issue #1696 dispatch requirement ("K8s-dominant product with many versions"); mirrors #1027's empirical finding that the Kubernetes-release product key is ~0% staged in a real depot |
@@ -57,7 +59,11 @@ identically, immediately after copying the tree (and stripping `.placeholder`
 suffixes) into a throwaway temp directory -- so hash verification against these rows
 is real, not asserted-then-ignored. Every other entry (the corrupt/missing/TKG-filler
 rows) carries a literal, invented, and deliberately never-matching hash string, because
-those rows exist specifically to prove a mismatch or an absence, not a match.
+those rows exist specifically to prove a mismatch or an absence, not a match. Every
+literal, invented hash is still exactly 64 lowercase hex characters -- the real SHA-256
+shape -- so a hash-length/format regression in either parser is not silently uncatchable
+just because the fixture's own hash never matches; `Parity/DepotMiniFixtureLintTests.cs`
+guards this over every checked-in `checksum`/`checksum-type="sha-256"` value.
 
 ## Extending this fixture
 
@@ -65,7 +71,8 @@ those rows exist specifically to prove a mismatch or an absence, not a match.
    named `<real-name>.placeholder`, containing a one-line invented description.
 2. Add its catalog entry to `productVersionCatalog.json`, using a `{{sha256:...}}` /
    `{{size:...}}` token pair if you want real hash verification, or a literal fabricated
-   hash if the row exists to prove a mismatch/absence.
+   hash if the row exists to prove a mismatch/absence -- a literal hash MUST be exactly
+   64 lowercase hex characters (`DepotMiniFixtureLintTests` enforces this).
 3. Add a row to the table above naming the research finding or documented layout fact
    the new structural detail encodes. An addition with no such row is not
    fixture-worthy -- it belongs in an ad hoc per-test fixture instead.

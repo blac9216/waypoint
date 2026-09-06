@@ -87,7 +87,7 @@ public sealed class DepotMiniCatalogParityContractTests
 
 		Assert.Empty(onlyInCSharp);
 		Assert.Empty(onlyInPowerShell);
-		Assert.Equal(19, csharpIdentities.Count); // VCENTER 5 + NSX 1 + ESXI 1 + TKG 12 (depot-mini/README.md's catalog).
+		Assert.Equal(20, csharpIdentities.Count); // VCENTER 6 + NSX 1 + ESXI 1 + TKG 12 (depot-mini/README.md's catalog; NSX's two same-fileName bundles dedup to 1).
 	}
 
 	/// <summary>Depot-relative identity a catalog entry resolves to, per the documented rule <c>PROD/COMP/&lt;Product&gt;/&lt;fileName&gt;</c> (#1027; <c>Get-CatalogEntryDepotRelativePath</c>).</summary>
