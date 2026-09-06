@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Text.Json;
+using Waypoint.Core.Versions;
 
 namespace Waypoint.Core.Catalog;
 
@@ -36,20 +37,32 @@ public static class LibraryPresenceEvaluator
 {
 	/// <summary>
 	/// Projects the full artifact list into <see cref="LibraryItem"/>s. "Superseded" is
-	/// evaluated per product: a `present` artifact is superseded if another `present`
-	/// artifact of the same product has a lexicographically later version. Version
-	/// strings are compared ordinally (no semver parser here) -- good enough to rank the
-	/// invented fixtures/dotted-numeric depot versions this project actually sees;
-	/// documented rather than silently approximate.
+	/// evaluated per product using <see cref="ProductVersionComparer"/> (issue #1039,
+	/// closes #572: ordinal string comparison misranked e.g. <c>9.10</c> below
+	/// <c>9.9</c>) -- a `present` artifact is superseded if another `present` artifact
+	/// of the same product parses to a structurally later version. A version string
+	/// that <see cref="ProductVersionParser"/> cannot parse is never marked superseded
+	/// and never used to decide another artifact's supersession (epic #16 decision
+	/// R2-5: quarantined versions are "never auto-pruned/superseded") -- this evaluator
+	/// has no catalog releaseDate to fall back on (<see cref="DepotArtifact"/> carries
+	/// none today), so an unparseable version here is treated the same as quarantined:
+	/// visible, always <c>Present</c>, never the supersession reference.
 	/// </summary>
 	public static IReadOnlyList<LibraryItem> Evaluate(IReadOnlyList<DepotArtifact> artifacts, bool connected)
 	{
 		ArgumentNullException.ThrowIfNull(artifacts);
 
-		Dictionary<string, string?> latestPresentVersionByProduct = artifacts
+		Dictionary<string, ProductVersion?> latestPresentVersionByProduct = artifacts
 			.Where(a => string.Equals(a.Status, "present", StringComparison.Ordinal) && a.Product is not null)
 			.GroupBy(a => a.Product!)
-			.ToDictionary(g => g.Key, g => g.Select(a => a.Version).Where(v => v is not null).OrderDescending(StringComparer.Ordinal).FirstOrDefault());
+			.ToDictionary(
+				g => g.Key,
+				g => g
+					.Where(a => a.Version is not null)
+					.Select(a => ProductVersionParser.Parse(a.Version, a.Product))
+					.Where(v => v.IsParsed)
+					.OrderByDescending(v => v, ProductVersionComparer.Instance)
+					.FirstOrDefault());
 
 		List<LibraryItem> items = new(artifacts.Count);
 		foreach (DepotArtifact artifact in artifacts)
@@ -58,8 +71,10 @@ public static class LibraryPresenceEvaluator
 			string presence;
 			if (present)
 			{
-				string? latest = artifact.Product is not null && latestPresentVersionByProduct.TryGetValue(artifact.Product, out string? v) ? v : null;
-				bool isLatest = latest is null || artifact.Version is null || string.Equals(latest, artifact.Version, StringComparison.Ordinal);
+				ProductVersion? latest = artifact.Product is not null && latestPresentVersionByProduct.TryGetValue(artifact.Product, out ProductVersion? v) ? v : null;
+				ProductVersion current = ProductVersionParser.Parse(artifact.Version, artifact.Product);
+				bool isLatest = latest is null || artifact.Version is null || !current.IsParsed
+					|| ProductVersionComparer.Instance.Compare(current, latest) == 0;
 				presence = isLatest ? LibraryPresenceStates.Present : LibraryPresenceStates.Superseded;
 			}
 			else
