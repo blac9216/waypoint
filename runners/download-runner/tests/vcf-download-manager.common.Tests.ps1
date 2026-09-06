@@ -34,6 +34,20 @@ Describe 'Format-ByteSize' {
 	) {
 		Format-ByteSize -Bytes $Bytes | Should -Be $Expected
 	}
+
+	# Unit-boundary regression (issue #1719): the -ge comparisons in
+	# Format-ByteSize are boundary-inclusive by design (exactly 1KB reads as
+	# "1 KB", not "1024 B"; exactly 1MB reads as "1.0 MB", not "1,024 KB"). A
+	# -ge -> -gt mutation at either threshold silently shifts these exact
+	# values down one unit while every other case in this Describe still
+	# passes, so the boundary itself has to be asserted directly.
+	It 'formats exactly 1KB as 1 KB, not 1024 B' {
+		Format-ByteSize -Bytes 1KB | Should -Be '1 KB'
+	}
+
+	It 'formats exactly 1MB as 1.0 MB, not 1,024 KB' {
+		Format-ByteSize -Bytes 1MB | Should -Be '1.0 MB'
+	}
 }
 
 Describe 'Write-Log' {
