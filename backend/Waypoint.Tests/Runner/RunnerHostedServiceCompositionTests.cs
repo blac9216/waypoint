@@ -39,10 +39,12 @@ namespace Waypoint.Tests.Runner;
 ///
 /// <see cref="ComplianceRunnerCompositionTests"/> already proves the sibling
 /// <see cref="Waypoint.Core.Jobs.JobHandlerRegistry"/> domain split this way; this class
-/// proves the hosted-service half of the same split by building each host's
-/// <see cref="IServiceCollection"/> exactly as its own <c>Program.cs</c> does (see
-/// <c>Waypoint.ComplianceRunner.Program</c>'s <c>AddContentPullReconcileSweep</c> call
-/// and <c>Waypoint.DownloadRunner.Program</c>'s deliberate absence of one) and then
+/// proves the hosted-service half of the same split by building the part of each host's
+/// <see cref="IServiceCollection"/> that can register
+/// <see cref="ContentPullReconcileHostedService"/> -- <c>AddWaypointInfrastructure</c> +
+/// <c>AddWaypointExecution</c>, plus <c>AddContentPullReconcileSweep</c> on the
+/// compliance side only (see <c>Waypoint.ComplianceRunner.Program</c>'s call and
+/// <c>Waypoint.DownloadRunner.Program</c>'s deliberate absence of one) -- and then
 /// actually calling <c>BuildServiceProvider</c> with both
 /// <see cref="ServiceProviderOptions.ValidateOnBuild"/> and
 /// <see cref="ServiceProviderOptions.ValidateScopes"/> set -- not merely inspecting the
@@ -51,6 +53,21 @@ namespace Waypoint.Tests.Runner;
 /// dependency" (exactly the empty-configuration regression above). Every case here
 /// covers both a configuration with <c>ConnectionStrings:Waypoint</c> set and one
 /// without it, since the empty case is the one the original fix missed.
+///
+/// PR #1745 round 2 (finding A): this is deliberately NOT a full re-composition of
+/// either host, and the validated build here therefore validates a strict subset of the
+/// real graph. Both helpers omit <c>DatabaseConnectionStringResolver.ResolveAndApply</c>,
+/// the hosts' options bindings (<c>RunnerHealthOptions</c> / <c>DownloadRunnerOptions</c>),
+/// <c>IWorkerRegistryWriter</c>, the download host's <c>JobHandlerRegistry</c> capability
+/// override, and the health/readiness hosted services
+/// (<c>RunnerHealthReportingHostedService</c>, <c>ComplianceReadinessCheck</c>,
+/// <c>ReadinessReportingHostedService</c>) -- registrations unrelated to whether the
+/// content-pull sweep is wired, whose real dependencies (a resolved connection string, a
+/// live worker registry) a unit test cannot supply. A green case here therefore means
+/// "the content-pull sweep composition is correct and resolvable", not "this host boots";
+/// the compliance-runner's boot with no connection string in fact still fails on the
+/// unconditional <c>RunnerHealthReportingHostedService</c> registration
+/// (<c>Waypoint.ComplianceRunner.Program.cs:110</c>), tracked separately.
 /// </summary>
 public sealed class RunnerHostedServiceCompositionTests
 {
@@ -76,7 +93,17 @@ public sealed class RunnerHostedServiceCompositionTests
 		ValidateScopes = true,
 	};
 
-	/// <summary>Mirrors <c>Waypoint.ComplianceRunner.Program</c>'s composition exactly, including its <c>AddContentPullReconcileSweep</c> call.</summary>
+	/// <summary>
+	/// Builds the compliance-runner's infrastructure + execution registrations --
+	/// <c>AddWaypointInfrastructure</c>, <c>AddWaypointExecution</c> and the
+	/// <c>AddContentPullReconcileSweep</c> call that only this host makes -- which are the
+	/// registrations that decide whether <see cref="ContentPullReconcileHostedService"/>
+	/// is wired. It deliberately omits the rest of <c>Waypoint.ComplianceRunner.Program</c>
+	/// (see the class comment: <c>ResolveAndApply</c>, the <c>RunnerHealthOptions</c>
+	/// binding, <c>IWorkerRegistryWriter</c>, <c>ComplianceReadinessCheck</c> and
+	/// <c>RunnerHealthReportingHostedService</c>), none of which can register or suppress
+	/// the sweep and none of which is resolvable without a real database and registry.
+	/// </summary>
 	private static ServiceCollection BuildComplianceRunnerServices(IConfiguration configuration)
 	{
 		ServiceCollection services = new();
@@ -88,9 +115,13 @@ public sealed class RunnerHostedServiceCompositionTests
 	}
 
 	/// <summary>
-	/// Mirrors <c>Waypoint.DownloadRunner.Program</c>'s composition exactly --
-	/// <see cref="ServiceCollectionExtensions.AddWaypointExecution"/> only, never
-	/// <c>AddContentPullReconcileSweep</c>.
+	/// The download-runner's counterpart of
+	/// <see cref="BuildComplianceRunnerServices"/>: the same infrastructure + execution
+	/// registrations (<see cref="ServiceCollectionExtensions.AddWaypointExecution"/> and
+	/// no more), never <c>AddContentPullReconcileSweep</c> -- which is precisely the
+	/// difference issue #1707 is about. It omits the same categories of registration the
+	/// class comment lists, plus this host's <c>DownloadRunnerOptions</c> binding and its
+	/// <c>JobHandlerRegistry</c> capability override; none of them can register the sweep.
 	/// </summary>
 	private static ServiceCollection BuildDownloadRunnerServices(IConfiguration configuration)
 	{

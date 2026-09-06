@@ -35,7 +35,10 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// API). One sweep pass is independent per pull: one pull's reconcile failure is logged
 /// and does not block the others, and the row stays selectable for the next pass
 /// (<c>ContentPullReconcileService.TryReconcileAsync</c> only marks rows reconciled on
-/// success), so a transient fault self-heals on the following tick.
+/// success), so a transient fault self-heals on the following tick. The one exception
+/// to that per-pull independence is a <c>42501</c> (insufficient_privilege): it is not
+/// transient at either level, so both the pending-list call and the per-pull reconcile
+/// path log it once and stop the loop rather than repeating it per pull per tick.
 ///
 /// Known trade-off (PR #1745 round 1, deferred to issue #1762): when
 /// <see cref="ExecuteAsync"/> stops the sweep loop after an
@@ -129,6 +132,17 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
 				return SweepOutcome.Cancelled;
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+			{
+				// PR #1745 round 2 (note C): the same non-transient case as the list call
+				// above, one layer down. A 42501 raised while reconciling an individual
+				// pull would otherwise fall into the generic catch below and log once per
+				// pending pull per tick forever -- the exact flood shape issue #1707 is
+				// about. Log once, stop the loop with the same outcome, and let the rows
+				// stay for a sweep started by a correctly-granted role.
+				LogAuthorizationDenied(exception);
+				return SweepOutcome.AuthorizationDenied;
 			}
 			catch (Exception exception)
 			{
