@@ -332,6 +332,31 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 
+			// Issue #1453: the API-process's own IRetentionSweepService consumer
+			// (RetentionController's purge-now endpoint and the review-list deletion
+			// service below) -- distinct from whatever runner-hosted registration
+			// AddWaypointExecution adds for the scheduled retention-sweep job; both
+			// resolve to their own RetentionSweepService instance over the same
+			// singleton repositories/options registered above, which is safe since the
+			// type carries no per-call mutable state.
+			services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService>(serviceProvider => new Downloads.RetentionSweepService(
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionPolicyRepository>(),
+				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
+				serviceProvider.GetRequiredService<IJobEventPublisher>(),
+				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<Downloads.RetentionSweepService>>()));
+
+			// Issue #1453: the sole explicit, Admin-gated deletion path for a
+			// review-list entry -- see IReviewListDeletionService's own doc comment for
+			// why this is a separate interface from IReviewListService.
+			services.AddSingleton<Waypoint.Core.Downloads.IReviewListDeletionService>(serviceProvider => new Downloads.ReviewListDeletionService(
+				connectionString,
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionSweepService>(),
+				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<Downloads.ReviewListDeletionService>>()));
+
 			// Issue #241: depot-sync status is derived from the existing runs table
 			// (no dedicated appliance_state column), so this reads through the same
 			// connection string as the repository above rather than a separate table.
