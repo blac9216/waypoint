@@ -344,8 +344,150 @@ Describe 'Test-DirectoryAccess' {
 }
 
 Describe 'Save-WebFile' {
+	BeforeAll {
+		# The real PS7 -PassThru response's Headers is a
+		# Dictionary<string, IEnumerable<string>>, so indexing it yields a
+		# String[], never a plain String (PR #1743 review round 1, finding
+		# 2). Every mock below must reproduce that shape through this one
+		# helper -- a hashtable-with-string-value mock would let the
+		# production code's array-vs-scalar bug pass unnoticed, which is
+		# exactly what happened in round 0.
+		function New-RangeMockResponse {
+			param(
+				[Parameter(Mandatory)] [int] $StatusCode,
+				[string] $ContentRange
+			)
+			$Headers = [System.Collections.Generic.Dictionary[string, object]]::new()
+			if ($PSBoundParameters.ContainsKey('ContentRange')) {
+				$Headers['Content-Range'] = [string[]]@($ContentRange)
+			}
+			[pscustomobject]@{ StatusCode = $StatusCode; Headers = $Headers }
+		}
+	}
+
 	BeforeEach {
 		Mock Start-Sleep {}
+	}
+
+	It 'builds the Content-Range mock header as a String[], matching the real -PassThru response shape' {
+		$Response = New-RangeMockResponse -StatusCode 206 -ContentRange 'bytes 5-9/10'
+		# The comma operator prevents the pipeline from unrolling the array
+		# into its single element before Should sees it.
+		, $Response.Headers['Content-Range'] | Should -BeOfType [string[]]
+	}
+
+	It 'resumes a genuine 206 response from a real HttpListener, and restarts a genuine 200-to-ranged response, byte-for-byte' {
+		# No mocks: drives Save-WebFile against an actual System.Net.HttpListener
+		# so the -PassThru response's real Headers/StatusCode shape is exercised
+		# end to end (PR #1743 review round 1, finding 2 -- the mocked cases
+		# above cannot, by construction, catch a mismatch between the mock's
+		# shape and the cmdlet's real one).
+		$Listener = [System.Net.HttpListener]::new()
+		$Port = $null
+		$Bound = $false
+		foreach ($Candidate in (Get-Random -Minimum 20000 -Maximum 40000 -Count 5)) {
+			try {
+				$Listener.Prefixes.Clear()
+				$Listener.Prefixes.Add("http://127.0.0.1:$Candidate/")
+				$Listener.Start()
+				$Port = $Candidate
+				$Bound = $true
+				break
+			} catch {
+				continue
+			}
+		}
+		if (-not $Bound) {
+			Set-ItResult -Skipped -Because 'could not bind a local HttpListener port in this sandbox'
+			return
+		}
+
+		try {
+			$Job = Start-ThreadJob -ScriptBlock {
+				param($Listener)
+				$Full = [System.Text.Encoding]::ASCII.GetBytes('1234567890')
+				for ($i = 0; $i -lt 2; $i++) {
+					try { $Context = $Listener.GetContext() } catch { break }
+					$Request = $Context.Request
+					$Response = $Context.Response
+					$Range = $Request.Headers['Range']
+					if ($Range -and $Range -match 'bytes=(\d+)-') {
+						$Start = [int]$Matches[1]
+						$Response.StatusCode = 206
+						$Response.Headers.Add('Content-Range', "bytes $Start-9/10")
+						$Bytes = $Full[$Start..9]
+					} else {
+						$Response.StatusCode = 200
+						$Bytes = $Full
+					}
+					$Response.ContentLength64 = $Bytes.Length
+					$Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+					$Response.OutputStream.Close()
+				}
+			} -ArgumentList $Listener
+
+			# Genuine 206 resume: 5 of 10 bytes already on disk.
+			$ResumeOut = Join-Path -Path $TestDrive -ChildPath 'download/live-206.bin'
+			New-Item -Path (Split-Path $ResumeOut -Parent) -ItemType Directory -Force | Out-Null
+			[System.IO.File]::WriteAllBytes($ResumeOut, [System.Text.Encoding]::ASCII.GetBytes('12345'))
+
+			$Result = Save-WebFile -Url "http://127.0.0.1:$Port/live" -OutFile $ResumeOut -ExpectedSize 10 -RetryCount 1
+
+			$Result.Success | Should -BeTrue
+			[System.IO.File]::ReadAllBytes($ResumeOut) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
+		} finally {
+			$Listener.Stop()
+			$Listener.Close()
+			Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+		}
+
+		# Genuine 200-to-ranged restart: a second real listener that always
+		# ignores Range and answers 200 + the full body, on a second port.
+		$RestartListener = [System.Net.HttpListener]::new()
+		$RestartPort = $null
+		$RestartBound = $false
+		foreach ($Candidate in (Get-Random -Minimum 20000 -Maximum 40000 -Count 5)) {
+			try {
+				$RestartListener.Prefixes.Clear()
+				$RestartListener.Prefixes.Add("http://127.0.0.1:$Candidate/")
+				$RestartListener.Start()
+				$RestartPort = $Candidate
+				$RestartBound = $true
+				break
+			} catch {
+				continue
+			}
+		}
+		if (-not $RestartBound) {
+			Set-ItResult -Skipped -Because 'could not bind a second local HttpListener port in this sandbox'
+			return
+		}
+
+		try {
+			$RestartJob = Start-ThreadJob -ScriptBlock {
+				param($Listener)
+				$Full = [System.Text.Encoding]::ASCII.GetBytes('1234567890')
+				try { $Context = $Listener.GetContext() } catch { return }
+				$Response = $Context.Response
+				$Response.StatusCode = 200
+				$Response.ContentLength64 = $Full.Length
+				$Response.OutputStream.Write($Full, 0, $Full.Length)
+				$Response.OutputStream.Close()
+			} -ArgumentList $RestartListener
+
+			$RestartOut = Join-Path -Path $TestDrive -ChildPath 'download/live-200-restart.bin'
+			New-Item -Path (Split-Path $RestartOut -Parent) -ItemType Directory -Force | Out-Null
+			[System.IO.File]::WriteAllBytes($RestartOut, [System.Text.Encoding]::ASCII.GetBytes('12345'))
+
+			$RestartResult = Save-WebFile -Url "http://127.0.0.1:$RestartPort/live" -OutFile $RestartOut -ExpectedSize 10 -RetryCount 1
+
+			$RestartResult.Success | Should -BeTrue
+			[System.IO.File]::ReadAllBytes($RestartOut) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
+		} finally {
+			$RestartListener.Stop()
+			$RestartListener.Close()
+			Remove-Job -Job $RestartJob -Force -ErrorAction SilentlyContinue
+		}
 	}
 
 	It 'downloads successfully on the first attempt' {
@@ -431,6 +573,7 @@ Describe 'Save-WebFile' {
 		Mock Invoke-WebRequest {
 			# Range-resume request: server answers with the remaining bytes.
 			Set-Content -Path $OutFile -Value '890' -NoNewline
+			New-RangeMockResponse -StatusCode 206 -ContentRange 'bytes 7-9/10'
 		}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/resume.bin' -OutFile $Out -ExpectedSize 10
@@ -463,30 +606,92 @@ Describe 'Save-WebFile' {
 		Set-Content -Path $Out -Value '12345' -NoNewline
 
 		Mock Invoke-WebRequest {
-			# Server honors Range and returns only the remaining bytes.
+			# Server honors Range and returns only the remaining bytes, with a
+			# Content-Range confirming the range start matches the partial size.
 			Set-Content -Path $OutFile -Value '67890' -NoNewline
+			New-RangeMockResponse -StatusCode 206 -ContentRange 'bytes 5-9/10'
 		}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/partial.bin' -OutFile $Out -ExpectedSize 10
 
 		$Result.Success | Should -BeTrue
-		(Get-Content -LiteralPath $Out -Raw) | Should -Be '1234567890'
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
 	}
 
-	It 'accepts a full-file (200) response to a Range request that the server did not honor' {
-		$Out = Join-Path -Path 'TestDrive:' -ChildPath 'download/full-on-range.bin'
+	It 'restarts from zero on a 200 response to a ranged request (edge cache ignored Range), logging a Warning' {
+		# issue #1169: an edge-cached vendor object can answer a ranged GET
+		# with 200 + the full body instead of 206. The old heuristic compared
+		# body size to the expected remainder; here the 200 body is LARGER
+		# than the remainder (10 - 3 = 7), which the old heuristic also
+		# happened to classify correctly, but the decision must be driven by
+		# the status code, not the size, so this pins that.
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/full-on-range.bin'
 		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
 		Set-Content -Path $Out -Value '123' -NoNewline
 
 		Mock Invoke-WebRequest {
 			# Server ignores Range and returns the whole file in the temp path.
 			Set-Content -Path $OutFile -Value '1234567890' -NoNewline
+			[pscustomobject]@{ StatusCode = 200; Headers = @{} }
 		}
+		Mock Write-Log {}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/full-on-range.bin' -OutFile $Out -ExpectedSize 10
 
 		$Result.Success | Should -BeTrue
-		(Get-Content -LiteralPath $Out -Raw) | Should -Be '1234567890'
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
+		Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like '*answered with 200 instead of 206*' }
+	}
+
+	It 'restarts from zero on a 200 response whose body is SHORTER than the remainder, and the size check then fails honestly' {
+		# The old size-only heuristic's blind spot: a 200 body that happens to
+		# be <= the expected remainder was misread as a legitimate partial
+		# response and appended, corrupting the file. It must still be
+		# recognized as a restart (full body, wrong offset) and the eventual
+		# size mismatch must surface as a real error, not a silently-corrupt
+		# "success".
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/short-on-restart.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '123' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Remainder would be 7 bytes (10 - 3); this 200 body is only 4 bytes,
+			# well under the remainder -- the size heuristic would have appended it.
+			Set-Content -Path $OutFile -Value 'ABCD' -NoNewline
+			[pscustomobject]@{ StatusCode = 200; Headers = @{} }
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/short-on-restart.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*Size mismatch*'
+
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('ABCD'))
+	}
+
+	It 'throws when a 206 response Content-Range start does not match the requested offset' {
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/range-mismatch.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '12345' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Server answers 206 but for a different offset than requested.
+			Set-Content -Path $OutFile -Value 'XYZ' -NoNewline
+			New-RangeMockResponse -StatusCode 206 -ContentRange 'bytes 2-4/10'
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/range-mismatch.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*Content-Range starting at 2*'
+	}
+
+	It 'throws when a 206 response body length disagrees with its own Content-Range' {
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/range-body-mismatch.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '12345' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Content-Range claims 5 bytes (5-9) but the body is only 2 bytes.
+			Set-Content -Path $OutFile -Value 'XY' -NoNewline
+			New-RangeMockResponse -StatusCode 206 -ContentRange 'bytes 5-9/10'
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/range-body-mismatch.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*declared 5 bytes*'
 	}
 }
 

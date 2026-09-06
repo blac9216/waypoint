@@ -714,28 +714,74 @@ function Save-WebFile {
 				} elseif ($PartialSize -gt 0) {
 					Write-Log "Resuming download from byte $PartialSize of ${ExpectedSize}: $Url (attempt $Attempt/$RetryCount)" -Severity 'Verbose' @WriteLogParams
 					$ResumeHeaders = @{ 'Range' = "bytes=$PartialSize-" }
-					try {
-						Invoke-WebRequest -Uri $Url -Headers $ResumeHeaders -OutFile $TempPath -UseBasicParsing -ErrorAction Stop
-						$TempSize = (Get-Item -LiteralPath $TempPath).Length
-						$ExpectedRemaining = $ExpectedSize - $PartialSize
+					# -PassThru keeps the -OutFile behavior (body streamed to $TempPath)
+					# while also returning the response so the status code and
+					# Content-Range header -- not the body size -- drive the
+					# append-vs-restart decision (issue #1169: an edge-cached
+					# object can answer a ranged GET with 200 + the full body,
+					# and a size-only heuristic mis-classifies that when the
+					# body happens to be <= the expected remainder).
+					$RangeResponse = Invoke-WebRequest -Uri $Url -Headers $ResumeHeaders -OutFile $TempPath -PassThru -UseBasicParsing -ErrorAction Stop
+					$RangeStatus = [int]$RangeResponse.StatusCode
+					$TempSize = (Get-Item -LiteralPath $TempPath).Length
 
-						if ($TempSize -gt $ExpectedRemaining) {
-							# Server returned full file (200) - didn't support Range
-							Move-Item -LiteralPath $TempPath -Destination $OutFile -Force
-						} else {
-							# Partial content (206) - append to existing file
-							$SourceStream = [System.IO.FileStream]::new($TempPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
-							$DestStream = [System.IO.FileStream]::new($OutFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
-							try {
-								$SourceStream.CopyTo($DestStream)
-							} finally {
-								$SourceStream.Close()
-								$DestStream.Close()
+					if ($RangeStatus -eq 206) {
+						# A real PS7 -PassThru response's Headers is a
+						# Dictionary<string, IEnumerable<string>>, so this
+						# indexer yields a String[], not a String (issue
+						# #1743 review round 1, finding 1). -match against a
+						# collection filters the collection instead of
+						# matching a pattern, leaving $Matches unset while
+						# the `if` reads as truthy -- coerce to a scalar and
+						# use [regex]::Match() instead of the scope-fragile
+						# $Matches automatic variable.
+						$ContentRangeRaw = $RangeResponse.Headers['Content-Range']
+						$ContentRange = if ($null -eq $ContentRangeRaw) { $null } else { @($ContentRangeRaw) -join '' }
+						$RangeStart = $null
+						$RangeEnd = $null
+						if ($ContentRange) {
+							$RangeMatch = [regex]::Match($ContentRange, '^bytes\s+(\d+)-(\d+)/(\d+|\*)$')
+							if ($RangeMatch.Success) {
+								$RangeStart = [long]$RangeMatch.Groups[1].Value
+								$RangeEnd = [long]$RangeMatch.Groups[2].Value
 							}
-							Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
 						}
-					} catch {
-						throw
+						if ($null -eq $RangeStart) {
+							Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+							throw "Ranged request (bytes=$PartialSize-) to $Url returned 206 without a parseable Content-Range header (got '$ContentRange')"
+						}
+						if ($RangeStart -ne $PartialSize) {
+							Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+							throw "Ranged request (bytes=$PartialSize-) to $Url returned Content-Range starting at $RangeStart instead of the requested $PartialSize"
+						}
+						$DeclaredLength = $RangeEnd - $RangeStart + 1
+						if ($TempSize -ne $DeclaredLength) {
+							Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+							throw "Ranged response body for $Url is $TempSize bytes but Content-Range (bytes $RangeStart-$RangeEnd) declared $DeclaredLength bytes"
+						}
+
+						# Partial content (206), range confirmed - append to existing file
+						$SourceStream = [System.IO.FileStream]::new($TempPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+						$DestStream = [System.IO.FileStream]::new($OutFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
+						try {
+							$SourceStream.CopyTo($DestStream)
+						} finally {
+							$SourceStream.Close()
+							$DestStream.Close()
+						}
+						Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+					} elseif ($RangeStatus -eq 200) {
+						# Server ignored the Range header and answered with (what it
+						# claims is) the full body -- observed live from an edge cache
+						# (research #1030). Never append: restart the file from zero
+						# regardless of whether the body happens to be shorter or
+						# longer than the expected remainder; the size-validation step
+						# below still catches a short body honestly.
+						Write-Log "Ranged request (bytes=$PartialSize-) to $Url answered with 200 instead of 206; restarting download from zero" -Severity 'Warning' @WriteLogParams
+						Move-Item -LiteralPath $TempPath -Destination $OutFile -Force
+					} else {
+						Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+						throw "Ranged request (bytes=$PartialSize-) to $Url returned unexpected status $RangeStatus"
 					}
 					$ResumeCompleted = $true
 				}
