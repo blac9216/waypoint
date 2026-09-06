@@ -138,6 +138,13 @@ describe("DownloadCatalogScreen", () => {
 	let sse: ReturnType<typeof createDriveableSse>;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let queuePostBody: unknown;
+	let binariesPostBody: unknown;
+	let binariesPostResponse: { status: number; body: unknown };
+	/** Seed for `GET /api/v1/downloads` — the whole legacy queue,
+	 * unfiltered by state, mirroring `DownloadsController.ListDownloads`
+	 * (review round 2 finding C: a terminal legacy row for an artifact must
+	 * not block that artifact's fresh binaries-download "queued" badge). */
+	let legacyQueueSeed: unknown[];
 	let pullPostCount: number;
 	let pullStatus: CatalogPullStatus;
 	let pullPostResponse: { status: number; body: unknown };
@@ -152,6 +159,8 @@ describe("DownloadCatalogScreen", () => {
 		pullPostCount = 0;
 		pullStatus = initialPullStatus;
 		pullPostResponse = { status: 202, body: { run_id: "pull-run-1", job_id: "pull-job-1" } };
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-1", depot_artifact_ids: [] } };
+		legacyQueueSeed = [];
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			fetchCalls.push({ url, init });
@@ -180,12 +189,16 @@ describe("DownloadCatalogScreen", () => {
 				pullPostCount += 1;
 				return jsonResponse(pullPostResponse.body, pullPostResponse.status);
 			}
-			if (url === "/api/v1/downloads" && (!init || init.method === undefined)) {
-				return jsonResponse([]);
+			if (url === "/api/v1/downloads" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse(legacyQueueSeed);
 			}
 			if (url === "/api/v1/downloads" && init?.method === "POST") {
 				queuePostBody = JSON.parse(init.body as string);
 				return jsonResponse({ run_id: "run-1", job_ids: ["job-1", "job-2"] });
+			}
+			if (url === "/api/v1/downloads/binaries" && init?.method === "POST") {
+				binariesPostBody = JSON.parse(init.body as string);
+				return jsonResponse(binariesPostResponse.body, binariesPostResponse.status);
 			}
 			if (url === "/api/v1/system") {
 				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null });
@@ -210,6 +223,7 @@ describe("DownloadCatalogScreen", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		queuePostBody = undefined;
+		binariesPostBody = undefined;
 	});
 
 	afterEach(() => {
@@ -278,18 +292,161 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument();
 	});
 
-	it("selecting rows shows the sticky footer and queues N downloads via POST /downloads", async () => {
+	it("selecting rows shows the sticky footer and the legacy path still queues N downloads via POST /downloads", async () => {
 		installFetchMock("Operator");
 		await mount();
 
 		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
 		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
 
-		expect(screen.getByText("Queue 2 downloads")).toBeInTheDocument();
+		expect(screen.getByText("Legacy download (UMDS-only) — 2")).toBeInTheDocument();
 
-		fireEvent.click(screen.getByText("Queue 2 downloads"));
+		fireEvent.click(screen.getByText("Legacy download (UMDS-only) — 2"));
 
 		await waitFor(() => expect(queuePostBody).toEqual({ artifact_ids: ["art-1", "art-2"] }));
+	});
+
+	it("issue #1487: the new Download action queues the selection via POST /downloads/binaries", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-1", depot_artifact_ids: ["art-1", "art-2"] } };
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+
+		const button = screen.getByText("Download 2");
+		expect(button).toBeInTheDocument();
+		fireEvent.click(button);
+
+		await waitFor(() => expect(binariesPostBody).toEqual({ depot_artifact_ids: ["art-1", "art-2"] }));
+		// Optimistic: the selection clears on success without waiting for SSE.
+		await waitFor(() => expect(screen.queryByText("Download 2")).not.toBeInTheDocument());
+	});
+
+	it("issue #1487 finding 1: a successful Download surfaces the run id from the response and marks the rows queued", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-7", depot_artifact_ids: ["art-1", "art-2"] } };
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+		fireEvent.click(screen.getByText("Download 2"));
+
+		await waitFor(() => expect(binariesPostBody).toEqual({ depot_artifact_ids: ["art-1", "art-2"] }));
+
+		// The run notice renders with the id straight from the mocked response,
+		// and links to the Live Jobs run view.
+		await waitFor(() => expect(screen.getByText(/Queued run bin-run-7/)).toBeInTheDocument());
+		expect(screen.getByText("View in Live Jobs")).toHaveAttribute("href", "/live-jobs?run=bin-run-7");
+
+		// Both previously-selected rows now show "queued" — client-side, from
+		// this response, not a re-fetch (the backend does not touch
+		// depot_artifacts yet — issue #1482).
+		expect(screen.getAllByTitle("queued").length).toBe(2);
+	});
+
+	it("review round 2 finding C: a fresh Download still shows queued for an artifact with a terminal legacy GET /downloads row", async () => {
+		installFetchMock("Operator");
+		// A prior legacy download of this same artifact left a TERMINAL row in
+		// GET /downloads (DownloadsController.ListDownloads lists the whole
+		// queue, unfiltered by state) — this must not block the fresh
+		// binaries-download enqueue's own "queued" badge for the same artifact.
+		legacyQueueSeed = [
+			{
+				id: "q-legacy-1",
+				artifact_id: "art-1",
+				job_id: "job-legacy-1",
+				run_id: "run-legacy-1",
+				state: "verified",
+				progress_percent: 100,
+				rate_bytes_per_sec: null,
+				eta_seconds: null,
+				retries: 0,
+			},
+		];
+		await mount();
+		await waitFor(() => expect(screen.getByTitle("verified")).toBeInTheDocument());
+
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-8", depot_artifact_ids: ["art-1"] } };
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByText("Download 1"));
+
+		await waitFor(() => expect(binariesPostBody).toEqual({ depot_artifact_ids: ["art-1"] }));
+		await waitFor(() => expect(screen.getByTitle("queued")).toBeInTheDocument());
+		expect(screen.queryByTitle("verified")).not.toBeInTheDocument();
+	});
+
+	it("issue #1487 finding 1: an errored Download leaves nothing marked queued and no run notice", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = {
+			status: 403,
+			body: { error: { code: "forbidden", message: "Operator or Admin role required." } },
+		};
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByText("Download 1"));
+
+		await waitFor(() => expect(screen.getByText("Operator or Admin role required.")).toBeInTheDocument());
+		expect(screen.queryByText(/Queued run/)).not.toBeInTheDocument();
+		expect(screen.queryByTitle("queued")).not.toBeInTheDocument();
+	});
+
+	it("issue #1487 finding 1: the run notice and queued badges clear once the run reaches a terminal state", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-9", depot_artifact_ids: ["art-1"] } };
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByText("Download 1"));
+
+		await waitFor(() => expect(screen.getByText(/Queued run bin-run-9/)).toBeInTheDocument());
+		expect(screen.getByTitle("queued")).toBeInTheDocument();
+
+		await deliver(
+			frame({
+				seq: 1,
+				ts: "2026-08-08T12:00:00Z",
+				type: "run.progress",
+				run_id: "bin-run-9",
+				data: { state: "completed", completed_count: 1 },
+			}),
+		);
+
+		await waitFor(() => expect(screen.queryByText(/Queued run bin-run-9/)).not.toBeInTheDocument());
+		expect(screen.queryByTitle("queued")).not.toBeInTheDocument();
+	});
+
+	it("issue #1487 finding 3: a stale Download error clears when the selection changes", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = {
+			status: 403,
+			body: { error: { code: "forbidden", message: "Operator or Admin role required." } },
+		};
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByText("Download 1"));
+		await waitFor(() => expect(screen.getByText("Operator or Admin role required.")).toBeInTheDocument());
+
+		fireEvent.click(screen.getByText("Clear"));
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+
+		expect(screen.queryByText("Operator or Admin role required.")).not.toBeInTheDocument();
+	});
+
+	it("issue #1487: the Download action is disabled with a reason below Operator, same as the legacy path", async () => {
+		installFetchMock("Cyber");
+		await mount();
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+
+		const download = screen.getByText("Download 1");
+		expect(download).toBeDisabled();
+		expect(download).toHaveAttribute("title", expect.stringContaining("Requires Operator"));
+
+		const legacy = screen.getByText("Legacy download (UMDS-only) — 1");
+		expect(legacy).toBeDisabled();
 	});
 
 	it("shows a transfer-time estimate in the footer for a non-empty selection (assumed-bandwidth basis)", async () => {
@@ -354,13 +511,13 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.queryByText(/^est\./)).not.toBeInTheDocument();
 	});
 
-	it("disables the queue action with a reason below Operator", async () => {
+	it("disables the legacy queue action with a reason below Operator", async () => {
 		installFetchMock("Cyber");
 		await mount();
 
 		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
 
-		const button = screen.getByText("Queue 1 downloads");
+		const button = screen.getByText("Legacy download (UMDS-only) — 1");
 		expect(button).toBeDisabled();
 		expect(button).toHaveAttribute("title", expect.stringContaining("Requires Operator"));
 	});
@@ -584,6 +741,41 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.getByText("ESXi")).toBeInTheDocument();
 		expect(screen.getAllByText("ESX_HOST").length).toBeGreaterThan(0);
 		expect(screen.getAllByText("1 version · 1 artifact").length).toBe(3);
+	});
+
+	/** Issue #1588 AC 2, review round 1 finding 5: the test above uses a fixture
+	 * with `product: "VCENTER"` -> friendly name "vCenter Server", a case where
+	 * the humanised form actually differs from the raw key — unlike this
+	 * suite's default `ARTIFACTS` fixture, whose raw key ("VCF Installer")
+	 * already equals its own friendly form, so a bare
+	 * `getAllByText("VCF Installer")` there would pass even if
+	 * `friendlyProductName` were never called at all (the review's proof: the
+	 * raw PRODUCT filter cell alone renders that text). This asserts the
+	 * humanised name specifically inside the rendered group header AND inside
+	 * the product filter dropdown's option text — the two render sites
+	 * `friendlyProductName` actually feeds — rather than a same-string
+	 * coincidence anywhere on the page. */
+	it("renders the humanised product name in the group header and the product filter option (issue #1588 AC 2)", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(1));
+		const { container } = render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+
+		const groupHeader = container.querySelector(".product-group__header");
+		expect(groupHeader).not.toBeNull();
+		expect(within(groupHeader as HTMLElement).getByText("vCenter Server")).toBeInTheDocument();
+		// The raw catalog key is a sibling element in the same header, never the
+		// humanised text itself.
+		expect(within(groupHeader as HTMLElement).getByText("VCENTER")).toBeInTheDocument();
+
+		const productFilter = screen.getByLabelText("Filter by product") as HTMLSelectElement;
+		const vcenterOption = within(productFilter).getByRole("option", { name: "vCenter Server (VCENTER)" });
+		expect(vcenterOption).toBeInTheDocument();
 	});
 
 	it("filters to just the Kubernetes-stack products via the type filter", async () => {

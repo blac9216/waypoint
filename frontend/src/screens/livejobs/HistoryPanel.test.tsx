@@ -226,6 +226,25 @@ describe("Jobs workspace History mode (issue #708/#689)", () => {
 		expect(decoded).toContain("purge");
 	});
 
+	it("issue #1487 finding 2: includes binaries-download in the default run_type filter and renders a completed run", async () => {
+		window.history.pushState(null, "", "/live-jobs?mode=history");
+		installFetchMock({
+			historyRuns: [{ ...HISTORY_RUN, id: "run-bin-1", run_type: "binaries-download" }],
+			jobsByRun: { "run-bin-1": [{ ...HISTORY_RUN_JOB, id: "job-bin-1", run_id: "run-bin-1", job_type: "binaries-download" }] },
+		});
+		renderWithAuth();
+
+		// A completed binaries-download run must actually render in the list --
+		// NON_COMPLIANCE_RUN_TYPES omitting the type would leave it invisible
+		// even though the server returned it.
+		await waitFor(() => expect(screen.getByText("run-bin-1")).toBeInTheDocument());
+
+		const defaultCall = (globalThis.fetch as unknown as { mock: { calls: [string][] } }).mock.calls.find(([u]) =>
+			u.startsWith("/api/v1/runs/history"),
+		)!;
+		expect(decodeURIComponent(defaultCall[0])).toContain("binaries-download");
+	});
+
 	it("shows the honest tombstone state for a history-deleted run instead of its detail", async () => {
 		window.history.pushState(null, "", "/live-jobs?mode=history");
 		installFetchMock({

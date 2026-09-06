@@ -30,7 +30,17 @@ export interface UseDownloadQueueResult {
 	byArtifact: Map<string, DownloadQueueItem>;
 }
 
-export function useDownloadQueue(token: string | null, signedIn: boolean): UseDownloadQueueResult {
+export function useDownloadQueue(
+	token: string | null,
+	signedIn: boolean,
+	// Issue #1487 finding 1: an optional sink for every event on this same
+	// connection, so a caller that needs a second event type (e.g. `binaries-download`
+	// run-completion via `run.progress`, which this hook otherwise has no reason to
+	// track) doesn't have to open its own competing `connectEventStream` call against
+	// the same `/api/v1/events` URL — this is the one and only subscription to that
+	// stream this screen makes.
+	onEvent?: (event: WaypointEvent) => void,
+): UseDownloadQueueResult {
 	const [items, setItems] = useState<DownloadQueueItem[]>([]);
 	const itemsRef = useRef<DownloadQueueItem[]>([]);
 	itemsRef.current = items;
@@ -138,10 +148,11 @@ export function useDownloadQueue(token: string | null, signedIn: boolean): UseDo
 				} else if (event.type === "job.state") {
 					applyJobState(event);
 				}
+				onEvent?.(event);
 			},
 		});
 		return close;
-	}, [signedIn, token, applyProgress, applyJobState]);
+	}, [signedIn, token, applyProgress, applyJobState, onEvent]);
 
 	const byArtifact = new Map<string, DownloadQueueItem>();
 	for (const item of items) {

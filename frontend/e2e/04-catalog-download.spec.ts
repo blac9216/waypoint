@@ -34,7 +34,11 @@ test("catalog screen loads, and queuing a download shows the tool-absent state h
 	}
 
 	await firstRowCheckbox.check();
-	await page.getByRole("button", { name: /Queue \d+ downloads?/ }).click();
+	// Legacy path deliberately (issue #1487 relabeled this "Legacy download
+	// (UMDS-only)" and added a separate binaries-download action beside it):
+	// `ToolGatedDownloadJobHandler`'s tool-absent gate, proven here, is the
+	// same handler this test exercised before that relabeling.
+	await page.getByRole("button", { name: /Legacy download \(UMDS-only\) — \d+/ }).click();
 
 	// The queued job fails closed via SSE/poll; the download queue panel or
 	// artifact row surfaces the tool-absent reason string verbatim (same

@@ -23,6 +23,7 @@ import {
 	CredentialTestJobDetail,
 	ContentJobDetail,
 	DownloadJobDetail,
+	BinariesDownloadJobDetail,
 	CatalogIndexJobDetail,
 	BundleJobDetail,
 	ContentLibrarySyncJobDetail,
@@ -61,6 +62,7 @@ export const JOB_DETAIL_RENDERERS: Record<string, JobDetailRenderer> = {
 	// (issue #612) is advisory-only and must never render as a failure.
 	"catalog-index": CatalogIndexJobDetail,
 	download: DownloadJobDetail,
+	"binaries-download": BinariesDownloadJobDetail,
 	"bundle-export": BundleJobDetail,
 	"bundle-import": BundleJobDetail,
 	"content-library-sync": ContentLibrarySyncJobDetail,
