@@ -203,7 +203,8 @@ with the functions that require it (ADR-0015).
 domain/ADRs — merged via PR [#1738](https://github.com/blac9216/waypoint/pull/1738)
 ([ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)–[ADR-0034](adr/0034-grace-period-retention.md),
 plus `architecture.md`/`domain-model.md` depot sections) → #1034 reconciled the
-API/security/RBAC contracts (in review, PR #1747) → **this document plus
+API/security/RBAC contracts — merged via PR
+[#1747](https://github.com/blac9216/waypoint/pull/1747) → **this document plus
 [`ui/download-domain-ia.md`](ui/download-domain-ia.md)** is #1035, reconciling roadmap
 sequencing and proposing the download-domain screen IA for owner approval (R2-11).
 

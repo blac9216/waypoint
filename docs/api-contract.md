@@ -780,7 +780,7 @@ view-tree machinery (ADR-0032) are planned, not yet implemented.
 | Item upload (chunked/resumable) | — | 🚧 Planned (decision 16, research #1032/#1055: UpdateSession + fleet-depot resumable APIs are the parity reference). No endpoint exists yet — the 512 MiB cap referenced in older design notes was tool-upload-specific and does not apply to the planned UI-upload path. |
 | Item CRUD (list/delete within a library) | — | 🚧 Planned (issue #1396). |
 | VCSP `lib.json`/`items.json`/`item.json` writer | — | ✅ Shipped as internal machinery (issue #1393) — atomic write, correct version-counter/hrefs semantics (the sibling repo's known defects — version-counter inversion, bare hrefs — were deliberately NOT ported, per research finding #11 on #16). Not an API surface; consumed by the item-write paths above once they land. |
-| Automated add-to-library from depot/other stores | — | 🚧 Planned (decision 16). |
+| Automated add-to-library from depot/other stores | — | 🚧 Planned (decision 16, issue #1057). |
 | OCI bundle store / push-target consumer | — | ✅ Domain model + schema shipped (issue #1403: `OciBundle`, `PushTargetConsumer` in `Waypoint.Core.Downloads`) — registries as a push-target consumer type (research finding #8 on #1026, → #1161). **No API controller exists yet**; this is data-model-only groundwork. |
 | `/content-library/copy-to-vcenter` | POST | 🚧 Planned. Superseded in framing by decision 16 (multiple regular libraries, operator-picked sync target) but not yet built under any route. |
 
