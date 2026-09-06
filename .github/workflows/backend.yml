@@ -26,7 +26,9 @@ name: backend
 #
 # Directory.Build.props, .editorconfig and scripts/check-coverage-floor.py are
 # shared inputs that control the checks above (build analyzers and severities,
-# and the coverage gate) — issue #412.
+# and the coverage gate) — issue #412. scripts/tests/** is listed for the
+# same reason: it is that gate script's own unittest suite, run by the
+# coverage-gate-tests job below (issue #1710).
 on:
   pull_request:
   push:
