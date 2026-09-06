@@ -110,8 +110,8 @@ built).
 - Create/edit/disable a subscription per lane — `POST`/`PATCH
   /downloads/esx/subscriptions` for the ESX lane (shipped); equivalent per-lane
   endpoints for Photon/VMTools/VKS are planned (Wave 5).
-- View subscription evaluation history once the evaluation job (#1046, planned)
-  ships — not yet a screen element.
+- View subscription evaluation history once the evaluation job (#1046 design
+  record, tracked in #1472, planned) ships — not yet a screen element.
 
 **Open question:** see Open Question 3 (subscription-evaluation history placement)
 below.
@@ -152,7 +152,8 @@ upstream-identical for a straight `tdnf` baseurl swap.
 
 **Actions:** view indexed repos/versions (Viewer+); subscribe or ad-hoc-sync
 (Admin-only for subscription, Operator+ for ad-hoc per the general RBAC table).
-Planned (Wave 5, #1052) — no shipped surface as of this proposal.
+Planned (Wave 5, #1052 design record, tracked in #1509/#1518/#1521/#1527) — no
+shipped surface as of this proposal.
 
 ### 3c. VMware Tools store
 
@@ -162,7 +163,8 @@ per-product subscription.
 
 **Actions:** view indexed Tools versions (Viewer+); adopt/customize the preset
 (Admin-only); export a specific version to a content library (Operator+, matches
-"library upload/organize"). Planned (Wave 5, #1053) — no shipped surface.
+"library upload/organize"). Planned (Wave 5, #1053 design record, tracked in
+#1392/#1438/#1458) — no shipped surface.
 
 ### 3d. VKS store — dimensioned view
 
@@ -176,7 +178,7 @@ below) → time-window + variant/name-filter subscription.
 dimensions (per owner decision 14 amended and design #16 §5) (Viewer+); subscribe
 with a time window and variant filter (Admin-only); view per-item parity class
 (depot-only / public-only / both) once the parity alert ships. Planned (Wave 5,
-#1054) — no shipped surface.
+#1054 design record, tracked in #1480/#1492/#1500/#1508) — no shipped surface.
 
 ### 3e. Content-library per-type views + virtual folders
 
@@ -223,9 +225,10 @@ delete while non-empty) → flat-on-disk VCSP item set, per library (`lib.json`/
 `items.json` writer, issue #1393, both known sibling defects fixed non-inverted) →
 **virtual folder** (DB-only, never on disk, owner decision 16; in-flight, issue
 #1389) → **per-type view** (OVA / ISO / files split, family-view pattern per owner
-ratification finding #9, issue #1056, planned) → item upload (planned, chunked/
-resumable, UpdateSession + fleet-depot resumable APIs are the parity reference,
-decision 16/research #1055 — no endpoint exists yet, so no upload UI can be built
+ratification finding #9, issue #1056 design record, tracked in #1429, planned) →
+item upload (planned, chunked/resumable, UpdateSession + fleet-depot resumable
+APIs are the parity reference, decision 16/research #1055 design record, tracked
+in #1520/#1526/#1530 — no endpoint exists yet, so no upload UI can be built
 against a real contract today).
 
 **Actions:**
@@ -345,7 +348,8 @@ download-runner has heartbeated at least once).
    Photon · VMware Tools · VKS · Library · Retention), or be distributed across the
    existing Download Catalog / Library / Configuration screens as this document's
    per-screen "Placement" notes suggest by default?
-3. **Subscription-evaluation history.** Once the evaluation job (#1046) ships, where
+3. **Subscription-evaluation history.** Once the evaluation job (#1046 design
+   record, tracked in #1472) ships, where
    should its run history live — a tab on the Subscriptions screen, or folded into
    the existing global Live Jobs workspace (per-run detail, same pattern as
    compliance runs)?

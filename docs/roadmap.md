@@ -45,8 +45,8 @@ vcf-docker-download modules as the execution layer. The in-UI download-tool inst
 flow (local repo / depot fetch / manual upload, issue #39) **delivered** via
 epic [#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
 readiness* story below (PR [#610](https://github.com/blac9216/waypoint/pull/610)) —
-this section's original "hand-provisioned in dev" framing is stale and is corrected
-here rather than left standing. Test depot tokens/config
+this section's original framing — describing the install flow as still manual in
+development — is stale and is corrected here rather than left standing. Test depot tokens/config
 still come from the private sibling repo at runtime — gitignored mounts, never
 committed.
 
@@ -216,8 +216,12 @@ binaries-download selection/enqueue/handler/verification (#1479/#1482/#1486), ES
 patch-store metadata parser + DB index (#1446/#1447), content-library registry + VCSP
 writer (#1391/#1393) — see each epic's `### landed` comments for the full list and
 drift notes. Validation run 1 (epic #1704, open) found #1503/#1393 live-failing;
-fix wave #1705 (critical) → #1707 → #1706 is next, then a re-run and the remaining
-subscriptions/serving chains.
+of that fix wave, #1706 has already merged via PR
+[#1741](https://github.com/blac9216/waypoint/pull/1741) (`4d81230`) and awaits live
+re-verification, while #1705 (critical, PR
+[#1744](https://github.com/blac9216/waypoint/pull/1744)) and #1707 (PR
+[#1745](https://github.com/blac9216/waypoint/pull/1745)) are still in review — then a
+re-run and the remaining subscriptions/serving chains.
 Air-gapped `content-import` lands with the transfer story's bundle format.
 
 ## Transfer & enclave modes 📋 (backlog — [milestone](https://github.com/blac9216/waypoint/milestone/13), epic [#17](https://github.com/blac9216/waypoint/issues/17))
