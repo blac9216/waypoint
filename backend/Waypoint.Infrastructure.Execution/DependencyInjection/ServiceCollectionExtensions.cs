@@ -174,13 +174,15 @@ public static class ServiceCollectionExtensions
 
 		// Issue #1016 (epic #726): content-check is the fanned-out chunk job phase
 		// content-pull now delegates its `inspec check` phase to, plus the completion
-		// step (ContentPullReconcileService) and its periodic sweep -- all compliance-
-		// runner only (same content-volume access ADR-0017 already grants this process),
-		// registered here rather than the API for exactly that reason.
+		// step (ContentPullReconcileService) -- all compliance-runner only (same
+		// content-volume access ADR-0017 already grants this process), registered here
+		// rather than the API for exactly that reason. Issue #1707: the periodic sweep
+		// hosted service is deliberately NOT started here, even though this method is
+		// shared by both runner hosts -- see AddContentPullReconcileSweep's doc comment
+		// below for why it moved to its own opt-in extension.
 		services.AddSingleton<IJobHandler, ComplianceContent.ContentCheckJobHandler>();
 		services.AddSingleton<ComplianceContent.ContentPullReconcileService>();
 		services.Configure<ComplianceContent.ContentPullReconcileOptions>(configuration.GetSection("ContentPullReconcile"));
-		services.AddHostedService<ComplianceContent.ContentPullReconcileHostedService>();
 
 		// Issue #594 (epic #577): purge deletes a terminal run's on-disk scan-artifact
 		// files -- compliance-runner only, see JobCapabilities.Compliance's doc comment.
@@ -239,6 +241,38 @@ public static class ServiceCollectionExtensions
 			serviceProvider.GetService<ICapacityLeasePool>(),
 			serviceProvider.GetRequiredService<ILogger<LeaseRecoveryHostedService>>()));
 
+		return services;
+	}
+
+	/// <summary>
+	/// Issue #1707 (root cause of validation run 1's 260-occurrences-in-20-minutes log
+	/// flood, epic #1704): starts <see cref="ComplianceContent.ContentPullReconcileHostedService"/>
+	/// -- COMPLIANCE-RUNNER ONLY. Before this issue, that hosted service was registered
+	/// unconditionally inside <see cref="AddWaypointExecution"/>, so both runner hosts
+	/// started it even though migration 0073 grants <c>content_pull_checks</c> to
+	/// <c>waypoint_compliance_runner</c> alone (ADR-0017's placement reasoning, restated
+	/// on <see cref="ComplianceContent.ContentPullReconcileHostedService"/>'s own doc
+	/// comment, already said "compliance-runner only" -- the registration simply never
+	/// matched it). ADR-0013 (issue #443) / ADR-0014 assign each runner only its own domain's
+	/// handlers; this mirrors that split for a hosted service the same way
+	/// <c>Waypoint.ComplianceRunner.Program</c> already narrows <c>JobHandlerRegistry</c>
+	/// to <c>JobCapabilities.Compliance</c> and <c>Waypoint.DownloadRunner.Program</c>
+	/// registers its own host-specific <c>ReadinessReportingHostedService</c> directly
+	/// rather than inside the shared <see cref="AddWaypointExecution"/> body -- an
+	/// extension called only by the host that needs it, not a parameter threaded through
+	/// the shared method. Call this from <c>Waypoint.ComplianceRunner.Program</c> only,
+	/// after <see cref="AddWaypointExecution"/>; <c>Waypoint.DownloadRunner.Program</c>
+	/// must never call it. The singleton service/options this depends on
+	/// (<see cref="ComplianceContent.ContentPullReconcileService"/>,
+	/// <see cref="ComplianceContent.ContentPullReconcileOptions"/>) stay registered in
+	/// <see cref="AddWaypointExecution"/> itself -- harmless to construct in either
+	/// process, and <see cref="ComplianceContent.ContentCheckJobHandler"/> (a real
+	/// compliance-runner job type) already depends on the surrounding
+	/// <c>ComplianceContent</c> wiring being present there regardless of this method.
+	/// </summary>
+	public static IServiceCollection AddContentPullReconcileSweep(this IServiceCollection services)
+	{
+		services.AddHostedService<ComplianceContent.ContentPullReconcileHostedService>();
 		return services;
 	}
 }

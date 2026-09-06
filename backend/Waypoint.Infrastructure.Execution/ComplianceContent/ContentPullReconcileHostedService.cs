@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Waypoint.Core.ComplianceContent;
 
 namespace Waypoint.Infrastructure.Execution.ComplianceContent;
@@ -66,13 +67,25 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		using PeriodicTimer timer = new(interval);
 		do
 		{
-			await SweepOnceAsync(stoppingToken).ConfigureAwait(false);
+			SweepOutcome outcome = await SweepOnceAsync(stoppingToken).ConfigureAwait(false);
+			if (outcome == SweepOutcome.AuthorizationDenied)
+			{
+				// Issue #1707: a 42501 here is never transient -- it means this process's
+				// database role has no grant on content_pull_checks (migration 0073 grants
+				// it to waypoint_compliance_runner only), and no amount of retrying at
+				// SweepInterval will change that until an operator re-migrates or this
+				// service is simply not started in the wrong host (the actual fix; see
+				// AddContentPullReconcileSweep). Stop the loop entirely rather than
+				// flooding the log once per interval forever -- SweepOnceAsync already
+				// logged the single error above.
+				return;
+			}
 		}
 		while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
 	}
 
 	/// <summary>One sweep pass, exposed for tests -- mirrors <c>RunPurgeFinalizeHostedService.SweepOnceAsync</c>'s test seam.</summary>
-	internal async Task SweepOnceAsync(CancellationToken cancellationToken)
+	internal async Task<SweepOutcome> SweepOnceAsync(CancellationToken cancellationToken)
 	{
 		IReadOnlyList<Guid> pending;
 		try
@@ -81,12 +94,17 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		}
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
-			return;
+			return SweepOutcome.Cancelled;
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+		{
+			LogAuthorizationDenied(exception);
+			return SweepOutcome.AuthorizationDenied;
 		}
 		catch (Exception exception)
 		{
 			LogListFailed(exception);
-			return;
+			return SweepOutcome.TransientFailure;
 		}
 
 		foreach (Guid contentPullJobId in pending)
@@ -100,13 +118,15 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
-				return;
+				return SweepOutcome.Cancelled;
 			}
 			catch (Exception exception)
 			{
 				LogReconcileFailed(contentPullJobId, exception);
 			}
 		}
+
+		return SweepOutcome.Completed;
 	}
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Content-pull reconcile sweeping every {Interval}")]
@@ -118,8 +138,25 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep could not list pending pulls")]
 	private partial void LogListFailed(Exception exception);
 
+	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep has no permission on content_pull_checks (42501) -- this process's database role lacks the grant migration 0073 gives waypoint_compliance_runner. Stopping the sweep instead of retrying forever; see issue #1707.")]
+	private partial void LogAuthorizationDenied(Exception exception);
+
 	[LoggerMessage(Level = LogLevel.Error, Message = "Reconcile failed for content-pull job {ContentPullJobId}; row remains for the next sweep")]
 	private partial void LogReconcileFailed(Guid contentPullJobId, Exception exception);
+}
+
+/// <summary>
+/// Issue #1707: <see cref="ContentPullReconcileHostedService.SweepOnceAsync"/>'s outcome
+/// -- distinguishes the one non-transient case (<see cref="AuthorizationDenied"/>) that
+/// must stop the sweep loop from every other outcome, which keeps ticking at
+/// <see cref="ContentPullReconcileOptions.SweepInterval"/> as before.
+/// </summary>
+internal enum SweepOutcome
+{
+	Completed,
+	Cancelled,
+	TransientFailure,
+	AuthorizationDenied,
 }
 
 /// <summary>How often <see cref="ContentPullReconcileHostedService"/> sweeps for pulls ready to reconcile.</summary>

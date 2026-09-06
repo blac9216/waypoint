@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.Jobs;
 using Waypoint.Infrastructure.Execution.ComplianceContent;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Execution;
@@ -61,6 +64,11 @@ public sealed class ContentPullReconcileServiceTests
 
 		public bool Reconciled { get; private set; }
 
+		/// <summary>Issue #1707: when set, <see cref="ListPendingReconcileContentPullJobIdsAsync"/> throws this instead of returning -- simulates the download-runner role's missing grant on content_pull_checks.</summary>
+		public Exception? ThrowOnListPending { get; set; }
+
+		public int ListPendingCallCount { get; private set; }
+
 		/// <summary>Registers one fanned-out check job with its terminal state (default "done") -- mirrors what ContentPullJobHandler + the job engine would have recorded.</summary>
 		public void AddFanOut(Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit, IReadOnlyList<ContentCheckProfileDirectory> chunk, string state = "done")
 		{
@@ -85,8 +93,16 @@ public sealed class ContentPullReconcileServiceTests
 
 		public Task RecordCheckResultAsync(Guid checkJobId, ContentCheckResultRecord result, CancellationToken cancellationToken) => throw new NotSupportedException();
 
-		public Task<IReadOnlyList<Guid>> ListPendingReconcileContentPullJobIdsAsync(CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<Guid>>([.. _fanOuts.Select(f => f.ContentPullJobId).Distinct()]);
+		public Task<IReadOnlyList<Guid>> ListPendingReconcileContentPullJobIdsAsync(CancellationToken cancellationToken)
+		{
+			ListPendingCallCount++;
+			if (ThrowOnListPending is not null)
+			{
+				throw ThrowOnListPending;
+			}
+
+			return Task.FromResult<IReadOnlyList<Guid>>([.. _fanOuts.Select(f => f.ContentPullJobId).Distinct()]);
+		}
 
 		public Task<IReadOnlyList<ContentPullCheckFanOut>> ListFanOutsForContentPullJobAsync(Guid contentPullJobId, CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<ContentPullCheckFanOut>>([.. _fanOuts.Where(f => f.ContentPullJobId == contentPullJobId)]);
@@ -620,5 +636,63 @@ public sealed class ContentPullReconcileServiceTests
 
 		Assert.Single(stager.Calls);
 		Assert.Contains(events.Events, e => e.EventType == JobEventTypes.RunProgress && e.RunId == runId);
+	}
+
+	// --- issue #1707: non-transient authorization failure handling ---------------
+
+	/// <summary>
+	/// Issue #1707: a 42501 (insufficient_privilege) listing pending pulls -- the
+	/// download-runner's actual live symptom before the registration fix -- is
+	/// non-transient (no grant migration 0073 didn't give this role will ever appear
+	/// from retrying), so <c>SweepOnceAsync</c> must report a distinct outcome from an
+	/// ordinary transient failure and log exactly once, not once per interval forever.
+	/// </summary>
+	[Fact]
+	public async Task SweepOnceAsync_PermissionDenied_ReturnsAuthorizationDeniedAndLogsExactlyOnce()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), logger);
+
+		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
+
+		Assert.Equal(SweepOutcome.AuthorizationDenied, outcome);
+		CapturedLogEntry errorEntry = logger.OnlyEntryAt(LogLevel.Error);
+		Assert.Contains("42501", errorEntry.Message, StringComparison.Ordinal);
+		Assert.Contains("content_pull_checks", errorEntry.Message, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1707's "back off or stop" requirement, the loop-level half:
+	/// <c>ExecuteAsync</c> must actually stop ticking after the first 42501 rather than
+	/// keep calling <c>SweepOnceAsync</c> at <see cref="ContentPullReconcileOptions.SweepInterval"/>
+	/// forever -- reproduced with a short interval so a bugged implementation that kept
+	/// retrying would tick several times before this test's timeout, not just once.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_PermissionDenied_StopsSweepingInsteadOfRetryingForever()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), logger);
+
+		await hostedService.StartAsync(CancellationToken.None);
+		Task executeTask = hostedService.ExecuteTask ?? throw new InvalidOperationException("expected ExecuteTask to be set after StartAsync.");
+		Task completedTask = await Task.WhenAny(executeTask, Task.Delay(TimeSpan.FromSeconds(5)));
+		Assert.Same(executeTask, completedTask);
+		await executeTask; // observe/rethrow anything unexpected
+
+		// If the loop kept retrying at the 20ms interval instead of stopping, several
+		// seconds' worth of calls (and log entries) would have piled up by now.
+		Assert.Equal(1, checkFanOut.ListPendingCallCount);
+		Assert.Single(logger.EntriesAt(LogLevel.Error));
+
+		await hostedService.StopAsync(CancellationToken.None);
 	}
 }
