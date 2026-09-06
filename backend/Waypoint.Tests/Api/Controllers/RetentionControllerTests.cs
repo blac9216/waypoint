@@ -368,6 +368,122 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 		Assert.Equal(HttpStatusCode.NotFound, delete.StatusCode);
 	}
 
+	/// <summary>
+	/// F1 (round 1 review): pinning content must not make it vanish from the only
+	/// listing endpoint -- ADR-0034 names "pinned, sweep will skip" as one of three
+	/// states an operator must be able to tell apart, and this endpoint is the sole
+	/// place #1048's UI can enumerate an id to pass back to <c>POST .../unpin</c>.
+	/// </summary>
+	[Fact]
+	public async Task ListState_IncludesPinnedRowsWithPinMetadata()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("pinned-listed.iso");
+		Guid stateId = await TrackAsync(artifactId);
+
+		HttpResponseMessage pin = await SendAsync(HttpMethod.Post, $"/api/v1/download-retention/{stateId}/pin", "Admin", new { note = "keep for audit" });
+		Assert.Equal(HttpStatusCode.OK, pin.StatusCode);
+
+		HttpResponseMessage listAsViewer = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state", "Viewer", null);
+		Assert.Equal(HttpStatusCode.OK, listAsViewer.StatusCode);
+		using JsonDocument listBody = JsonDocument.Parse(await listAsViewer.Content.ReadAsStringAsync());
+		JsonElement row = listBody.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetGuid() == stateId);
+		Assert.Equal(RetainedContentStates.Pinned, row.GetProperty("state").GetString());
+		Assert.Equal("test-user", row.GetProperty("pinned_by").GetString());
+		Assert.False(string.IsNullOrEmpty(row.GetProperty("pinned_at").GetString()));
+		Assert.Equal("keep for audit", row.GetProperty("pin_note").GetString());
+	}
+
+	/// <summary>F1: the optional <c>state</c> query filter narrows to exactly one of the three ADR-0034 states.</summary>
+	[Fact]
+	public async Task ListState_FilterByState_ReturnsOnlyThatState()
+	{
+		Guid graceArtifact = await InsertDepotArtifactAsync("filter-grace.iso");
+		Guid graceId = await TrackAsync(graceArtifact);
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+		await states.TransitionAsync(graceId, RetainedContentStates.Grace, CancellationToken.None);
+
+		Guid pinnedArtifact = await InsertDepotArtifactAsync("filter-pinned.iso");
+		Guid pinnedId = await TrackAsync(pinnedArtifact);
+		await states.PinAsync(pinnedId, "someone", null, CancellationToken.None);
+
+		HttpResponseMessage pinnedOnly = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?state=pinned", "Viewer", null);
+		Assert.Equal(HttpStatusCode.OK, pinnedOnly.StatusCode);
+		using JsonDocument pinnedBody = JsonDocument.Parse(await pinnedOnly.Content.ReadAsStringAsync());
+		JsonElement[] pinnedRows = [.. pinnedBody.RootElement.EnumerateArray()];
+		Assert.Contains(pinnedRows, e => e.GetProperty("id").GetGuid() == pinnedId);
+		Assert.DoesNotContain(pinnedRows, e => e.GetProperty("id").GetGuid() == graceId);
+
+		HttpResponseMessage invalid = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?state=tracked", "Viewer", null);
+		Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+	}
+
+	/// <summary>N1 (round 1 review): the already-purged branch of purge-now is a genuine 200, never turned into an error response, but the wire flag says so.</summary>
+	[Fact]
+	public async Task PurgeNow_AlreadyPurged_ReturnsTwoHundredWithPurgedFalseAndError()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("purge-now/already-purged.iso");
+		Guid stateId = await TrackAsync(artifactId);
+		WriteDepotFile("purge-now/already-purged.iso");
+
+		HttpResponseMessage first = await SendAsync(HttpMethod.Post, $"/api/v1/download-retention/{stateId}/purge-now", "Admin", new { });
+		Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+		HttpResponseMessage second = await SendAsync(HttpMethod.Post, $"/api/v1/download-retention/{stateId}/purge-now", "Admin", new { });
+		Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+		using JsonDocument secondBody = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+		Assert.False(secondBody.RootElement.GetProperty("purged").GetBoolean());
+		Assert.Contains("already purged", secondBody.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+	}
+
+	/// <summary>N1: an out-of-scope review-list delete whose purge leg fails (content pinned after being reported) is a 200 with <c>deleted:false</c>, not an error response, and the entry stays on the list.</summary>
+	[Fact]
+	public async Task ReviewList_DeleteOutOfScopeEntry_PurgeFails_ReturnsTwoHundredWithDeletedFalseAndError()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("review-list/pinned-out-of-scope.iso");
+		WriteDepotFile("review-list/pinned-out-of-scope.iso");
+		IReviewListService reviewList = _factory.Services.GetRequiredService<IReviewListService>();
+		await reviewList.ReportOutOfScopeAsync(artifactId, "no subscription references this", CancellationToken.None);
+
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+		Guid stateId = await states.EnsureTrackedAsync(artifactId, policyId: null, CancellationToken.None);
+		await states.PinAsync(stateId, "someone", null, CancellationToken.None);
+
+		HttpResponseMessage delete = await SendAsync(
+			HttpMethod.Delete, "/api/v1/download-retention/review-list", "Admin",
+			new { kind = "OutOfScope", depot_artifact_id = artifactId, reason = "attempted cleanup" });
+
+		Assert.Equal(HttpStatusCode.OK, delete.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await delete.Content.ReadAsStringAsync());
+		Assert.False(body.RootElement.GetProperty("deleted").GetBoolean());
+		Assert.Contains("pinned", body.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+		Assert.True(File.Exists(Path.Combine(_depotRoot, "review-list/pinned-out-of-scope.iso")));
+
+		IReadOnlyList<ReviewListEntry> stillListed = await reviewList.ListAsync(CancellationToken.None);
+		Assert.Contains(stillListed, e => e.DepotArtifactId == artifactId);
+	}
+
+	/// <summary>N1: an orphan review-list delete whose file confinement check fails is a 200 with <c>deleted:false</c>, not an error response, and the entry stays on the list.</summary>
+	[Fact]
+	public async Task ReviewList_DeleteOrphanEntry_ConfinementFails_ReturnsTwoHundredWithDeletedFalseAndError()
+	{
+		IUnknownCatalogFileRepository unknownFiles = _factory.Services.GetRequiredService<IUnknownCatalogFileRepository>();
+		const string escapingPath = "../escapes-depot-root.iso";
+		await unknownFiles.RecordSeenAsync(escapingPath, 4, CancellationToken.None);
+
+		HttpResponseMessage delete = await SendAsync(
+			HttpMethod.Delete, "/api/v1/download-retention/review-list", "Admin",
+			new { kind = "Orphan", relative_path = escapingPath });
+
+		Assert.Equal(HttpStatusCode.OK, delete.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await delete.Content.ReadAsStringAsync());
+		Assert.False(body.RootElement.GetProperty("deleted").GetBoolean());
+		Assert.Contains("outside", body.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+
+		IReviewListService reviewList = _factory.Services.GetRequiredService<IReviewListService>();
+		IReadOnlyList<ReviewListEntry> stillListed = await reviewList.ListAsync(CancellationToken.None);
+		Assert.Contains(stillListed, e => e.RelativePath == escapingPath);
+	}
+
 	/// <summary>Issue #1479's lesson: any fan-out list endpoint needs a beyond-page-size test.</summary>
 	[Fact]
 	public async Task ListState_MoreRowsThanOnePage_PagesAndReportsTotalCount()

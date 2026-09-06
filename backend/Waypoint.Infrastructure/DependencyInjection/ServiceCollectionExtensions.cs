@@ -332,13 +332,19 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 
-			// Issue #1453: the API-process's own IRetentionSweepService consumer
+			// Issue #1453: the API process's IRetentionSweepService consumer
 			// (RetentionController's purge-now endpoint and the review-list deletion
-			// service below) -- distinct from whatever runner-hosted registration
-			// AddWaypointExecution adds for the scheduled retention-sweep job; both
-			// resolve to their own RetentionSweepService instance over the same
-			// singleton repositories/options registered above, which is safe since the
-			// type carries no per-call mutable state.
+			// service below). The API host never calls AddWaypointExecution, so this
+			// is the only registration it ever sees. A runner host calls both this
+			// method and AddWaypointExecution (whose own comment registers the same
+			// interface for the scheduled retention-sweep job) against one shared
+			// container -- there the *last* registration wins the resolve, per
+			// Microsoft.Extensions.DependencyInjection's documented last-registration-
+			// wins rule for a single (non-IEnumerable) resolve, so a runner host never
+			// actually constructs this file's RetentionSweepService instance; only its
+			// registration exists, unused. Either way there is exactly one live
+			// instance per process, not two side-by-side ones, which is what keeps
+			// this safe despite the type carrying no per-call mutable state.
 			services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService>(serviceProvider => new Downloads.RetentionSweepService(
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionPolicyRepository>(),

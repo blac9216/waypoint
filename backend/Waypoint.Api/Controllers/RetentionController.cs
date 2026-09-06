@@ -51,6 +51,13 @@ public sealed class RetentionController : ControllerBase
 	private readonly IReviewListService _reviewList;
 	private readonly IReviewListDeletionService _reviewListDeletion;
 
+	private static readonly string[] ListableStates =
+	[
+		RetainedContentStates.Grace,
+		RetainedContentStates.PendingPurge,
+		RetainedContentStates.Pinned
+	];
+
 	public RetentionController(
 		IRetainedContentStateRepository states,
 		IRetentionPolicyRepository policies,
@@ -72,21 +79,46 @@ public sealed class RetentionController : ControllerBase
 	}
 
 	/// <summary>
-	/// Every <c>grace</c>/<c>pending-purge</c> retained-content-state row, paged per
-	/// the codebase's <see cref="PageRequest"/> convention (<c>X-Total-Count</c>
-	/// header, same as <c>CatalogController.ListArtifacts</c>). "Per subscription
-	/// scope" (this issue's own Proposed Changes) awaits a real Subscription entity
-	/// (#1421 is still open, the same deferred-discovery seam <see cref="IRetentionSweepService"/>'s
-	/// own doc comment documents) -- until then this lists the appliance-wide set.
+	/// The three ADR-0034 states an operator must be able to tell apart --
+	/// <c>grace</c> (approaching the grace period), <c>pending-purge</c> (past it),
+	/// and <c>pinned</c> (exempt, sweep will skip) -- per <c>docs/api-contract.md</c>'s
+	/// row for this endpoint. Paged the same way as <c>CatalogController.ListArtifacts</c>
+	/// on the wire (<see cref="PageRequest"/>, <c>X-Total-Count</c> header) but not
+	/// underneath it: <see cref="IRetainedContentStateRepository.ListByStateAsync"/>
+	/// has no <see cref="PageRequest"/> overload, so this fetches each matching state
+	/// in full and pages/counts in memory here -- fine at today's row counts, not a
+	/// claim of repository-level paging parity. Narrowable to a single state via the
+	/// optional <paramref name="state"/> query parameter (an unrecognized value is
+	/// 400); omitted, it lists all three. "Per subscription scope" (this issue's own
+	/// Proposed Changes) awaits a real Subscription entity (#1421 is still open, the
+	/// same deferred-discovery seam <see cref="IRetentionSweepService"/>'s own doc
+	/// comment documents) -- until then this lists the appliance-wide set.
 	/// </summary>
 	[HttpGet("state")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(RetainedContentStateResponse[]), StatusCodes.Status200OK)]
-	public async Task<ActionResult<IReadOnlyList<RetainedContentStateResponse>>> ListState([FromQuery] PageRequest page, CancellationToken cancellationToken)
+	public async Task<ActionResult<IReadOnlyList<RetainedContentStateResponse>>> ListState([FromQuery] PageRequest page, [FromQuery] string? state, CancellationToken cancellationToken)
 	{
-		List<RetainedContentState> grace = [.. await _states.ListByStateAsync(RetainedContentStates.Grace, cancellationToken).ConfigureAwait(false)];
-		List<RetainedContentState> pendingPurge = [.. await _states.ListByStateAsync(RetainedContentStates.PendingPurge, cancellationToken).ConfigureAwait(false)];
-		List<RetainedContentState> all = [.. grace, .. pendingPurge];
+		string[] states;
+		if (string.IsNullOrWhiteSpace(state))
+		{
+			states = [RetainedContentStates.Grace, RetainedContentStates.PendingPurge, RetainedContentStates.Pinned];
+		}
+		else if (Array.IndexOf(ListableStates, state) >= 0)
+		{
+			states = [state];
+		}
+		else
+		{
+			throw ApiException.Validation($"'state' must be one of: {string.Join(", ", ListableStates)}.");
+		}
+
+		List<RetainedContentState> all = [];
+		foreach (string candidate in states)
+		{
+			all.AddRange(await _states.ListByStateAsync(candidate, cancellationToken).ConfigureAwait(false));
+		}
+
 		all.Sort((a, b) => a.CreatedAt.CompareTo(b.CreatedAt));
 
 		Response.Headers["X-Total-Count"] = all.Count.ToString(CultureInfo.InvariantCulture);
@@ -164,7 +196,13 @@ public sealed class RetentionController : ControllerBase
 	/// <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> for the transition
 	/// walk, path-confined delete, and per-file logged deletion trail. Already-pinned
 	/// content is refused with 409 <c>content_pinned</c> (unpin first); already-purged
-	/// content is a 200 no-op, matching the service's own idempotent contract.
+	/// content comes back 200 with <see cref="PurgeNowResponse.Purged"/> <c>false</c>
+	/// and <see cref="PurgeNowResponse.Error"/> set to the service's "already purged"
+	/// message -- this endpoint never turns that into an error response itself. #1662
+	/// (open, not this issue's job) tracks a *different* consumer of the same
+	/// service call, the retention-sweep job handler, folding that same non-null
+	/// <c>Error</c> into its own failure count on rerun; nothing here claims that gap
+	/// is closed.
 	/// </summary>
 	[HttpPost("{id:guid}/purge-now")]
 	[RequireAdminRole]
