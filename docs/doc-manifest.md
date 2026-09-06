@@ -23,7 +23,7 @@ tutorials: docs/tutorials/ · how-to: docs/how-to/ · reference: docs/reference/
 Index: docs/README.md
 
 ## ADRs
-Directory: docs/adr/ · Range in use: 0001–0027 · Normalisation ADR: 0027
+Directory: docs/adr/ · Range in use: 0001–0034 · Normalisation ADR: 0027
 Index markers: `<!-- adr-index:start -->` / `<!-- adr-index:end -->` in docs/adr/README.md
 
 ## Rationale areas

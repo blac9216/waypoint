@@ -49,7 +49,7 @@ An append to Consequences must:
 | [0015](0015-source-build-and-operator-export.md) | Distribute source; operators build, provision, and export appliances | Accepted | - | - | - | - | 1. **The project publishes source and build definitions, not completed container |
 | [0016](0016-run-scoped-personal-credential-persistence.md) | Personal credentials persist encrypted, run-scoped, terminal/expiry bounded | Accepted | - | - | - | - | 1. **Personal credentials persist, encrypted, in a dedicated run-scoped table.** One |
 | [0017](0017-compliance-content-runner-placement.md) | Compliance-content pull/import execute in the compliance-runner | Accepted | - | - | - | - | `content-pull` and `content-import` are `compliance-runner` job types, claimed under |
-| [0018](0018-shared-capacity-lease-pool.md) | Host-derived capacity discovery, a startup admission invariant, and a shared capacity lease pool | Accepted | - | - | - | - | 1. **Host-derived capacity replaces the 1-CPU/1-GiB fallback when cgroup limits are |
+| [0018](0018-shared-capacity-lease-pool.md) | Host-derived capacity discovery, a startup admission invariant, and a shared capacity lease pool | Accepted | - | - | - | 0033 | 1. **Host-derived capacity replaces the 1-CPU/1-GiB fallback when cgroup limits are |
 | [0019](0019-global-job-observability.md) | Global job observability with domain-owned results | Accepted | - | - | - | - | 1. **Live Jobs is global operational observability.** A top-level workspace lists |
 | [0020](0020-capacity-lease-pool-protocol.md) | Capacity lease pool protocol, recovery, and fairness policy | Accepted | - | - | - | - | 1. **Schema (migration 0036).** A singleton `capacity_pool` row holds the appliance's |
 | [0021](0021-credential-purpose-matrix.md) | Credential-purpose matrix — explicit purposes, not numbered slots | Accepted | - | - | - | - | ### 1. Credential purposes are explicit, named identifiers — never numbered slots |
@@ -59,6 +59,13 @@ An append to Consequences must:
 | [0025](0025-compliance-trust-cleanup-and-evidence.md) | Compliance trust, temporary access cleanup, and evidence lifecycle | Accepted | - | - | - | - | ### Connection-scoped trust |
 | [0026](0026-adopt-design-docs-standard.md) | Adopt the design-docs standard | Proposed | - | - | - | - | Waypoint adopts the design-docs standard as its architecture-documentation framework. |
 | [0027](0027-normalise-adrs-to-madr.md) | Normalise ADRs 0001–0025 to the MADR frame | Proposed | - | - | - | - | Option 3. This ADR authorises a single, uniform normalisation pass over ADRs 0001–0025: |
+| [0028](0028-subscription-preset-metadata-indexed-default.md) | Metadata indexed by default; subscriptions and presets move bytes | Accepted | - | - | - | - | Metadata indexing is unconditional and default-on for every lane; downloading bytes |
+| [0029](0029-depot-store-volume-topology.md) | Depot store volume topology — one depot volume, carved-out stores by exception | Accepted | - | - | - | - | The runner-written stores (ESX/patch, Photon, VMware Tools, VKS, plus `VCSA`/ |
+| [0030](0030-retire-legacy-download-job-type.md) | Retire the legacy `download` job type and `POST /downloads` | Accepted | - | - | - | - | The `download` job type and `POST /downloads` are retired: removed from the |
+| [0031](0031-repo-serving-per-location-auth.md) | Repo serving surface — per-location independent auth, Waypoint-managed credentials | Accepted | - | - | - | - | nginx enforces auth per `location` (one per store, ADR-0029), independent of the app's |
+| [0032](0032-esx-patch-store-vcfdt-acquisition.md) | ESX patch store — VCFDT-only acquisition, generation-agnostic reconciliation | Accepted | - | - | - | - | The ESX patch store is acquired exclusively through `vcf-download-tool` |
+| [0033](0033-disk-admission-joins-capacity-model.md) | Disk space joins the shared capacity admission model | Accepted | - | - | 0018 | - | Disk space becomes a third resource dimension in ADR-0018's shared capacity lease |
+| [0034](0034-grace-period-retention.md) | Grace-period retention within subscription scope | Accepted | - | - | - | - | Content that a subscription superseded within its own tracked scope enters a |
 <!-- adr-index:end -->
 
 ## Former milestone numbering
