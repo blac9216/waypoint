@@ -193,8 +193,7 @@ to keep it.
 **`download-runner` fails at container create with a "make mountpoint
 .../vcf/ContentLibrary" error when the depot is bind-mounted read-only.**
 Compose nests the `content-libraries` volume at `/vcf/ContentLibrary`,
-inside the depot mount (`docs/rationale/deploy.md#content-libraries-own-
-volume`); Docker must create that nested mountpoint inside the depot
+inside the depot mount (`docs/rationale/deploy.md#content-libraries-own-volume`); Docker must create that nested mountpoint inside the depot
 filesystem at container-create time, which it cannot do on a read-only
 parent unless the depot tree already contains a `ContentLibrary/`
 directory. Create an empty `ContentLibrary/` directory in the depot share
