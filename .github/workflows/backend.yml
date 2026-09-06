@@ -75,6 +75,7 @@ jobs:
               - "Directory.Build.props"
               - ".editorconfig"
               - "scripts/check-coverage-floor.py"
+              - "scripts/tests/**"
               - ".github/workflows/backend.yml"
 
   backend:
@@ -252,6 +253,23 @@ jobs:
           fi
           shellcheck "$entrypoint"
 
+  # Issue #1710: scripts/check-coverage-floor.py gained a scripts/tests/
+  # unittest suite (issue #1354) with no CI job running it. Separate job
+  # rather than a step in `backend`: it needs no .NET SDK or restore, so it
+  # gives its own fast red/green signal (mirrors the `pester`/`shellcheck`
+  # jobs above).
+  coverage-gate-tests:
+    name: "coverage-gate tests (job)"
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Run scripts/tests unittest suite
+        run: python3 -m unittest discover -s scripts/tests -v
+
   # Always-report gate (#232): owns the required check-run name. Runs on
   # every PR/push regardless of the path filter (`if: always()` — GitHub's
   # documented construct for a required check that depends on other jobs).
@@ -263,7 +281,7 @@ jobs:
   # so a docs-only PR shows this context green instead of forever pending.
   backend-gate:
     name: "build, test, coverage"
-    needs: [changes, backend, shellcheck]
+    needs: [changes, backend, shellcheck, coverage-gate-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -277,9 +295,11 @@ jobs:
           changes_result="${{ needs.changes.result }}"
           job_result="${{ needs.backend.result }}"
           shellcheck_result="${{ needs.shellcheck.result }}"
+          coverage_gate_tests_result="${{ needs.coverage-gate-tests.result }}"
           echo "changes job result: $changes_result"
           echo "backend job result: $job_result"
           echo "shellcheck job result: $shellcheck_result"
+          echo "coverage-gate-tests job result: $coverage_gate_tests_result"
           if [ "$changes_result" != "success" ]; then
             echo "changes job did not succeed ($changes_result) -- failing gate"
             exit 1
@@ -290,6 +310,10 @@ jobs:
             *) status=1 ;;
           esac
           case "$shellcheck_result" in
+            success|skipped) ;;
+            *) status=1 ;;
+          esac
+          case "$coverage_gate_tests_result" in
             success|skipped) ;;
             *) status=1 ;;
           esac
