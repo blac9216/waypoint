@@ -54,8 +54,10 @@ out-of-scope content may be exactly what a later disconnected-side transfer need
 
 Content that a subscription superseded within its own tracked scope enters a
 grace period (subscription-configurable duration, expressed as days or a count of
-refresh cycles); an in-app alert (ADR-0019's alert model, adopted wholesale per
-decision R2-9) surfaces content approaching or past its grace period, is pinnable
+refresh cycles); an in-app alert (the alert model adopted wholesale per decision
+R2-9 from epic #726 — `docs/api-contract.md`'s `/alerts` surface and
+`docs/security.md`'s Admin-only, non-resolving acknowledgement) surfaces content
+approaching or past its grace period, is pinnable
 (exempting specific content from the sweep indefinitely), and offers a purge-now
 action to skip the remaining grace period deliberately. Manual/ad-hoc downloads (not
 subscription-driven) are governed by a separate, operator-configurable retention dial,
