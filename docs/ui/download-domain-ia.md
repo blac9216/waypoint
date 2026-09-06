@@ -110,8 +110,8 @@ built).
 - Create/edit/disable a subscription per lane — `POST`/`PATCH
   /downloads/esx/subscriptions` for the ESX lane (shipped); equivalent per-lane
   endpoints for Photon/VMTools/VKS are planned (Wave 5).
-- View subscription evaluation history once the evaluation job (#1046 design
-  record, tracked in #1472, planned) ships — not yet a screen element.
+- View subscription evaluation history once the evaluation job (#1046 design record,
+  tracked in #1472, planned) ships — not yet a screen element.
 
 **Open question:** see Open Question 3 (subscription-evaluation history placement)
 below.
@@ -348,9 +348,9 @@ download-runner has heartbeated at least once).
    Photon · VMware Tools · VKS · Library · Retention), or be distributed across the
    existing Download Catalog / Library / Configuration screens as this document's
    per-screen "Placement" notes suggest by default?
-3. **Subscription-evaluation history.** Once the evaluation job (#1046 design
-   record, tracked in #1472) ships, where
-   should its run history live — a tab on the Subscriptions screen, or folded into
+3. **Subscription-evaluation history.** Once the evaluation job (#1046 design record,
+   tracked in #1472) ships, where should its run history live — a tab on the
+   Subscriptions screen, or folded into
    the existing global Live Jobs workspace (per-run detail, same pattern as
    compliance runs)?
 4. **ESX store auth dial editability.** Research found vLCM's own patch-URL consumer
