@@ -21,7 +21,8 @@ if [ "$(id -u)" = '0' ]; then
 	# frequently bind-mounted read-only (an NFS/SMB vendor export); catalog-
 	# index only ever reads it, so chown it only when a write actually
 	# succeeds -- `-w` is unreliable for root/read-only bind mounts, so probe
-	# with a real write instead. why: docs/rationale/deploy.md#depot-chown-write-probe
+	# with a real write instead.
+	# why: docs/rationale/deploy.md#depot-chown-write-probe
 	if [ -d /vcf ]; then
 		if touch /vcf/.waypoint-write-probe 2>/dev/null; then
 			rm -f /vcf/.waypoint-write-probe
