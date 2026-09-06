@@ -39,10 +39,15 @@ BeforeAll {
 
 AfterAll {
 	# Remove the global stand-ins so they do not leak into later test files in the
-	# same Pester run (see review note on PR #1717 round 1).
-	Remove-Item Function:\global:Get-LogSplat -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Write-Log -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-CatalogReportGroupMap -ErrorAction SilentlyContinue
+	# same Pester run (see review notes on PR #1717 rounds 1 and 2). The Function:
+	# provider path must NOT carry a global: qualifier: Remove-Item
+	# Function:\global:<Name> reports success and removes nothing, so the plain
+	# Function:\<Name> form is the one that actually tears the stub down. No
+	# -ErrorAction SilentlyContinue either -- a stub that is not there to remove
+	# means the list below has drifted from the list above, and that must surface.
+	Remove-Item Function:\Get-LogSplat
+	Remove-Item Function:\Write-Log
+	Remove-Item Function:\Get-CatalogReportGroupMap
 }
 
 Describe 'Add-ScanSkip / Get-ScanSkips / Clear-ScanSkips' {

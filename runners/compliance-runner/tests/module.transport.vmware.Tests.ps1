@@ -58,22 +58,32 @@ BeforeAll {
 
 AfterAll {
 	# Remove the global stand-ins so they do not leak into later test files in the
-	# same Pester run (see review note on PR #1717 round 1).
-	Remove-Item Function:\global:Get-LogSplat -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Write-Log -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-CatalogKind -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-CatalogComponent -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-CatalogRelease -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Resolve-CatalogProfilePath -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Resolve-ScanInputFile -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Resolve-Credential -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-AttestationPaths -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Connect-VIServer -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-Credential -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-VM -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-VMHost -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue
-	Remove-Item Function:\global:Get-NetworkAdapter -ErrorAction SilentlyContinue
+	# same Pester run (see review notes on PR #1717 rounds 1 and 2). The Function:
+	# provider path must NOT carry a global: qualifier: Remove-Item
+	# Function:\global:<Name> reports success and removes nothing, so the plain
+	# Function:\<Name> form is the one that actually tears the stub down. No
+	# -ErrorAction SilentlyContinue either -- a stub that is not there to remove
+	# means the list below has drifted from the list above, and that must surface.
+	Remove-Item Function:\Get-LogSplat
+	Remove-Item Function:\Write-Log
+	Remove-Item Function:\Get-CatalogKind
+	Remove-Item Function:\Get-CatalogComponent
+	Remove-Item Function:\Get-CatalogRelease
+	Remove-Item Function:\Resolve-CatalogProfilePath
+	Remove-Item Function:\Resolve-ScanInputFile
+	Remove-Item Function:\Resolve-Credential
+	Remove-Item Function:\Get-AttestationPaths
+	Remove-Item Function:\Connect-VIServer
+	Remove-Item Function:\Get-Credential
+	Remove-Item Function:\Get-VM
+	Remove-Item Function:\Get-VMHost
+	Remove-Item Function:\Get-VMHostNetworkAdapter
+	Remove-Item Function:\Get-NetworkAdapter
+	# The PowerCLI connection list the suite fakes is a global variable, not a
+	# function, so it needs its own teardown or it leaks to later files.
+	if (Get-Variable -Name DefaultVIServers -Scope Global -ErrorAction SilentlyContinue) {
+		Remove-Variable -Name DefaultVIServers -Scope Global
+	}
 }
 
 Describe 'Connect-StigVIServer' {
