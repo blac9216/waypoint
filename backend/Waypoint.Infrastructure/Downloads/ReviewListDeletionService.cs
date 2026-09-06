@@ -149,9 +149,21 @@ public sealed partial class ReviewListDeletionService : IReviewListDeletionServi
 		}
 	}
 
+	// Two overloads per message, one for each identifier shape (Guid for
+	// out-of-scope, string for orphan) rather than a single `object identifier`
+	// parameter -- an `object` parameter would box the Guid on every call, which is
+	// exactly the avoidable-when-logging-is-disabled cost CA1873 flags; a same-typed
+	// overload per call site (matching RetentionSweepService's own Guid-typed
+	// LogPurged/LogPurgeFailed) never boxes.
 	[LoggerMessage(Level = LogLevel.Information, Message = "review-list: deleted {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}")]
-	private static partial void LogDeleted(ILogger logger, string kind, object identifier, string actor, string reason);
+	private static partial void LogDeleted(ILogger logger, string kind, Guid identifier, string actor, string reason);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "review-list: deleted {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}")]
+	private static partial void LogDeleted(ILogger logger, string kind, string identifier, string actor, string reason);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "review-list: delete FAILED for {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}: {Error}")]
-	private static partial void LogDeleteFailed(ILogger logger, string kind, object identifier, string actor, string reason, string error);
+	private static partial void LogDeleteFailed(ILogger logger, string kind, Guid identifier, string actor, string reason, string error);
+
+	[LoggerMessage(Level = LogLevel.Error, Message = "review-list: delete FAILED for {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}: {Error}")]
+	private static partial void LogDeleteFailed(ILogger logger, string kind, string identifier, string actor, string reason, string error);
 }
