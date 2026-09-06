@@ -25,6 +25,7 @@ if [ "$(id -u)" = '0' ]; then
 	# mount itself must be writable for that future install step.
 	[ -d /var/lib/waypoint/managed-tool ] && chown app:app /var/lib/waypoint/managed-tool
 
+	# shellcheck disable=SC2016 # $0/$@ are the inner sh's positional args, deliberately unexpanded here
 	exec su -s /bin/sh app -c 'exec "$0" "$@"' -- "$@"
 fi
 
