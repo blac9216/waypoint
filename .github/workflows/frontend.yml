@@ -2,15 +2,20 @@ name: frontend
 
 # Path-filtered: only frontend/** changes (or this workflow file) trigger a
 # build. A docs-only or backend-only PR never runs this job (see #79).
+#
+# scripts/check-coverage-floor.py is a shared input that controls the
+# coverage gate below — issue #412.
 on:
   pull_request:
     paths:
       - "frontend/**"
+      - "scripts/check-coverage-floor.py"
       - ".github/workflows/frontend.yml"
   push:
     branches: [main]
     paths:
       - "frontend/**"
+      - "scripts/check-coverage-floor.py"
       - ".github/workflows/frontend.yml"
 
 concurrency:
