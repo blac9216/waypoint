@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import unittest
 
@@ -55,13 +56,14 @@ class JacocoReaderTests(unittest.TestCase):
         self.assertAlmostEqual(pct, 80.0)
 
     def test_report_level_counter_not_summed_with_class_counters(self):
-        # jacoco-pass.xml's <package>/<class> LINE counters (missed=1,
-        # covered=9) are deliberately different from the report-level LINE
-        # counter (missed=12, covered=88); if the reader summed nested
-        # counters instead of taking the report-level one it would not
-        # return 88.0.
-        pct = cf.measure_jacoco(fixture("jacoco-pass.xml"), "line")
-        self.assertAlmostEqual(pct, 88.0)
+        # jacoco-nested-mismatch.xml has two <class> LINE counters
+        # (missed=5/covered=5 and missed=3/covered=2) that sum to
+        # missed=8/covered=7 (~46.67%), deliberately far from the
+        # report-level LINE counter (missed=10, covered=90 -> 90.0%). If the
+        # reader summed nested counters instead of taking the report-level
+        # one, this would return ~46.67 instead of 90.0.
+        pct = cf.measure_jacoco(fixture("jacoco-nested-mismatch.xml"), "line")
+        self.assertAlmostEqual(pct, 90.0)
 
     def test_malformed_xml_exits_nonzero(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -80,23 +82,9 @@ class JacocoReaderTests(unittest.TestCase):
         self.assertAlmostEqual(pct, 80.0)
 
     def test_zero_total_exits_nonzero(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".xml", delete=False
-        ) as tmp:
-            tmp.write(
-                "<report name=\"invented-runner\">"
-                '<counter type="LINE" missed="0" covered="0"/>'
-                "</report>"
-            )
-            path = tmp.name
-        try:
-            with self.assertRaises(SystemExit) as ctx:
-                cf.measure_jacoco(path, "line")
-            self.assertNotEqual(ctx.exception.code, 0)
-        finally:
-            os.remove(path)
+        with self.assertRaises(SystemExit) as ctx:
+            cf.measure_jacoco(fixture("jacoco-zero-total.xml"), "line")
+        self.assertNotEqual(ctx.exception.code, 0)
 
 
 class CoberturaReaderSmokeTest(unittest.TestCase):
@@ -107,6 +95,42 @@ class CoberturaReaderSmokeTest(unittest.TestCase):
     def test_branch_rate_percentage(self):
         pct = cf.measure_cobertura(fixture("cobertura-sample.xml"), "branch")
         self.assertAlmostEqual(pct, 85.0)
+
+
+class JacocoCliContractTests(unittest.TestCase):
+    """Exercise --format jacoco through the real CLI entry point (main()),
+    not just the measure_jacoco() function, so that deleting the "jacoco"
+    argparse choice or its dispatch branch in main() fails this suite even
+    though the reader function itself would still work if called directly.
+    """
+
+    def _run(self, report: str, floor: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                SCRIPT_PATH,
+                "--report",
+                report,
+                "--format",
+                "jacoco",
+                "--floor",
+                floor,
+                "--metric",
+                "line",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_cli_jacoco_pass_exits_zero(self):
+        result = self._run(fixture("jacoco-pass.xml"), "50.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    def test_cli_jacoco_fail_exits_nonzero(self):
+        result = self._run(fixture("jacoco-fail.xml"), "88.0")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL", result.stderr)
 
 
 class VitestJsonSummaryReaderSmokeTest(unittest.TestCase):
@@ -124,5 +148,4 @@ class VitestJsonSummaryReaderSmokeTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(SCRIPT_PATH))
     unittest.main()
