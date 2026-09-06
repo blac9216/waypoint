@@ -266,6 +266,17 @@ function Set-Permissions {
 
 .EXAMPLE
     $Manifest = Get-FileManifest -Directory '/vcf/UMDS' -IncludeHash -HashAlgorithm 'SHA256'
+
+.NOTES
+    Issue #1718: an unreadable subdirectory is never silently treated as
+    empty. Walk errors (permission denied) are collected via -ErrorVariable;
+    if any occurred, each is logged at Warning and the function throws a
+    terminating error naming every unreadable path -- a manifest that may be
+    incomplete is worse than no manifest at all (epic #1361, "verify, never
+    assume"). This function has exactly one repo caller
+    (WaypointCatalogIndex.psm1's Update-WaypointCatalogIndex), which does not
+    catch around the call, so the throw propagates as a job failure rather
+    than a comparison against a truncated baseline.
 #>
 function Get-FileManifest {
 	[CmdletBinding()]
@@ -301,7 +312,18 @@ function Get-FileManifest {
 	$DirectoryInfo = [System.IO.DirectoryInfo]::new($Directory)
 	$BasePath = $DirectoryInfo.FullName
 
-	$Files = Get-ChildItem -Path $Directory -Recurse -File -Force -ErrorAction SilentlyContinue
+	$WalkErrors = $null
+	$Files = Get-ChildItem -Path $Directory -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable WalkErrors
+
+	if ($WalkErrors) {
+		$UnreadablePaths = @($WalkErrors | ForEach-Object {
+				if ($_.TargetObject) { $_.TargetObject } else { $_.Exception.Message }
+			} | Select-Object -Unique)
+		foreach ($UnreadablePath in $UnreadablePaths) {
+			Write-Log "Unable to read directory, excluded from manifest: $UnreadablePath" -Severity 'Warning' @WriteLogParams
+		}
+		throw "Get-FileManifest: $($UnreadablePaths.Count) unreadable path(s) under '$Directory', manifest would be incomplete: $($UnreadablePaths -join ', ')"
+	}
 
 	foreach ($File in $Files) {
 		$RelativePath = $File.FullName.Substring($BasePath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar)
@@ -362,6 +384,14 @@ function Get-FileManifest {
 
 .EXAMPLE
     Remove-EmptyDirs -Directory '/vcf/UMDS'
+
+.NOTES
+    Issue #1718: an unreadable directory is never treated as empty. Both the
+    top-level directory enumeration and each directory's child listing collect
+    walk errors via -ErrorVariable; any unreadable directory is logged at
+    Warning, left untouched (no removal attempted), and its path is included
+    in a terminating error thrown after the walk completes -- matching
+    Get-FileManifest's fail-closed contract for the same underlying failure.
 #>
 function Remove-EmptyDirs {
 	[CmdletBinding(SupportsShouldProcess)]
@@ -385,26 +415,48 @@ function Remove-EmptyDirs {
 	Write-Log "Removing empty directories under $Directory" -Severity 'Verbose' @WriteLogParams
 
 	$RemovedCount = 0
+	$UnreadablePaths = [System.Collections.Generic.List[string]]::new()
 
 	# Get all directories, sorted by depth (deepest first)
-	$Directories = Get-ChildItem -Path $Directory -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+	$WalkErrors = $null
+	$Directories = Get-ChildItem -Path $Directory -Recurse -Directory -Force -ErrorAction SilentlyContinue -ErrorVariable WalkErrors |
 	Sort-Object { $_.FullName.Split([System.IO.Path]::DirectorySeparatorChar).Count } -Descending
 
+	foreach ($WalkError in $WalkErrors) {
+		$UnreadablePath = if ($WalkError.TargetObject) { $WalkError.TargetObject } else { $WalkError.Exception.Message }
+		$UnreadablePaths.Add($UnreadablePath)
+	}
+
 	foreach ($Dir in $Directories) {
-		try {
-			# Check if directory is empty (no files or subdirectories)
-			$Children = Get-ChildItem -Path $Dir.FullName -Force -ErrorAction SilentlyContinue
-			if ($Children.Count -eq 0) {
+		$ChildErrors = $null
+		# Check if directory is empty (no files or subdirectories)
+		$Children = Get-ChildItem -Path $Dir.FullName -Force -ErrorAction SilentlyContinue -ErrorVariable ChildErrors
+		if ($ChildErrors) {
+			# Directory could not be listed -- never treat as empty, never attempt removal.
+			$UnreadablePaths.Add($Dir.FullName)
+			continue
+		}
+		if ($Children.Count -eq 0) {
+			try {
 				if ($PSCmdlet.ShouldProcess($Dir.FullName, 'Remove empty directory')) {
 					Remove-Item -LiteralPath $Dir.FullName -Force -ErrorAction Stop
 					$RemovedCount++
 					Write-Log "Removed empty directory: $($Dir.FullName)" -Severity 'Debug' @WriteLogParams
 				}
+			} catch {
+				# Directory not empty (race) or permission error on removal - ignore
+				Write-Log "Could not remove $($Dir.FullName): $_" -Severity 'Debug' @WriteLogParams
 			}
-		} catch {
-			# Directory not empty or permission error - ignore
-			Write-Log "Could not remove $($Dir.FullName): $_" -Severity 'Debug' @WriteLogParams
 		}
+	}
+
+	if ($UnreadablePaths.Count -gt 0) {
+		$DistinctUnreadablePaths = @($UnreadablePaths | Select-Object -Unique)
+		foreach ($UnreadablePath in $DistinctUnreadablePaths) {
+			Write-Log "Unable to read directory, left untouched: $UnreadablePath" -Severity 'Warning' @WriteLogParams
+		}
+		Write-Log "Removed $RemovedCount empty directories" -Severity 'Verbose' @WriteLogParams
+		throw "Remove-EmptyDirs: $($DistinctUnreadablePaths.Count) unreadable path(s) under '$Directory', not evaluated for removal: $($DistinctUnreadablePaths -join ', ')"
 	}
 
 	Write-Log "Removed $RemovedCount empty directories" -Severity 'Verbose' @WriteLogParams

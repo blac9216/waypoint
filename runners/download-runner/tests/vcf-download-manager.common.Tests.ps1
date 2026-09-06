@@ -197,6 +197,43 @@ Describe 'Get-FileManifest' {
 		Test-Path -Path $Out | Should -BeTrue
 		(Get-Content -Path $Out -Raw) | Should -Match 'a\.txt'
 	}
+
+	# Issue #1718: an unreadable subdirectory must never be silently treated as
+	# empty -- the reviewer's probe on PR #1716 found a `chmod 000` subtree
+	# vanished from the manifest with no error at all.
+	It 'surfaces an unreadable subdirectory instead of silently omitting it' {
+		if (-not ($IsLinux -or $IsMacOS)) {
+			Set-ItResult -Skipped -Because 'chmod mode bits are not meaningful on Windows'
+			return
+		}
+		if ((& id -u) -eq '0') {
+			Set-ItResult -Skipped -Because 'running as root ignores mode bits, so the directory would remain readable'
+			return
+		}
+
+		# Round-1 review finding F4: the fixture root must NOT contain the
+		# locked child's own name, or a wildcard match against the root name
+		# alone (which every thrown message already interpolates via
+		# "under '$Directory'") would pass against an implementation that
+		# reports nothing useful about which subdirectory failed.
+		$Root = Join-Path -Path $TestDrive -ChildPath 'manifest-scan-root'
+		$Good = Join-Path $Root 'good'
+		$Sealed = Join-Path $Root 'sealed'
+		New-Item -Path $Good -ItemType Directory -Force | Out-Null
+		New-Item -Path $Sealed -ItemType Directory -Force | Out-Null
+		Set-Content -Path (Join-Path $Good 'f.txt') -Value 'abc' -NoNewline
+		Set-Content -Path (Join-Path $Sealed 'hidden.txt') -Value 'xyz' -NoNewline
+
+		try {
+			& chmod 000 $Sealed
+			Mock Write-Log {}
+
+			{ Get-FileManifest -Directory $Root } | Should -Throw -ExpectedMessage "*$Sealed*"
+			Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like "*$Sealed*" }
+		} finally {
+			& chmod 700 $Sealed
+		}
+	}
 }
 
 Describe 'Remove-EmptyDirs' {
@@ -227,6 +264,39 @@ Describe 'Remove-EmptyDirs' {
 		Remove-EmptyDirs -Directory $Root -WhatIf | Out-Null
 
 		Test-Path -Path $Empty | Should -BeTrue
+	}
+
+	# Issue #1718: an unreadable directory must never be treated as empty --
+	# no removal attempt, and the caller must be able to tell the walk was
+	# incomplete rather than trusting a smaller-but-healthy-looking result.
+	It 'leaves an unreadable directory untouched and surfaces the failure' {
+		if (-not ($IsLinux -or $IsMacOS)) {
+			Set-ItResult -Skipped -Because 'chmod mode bits are not meaningful on Windows'
+			return
+		}
+		if ((& id -u) -eq '0') {
+			Set-ItResult -Skipped -Because 'running as root ignores mode bits, so the directory would remain readable'
+			return
+		}
+
+		# Round-1 review finding F4: same rationale as Get-FileManifest's case
+		# above -- the root's own name must not contain the locked child's
+		# name, and the assertion must key off the child's own path.
+		$Root = Join-Path -Path $TestDrive -ChildPath 'prune-scan-root'
+		$Sealed = Join-Path $Root 'sealed'
+		New-Item -Path $Sealed -ItemType Directory -Force | Out-Null
+		Set-Content -Path (Join-Path $Sealed 'hidden.txt') -Value 'xyz' -NoNewline
+
+		try {
+			& chmod 000 $Sealed
+			Mock Write-Log {}
+
+			{ Remove-EmptyDirs -Directory $Root } | Should -Throw -ExpectedMessage "*$Sealed*"
+			Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like "*$Sealed*" }
+			Test-Path -Path $Sealed | Should -BeTrue
+		} finally {
+			& chmod 700 $Sealed
+		}
 	}
 }
 
