@@ -521,7 +521,8 @@ compliance domain already uses for scans (see "Run and Job" above): one Run per
 subscription evaluation or ad-hoc request, one Job per acquired item, so
 parallelism/resume/cancel are per-item without a second scheduler. The legacy
 `download` job type and `POST /downloads` are retired
-([ADR-0030](adr/0030-retire-legacy-download-job-type.md), issue #1040) -- vendor
+([ADR-0030](adr/0030-retire-legacy-download-job-type.md), issue #1040, 📋 not yet
+landed) -- vendor
 acquisition is tool-driven (`binaries-download`, already a live job type below) and
 mirror lanes get their own sync job types over the `Save-WebFile` primitive rather than
 sharing the generic `download` type. Disk space joins CPU/memory as a third resource
