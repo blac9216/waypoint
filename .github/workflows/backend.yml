@@ -1,7 +1,22 @@
 name: backend
 
-# Path-filtered: only backend/** changes (or this workflow file) trigger a
-# build. A docs-only or frontend-only PR never runs this job (see #79).
+# Always-report pattern (issue #232): this workflow runs on every PR/push to
+# main, but the real work is skipped unless backend-relevant paths changed.
+# A `changes` job (dorny/paths-filter) decides that once; every real job
+# below is gated on its output (`if: needs.changes.outputs.backend ==
+# 'true'`), and a final `backend-gate` job — the one that owns the required
+# check-run name `build, test, coverage` — always runs (`if: always()`,
+# GitHub's documented construct for a required check that depends on other
+# jobs; a job skipped by its own condition reports Success to a required
+# check, so the gate must never skip — on a cancelled run it runs, sees
+# `changes.result` == `cancelled` and fails, which is the honest answer for
+# a run that verified nothing) and reports success only when BOTH `changes`
+# itself succeeded AND the real job succeeded or was skipped; any other
+# combination (including a `changes` failure, which would otherwise look
+# exactly like an off-path skip) fails the gate. This is what makes the
+# context eligible to be a required check (a GitHub required check that a
+# path filter can make "never runs" would otherwise deadlock every PR that
+# doesn't touch the path — see #232).
 #
 # docs/compliance-content-shape-inventory.md is listed too, even though it is a
 # doc: the `pester` job below treats that document as the shape inventory's
@@ -14,22 +29,8 @@ name: backend
 # and the coverage gate) — issue #412.
 on:
   pull_request:
-    paths:
-      - "backend/**"
-      - "docs/compliance-content-shape-inventory.md"
-      - "Directory.Build.props"
-      - ".editorconfig"
-      - "scripts/check-coverage-floor.py"
-      - ".github/workflows/backend.yml"
   push:
     branches: [main]
-    paths:
-      - "backend/**"
-      - "docs/compliance-content-shape-inventory.md"
-      - "Directory.Build.props"
-      - ".editorconfig"
-      - "scripts/check-coverage-floor.py"
-      - ".github/workflows/backend.yml"
 
 concurrency:
   group: backend-${{ github.workflow }}-${{ github.ref }}
@@ -37,10 +38,49 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  # Decides whether the paths below changed. On pull_request events this
+  # calls the GitHub API (needs `pull-requests: read`, no checkout depth
+  # required); on push-to-main it walks git history against
+  # `github.event.before` instead, which needs that commit to be present
+  # locally, hence `fetch-depth: 0` only for the push case (a shallow
+  # checkout is enough — and cheaper — on pull_request).
+  # The condition is written on `pull_request` rather than on `push`
+  # deliberately: GitHub coerces `0` to false in expressions, so
+  # `event_name == 'push' && 0 || 1` would yield 1 on every event. With
+  # `event_name == 'pull_request' && 1 || 0` the chosen value is truthy on
+  # the pull_request branch and is the `||` fallback on the push branch, so
+  # each event actually gets the depth it needs.
+  changes:
+    name: "changes: backend"
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
+
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            backend:
+              - "backend/**"
+              - "docs/compliance-content-shape-inventory.md"
+              - "Directory.Build.props"
+              - ".editorconfig"
+              - "scripts/check-coverage-floor.py"
+              - ".github/workflows/backend.yml"
+
   backend:
-    name: build, test, coverage
+    name: "build, test, coverage (job)"
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -128,9 +168,13 @@ jobs:
   # rot that let issue #1071 happen (PR #1151 round-1 review, finding 1).
   #
   # Separate job rather than a step in `backend`: it needs no .NET SDK, no
-  # restore and no coverage, so it gives its own fast red/green signal.
+  # restore and no coverage, so it gives its own fast red/green signal. Not a
+  # required check (see docs/process/testing.md), so it stays plain
+  # path-gated rather than growing its own always-report gate.
   pester:
     name: "pester: powershell shape inventory"
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -179,3 +223,38 @@ jobs:
           name: pester-shape-inventory
           path: testResults.xml
           retention-days: 14
+
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter (`if: always()` — GitHub's
+  # documented construct for a required check that depends on other jobs).
+  # A job skipped by its own condition reports Success to a required check,
+  # so the gate must never skip: on a cancelled run it still runs, sees
+  # `changes.result` == `cancelled` and fails, which is the honest answer
+  # for a run that verified nothing. The gate also treats a skipped
+  # `backend` job (off-path PR) the same as a successful one, so a
+  # docs-only PR shows this context green instead of forever pending.
+  backend-gate:
+    name: "build, test, coverage"
+    needs: [changes, backend]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # `changes.result` is checked explicitly, not just `backend.result`:
+      # a `changes` failure (e.g. the paths-filter API call erroring) skips
+      # `backend` exactly the way an off-path PR would, and the two are
+      # indistinguishable from `backend.result` alone. Requiring `changes`
+      # to have actually succeeded closes that hole.
+      - name: Require success or skip
+        run: |
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.backend.result }}"
+          echo "changes job result: $changes_result"
+          echo "backend job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac
