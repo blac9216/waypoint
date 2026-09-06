@@ -24,8 +24,8 @@ namespace Waypoint.Tests.Parity;
 /// PR #1742 review round-1 note 1: <see cref="DepotMiniFixture"/> (C#) and
 /// <c>New-DepotMiniFixture.ps1</c> (PowerShell) must materialize the SAME set of
 /// depot-relative files from the shared checked-in <c>Fixtures/depot-mini/</c> tree --
-/// <see cref="DepotMiniFixture"/>'s own doc comment claims "both consumers see
-/// byte-identical content", and this test is what makes that claim checkable instead
+/// <see cref="DepotMiniFixture"/>'s own doc comment claims both loaders stage the same
+/// file list, and this test is what makes that claim checkable instead
 /// of asserted-then-ignored. Compares the depot-relative file list (not content) from
 /// each loader's own independent materialization; a future loader-only artefact
 /// (a new script, a new README) that only one side excludes fails this test instead

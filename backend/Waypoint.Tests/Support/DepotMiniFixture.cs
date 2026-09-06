@@ -27,7 +27,8 @@ namespace Waypoint.Tests.Support;
 /// catalog document's <c>{{sha256:...}}</c>/<c>{{size:...}}</c> template tokens against
 /// the materialized files' real bytes. The PowerShell equivalent,
 /// <c>New-DepotMiniFixture.ps1</c>, performs the identical rewrite against the SAME
-/// checked-in tree so both consumers see byte-identical content.
+/// checked-in tree, so both consumers stage the same file list and the same catalog
+/// content (the two assembled UMDS zips are not byte-identical: ZipArchive vs Compress-Archive).
 /// </summary>
 public sealed class DepotMiniFixture : IDisposable
 {
