@@ -66,6 +66,13 @@ services:
         source: depot
         target: /srv/repo
         read_only: true
+      # Content-library registry: its OWN volume, not a depot subtree --
+      # /repo/content-libraries/ aliases this mount, not /srv/repo/ContentLibrary/.
+      # why: docs/rationale/deploy.md#content-libraries-own-volume
+      - type: volume
+        source: content-libraries
+        target: /srv/content-libraries
+        read_only: true
     networks:
       - edge
     healthcheck:
@@ -104,6 +111,8 @@ services:
       - artifacts:/var/lib/waypoint/artifacts:ro
       # why: docs/rationale/deploy.md#compose-tool-upload-staging-volume
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
+      # why: docs/rationale/deploy.md#content-libraries-own-volume
+      - content-libraries:/var/lib/waypoint/content-libraries
       # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
       # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment
       # - type: bind
@@ -301,6 +310,11 @@ services:
       - managed-tool:/var/lib/waypoint/managed-tool
       # why: docs/rationale/deploy.md#compose-tool-upload-staging-volume
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
+      # Nested deliberately over the depot subtree path the runner's store
+      # conventions already use -- vcf-download-manager.common.ps1 still
+      # writes/reads ContentLibrary/ under /vcf, unmodified.
+      # why: docs/rationale/deploy.md#content-libraries-own-volume
+      - content-libraries:/vcf/ContentLibrary
       # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
       # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment
       # - type: bind
@@ -366,3 +380,5 @@ volumes:
   tool-upload-staging:
   compliance-profiles:
   compliance-content:
+  # why: docs/rationale/deploy.md#content-libraries-own-volume
+  content-libraries:

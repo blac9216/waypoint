@@ -208,6 +208,30 @@ artifact + signature wait for download-runner to claim the install job.
 
 Refs: #621, #630, ADR-0014 §7
 
+### content-libraries-own-volume
+
+The content-library registry root gets its OWN named volume
+(`content-libraries`), not a subtree of `depot` -- unlike every other repo
+store (see nginx-repo-store-subtree-aliases). Three reasons: design record
+#16 §1 already says each sidecar store has its own named volume; the
+backend never mounts `depot` at all today, and folding the registry into
+it would be the first crack in that boundary; and a deployment may
+legitimately mount `depot` read-only from a shared/vendor tree (issue
+#614's scenario), while a content library must stay writable regardless.
+Same permission pattern the `tool-upload-staging` volume already
+establishes for the backend.
+
+On `download-runner`, the volume is nested at `/vcf/ContentLibrary` --
+INSIDE the `depot` mount, not beside it -- deliberately: the runner's own
+store-path conventions (`vcf-download-manager.common.ps1`) and any
+depot-fed content-library sync (#1057) keep writing/reading
+`ContentLibrary/` under `/vcf` unmodified; only the volume backing that
+one path changed. `/repo/depot/` still 404s the `ContentLibrary` subtree
+name (nginx-repo-store-subtree-aliases' denylist) so a stray depot-side
+`ContentLibrary/` directory is never a second route to it.
+
+Refs: #1706, #1647, #1502, design record #16 §1
+
 ### compose-postgres-healthcheck-wrapper
 
 A bare `pg_isready` passes on a half-initialized cluster (initdb ran, but
@@ -509,11 +533,12 @@ Refs: #498
 
 Repo path-space content is seeded straight into the throwaway `depot`
 volume before `up`, at exactly the paths the runner writes (`PROD/`,
-`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `ContentLibrary/`, `Transfer/`)
--- the same trick smoke-seeding-preconditions already uses for
-`compliance-profiles`. Nothing in this stack yet produces real repo
-content (that's later lanes), so the smoke test has to plant it itself
-to prove nginx serves what a producer will eventually write.
+`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `Transfer/`, plus a stray marker
+under `ContentLibrary/` -- see below) -- the same trick
+smoke-seeding-preconditions already uses for `compliance-profiles`.
+Nothing in this stack yet produces real repo content (that's later
+lanes), so the smoke test has to plant it itself to prove nginx serves
+what a producer will eventually write.
 
 Seeding the real layout rather than a set of separate placeholder volumes
 is what makes the isolation assertions mean anything: the stores overlap
@@ -524,7 +549,16 @@ volumes. Symlink escapes are seeded in both absolute and relative form,
 on the store location and on `/repo/depot/`, and a hardlink is seeded to
 prove `disable_symlinks on` does not break it.
 
-Refs: #1043, #1502
+`ContentLibrary/` is the one exception to "every store is a depot
+subtree" (content-libraries-own-volume, issues #1706/#1647): its real
+content is seeded into the separate `content-libraries` volume instead,
+at its root (nginx aliases `/repo/content-libraries/` straight to that
+mount, not to a `depot` subtree). Only a marker file is still seeded
+under the `depot` volume's `ContentLibrary/` path, to prove a stray
+depot-side directory of that name is still denied through
+`/repo/depot/` even though it is no longer where real content lives.
+
+Refs: #1043, #1502, #1706, #1647
 
 ### smoke-credential-owner-shared
 

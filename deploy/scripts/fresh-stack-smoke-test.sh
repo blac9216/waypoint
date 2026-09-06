@@ -160,20 +160,33 @@ docker run --rm -v "${PROJECT}_depot:/x" alpine sh -c "
 	mkdir -p /x/VKS
 	printf 'vks-marker' > /x/VKS/vks-marker.txt
 
+	# Content-library registry (issues #1706/#1647): its own volume now, not
+	# a depot subtree (docs/rationale/deploy.md#content-libraries-own-volume)
+	# -- a stray depot-side ContentLibrary/ dir must still be denied through
+	# /repo/depot/, so a marker-only stray is seeded here; the real serving
+	# content lives in the content-libraries volume seeded below.
 	mkdir -p /x/ContentLibrary
-	printf 'ovf-content'  > /x/ContentLibrary/sample.ovf
-	printf 'mf-content'   > /x/ContentLibrary/sample.mf
-	printf 'vmdk-content' > /x/ContentLibrary/sample.vmdk
-	printf 'iso-content'  > /x/ContentLibrary/sample.iso
-	printf 'cert-content' > /x/ContentLibrary/sample.cert
-	# Hardlinks must keep serving -- disable_symlinks does not touch them
-	# and #1490's hardlinked view trees depend on that.
-	ln /x/ContentLibrary/sample.mf /x/ContentLibrary/hardlink.mf
+	printf 'stray-marker' > /x/ContentLibrary/stray.txt
 
 	# Air-gap transfer staging: no location serves it, and it must not be
 	# reachable through /repo/depot/ either.
 	mkdir -p /x/Transfer
 	printf 'transfer-marker' > /x/Transfer/transfer-marker.txt
+"
+
+# Content-library registry: its OWN volume (docs/rationale/deploy.md#content-libraries-own-volume),
+# seeded directly at its root -- nginx aliases /repo/content-libraries/ straight
+# to this mount, not to a subtree of depot.
+docker volume create "${PROJECT}_content-libraries" >/dev/null
+docker run --rm -v "${PROJECT}_content-libraries:/x" alpine sh -c "
+	printf 'ovf-content'  > /x/sample.ovf
+	printf 'mf-content'   > /x/sample.mf
+	printf 'vmdk-content' > /x/sample.vmdk
+	printf 'iso-content'  > /x/sample.iso
+	printf 'cert-content' > /x/sample.cert
+	# Hardlinks must keep serving -- disable_symlinks does not touch them
+	# and #1490's hardlinked view trees depend on that.
+	ln /x/sample.mf /x/hardlink.mf
 "
 
 # --- Bring-up (real build, not cached) ----------------------------------
@@ -789,7 +802,7 @@ for depot_path in \
 	"Photon/photon_release_5.0_x86_64/repodata/marker.txt" \
 	"VKS/vks-marker.txt" \
 	"VMTools/vmtools-marker.txt" \
-	"ContentLibrary/sample.mf" \
+	"ContentLibrary/stray.txt" \
 	"Transfer/transfer-marker.txt"; do
 	DEPOT_ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/${depot_path}")"
 	if [[ "${DEPOT_ISOLATION_CODE}" == "404" ]]; then

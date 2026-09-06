@@ -1,6 +1,6 @@
 #!/bin/sh
-# Fixes ownership of the backend's one externally-provisioned read-write mount
-# point before dropping to the unprivileged `app` user (issue #621, re-scoped
+# Fixes ownership of the backend's externally-provisioned read-write mount
+# points before dropping to the unprivileged `app` user (issue #621, re-scoped
 # per #630 review; extends the same pattern
 # runners/download-runner/docker-entrypoint.sh and
 # runners/compliance-runner/docker-entrypoint.sh already use). Compose named
@@ -9,7 +9,7 @@
 # survives a build-time chown; anything mounted at `docker compose up` time
 # arrives root-owned every time, on every container (re)start. This
 # container's own entrypoint therefore runs as root just long enough to chown
-# the upload-staging mount, then execs the real process as `app` (uid 1654,
+# these mounts, then execs the real process as `app` (uid 1654,
 # the same uid the runners use) so the process itself never runs as root,
 # exactly like backend/Dockerfile's previous plain `USER app` did before this
 # issue -- that worked because the backend had no read-write mount at all;
@@ -30,6 +30,12 @@ if [ "$(id -u)" = '0' ]; then
 	# ManagedToolOptions.UploadStagingPath. Scoped to the staging mount only.
 	mkdir -p /var/lib/waypoint/tool-upload-staging
 	chown -R app:app /var/lib/waypoint/tool-upload-staging
+
+	# Content-library registry root: its own read-write volume, same idiom
+	# as tool-upload-staging above -- matches ContentLibraryOptions.RootPath.
+	# why: docs/rationale/deploy.md#content-libraries-own-volume
+	mkdir -p /var/lib/waypoint/content-libraries
+	chown -R app:app /var/lib/waypoint/content-libraries
 
 	# shellcheck disable=SC2016 # $0/$@ are the inner sh's positional args, deliberately unexpanded here
 	exec su -s /bin/sh app -c 'exec "$0" "$@"' -- "$@"
