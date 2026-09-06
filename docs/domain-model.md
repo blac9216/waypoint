@@ -306,7 +306,9 @@ omissions outside the resolved component set remain planned/result rows and do n
 manufacture jobs. The job is the sole queue, priority, lease, cancellation, and
 capacity-admission unit;
 the Run is a domain projection, never a second scheduler. Other job families retain
-their own fan-out. Job types: `scan`, `remediate`, `discover`, `credential-test`, `download`,
+their own fan-out. Job types: `scan`, `remediate`, `discover`, `credential-test`,
+`download` (retirement-planned, [ADR-0030](adr/0030-retire-legacy-download-job-type.md),
+issue #1040 -- not yet removed),
 `catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
 `content-pull`, `content-import`, `update`.
 
@@ -483,6 +485,55 @@ the operator separately exports the locally built images and transfers them. The
 future exporter may include those images in the signed transfer package; importing a
 newer image set stages an available appliance update, and applying it remains an
 explicit Admin action. See [ADR-0015](adr/0015-source-build-and-operator-export.md).
+
+### Depot, catalog identity, subscriptions, and presence sweep (planned)
+
+The authenticated vendor `productVersionCatalog` (pinned publisher certificate) is the
+single source of artifact identity -- product, version, size, sha256 -- for the entire
+vendor depot, not just VCSA binaries (Epic #16, [ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)).
+The local disk walk under the depot volume ([ADR-0029](adr/0029-depot-store-volume-topology.md))
+is a **presence/verification sweep**, not an independent inventory: it matches
+on-disk files against catalog rows by relative path and size/hash, and anything found
+that the catalog does not know about surfaces as an unknown file rather than a new
+artifact. A disconnected instance's catalog rows arrive via transferred metadata
+(ADR-0010) -- the same identity model on both sides of the air gap.
+
+Every lane (ESX/patch, Photon, VMware Tools, VKS, content-library sync) indexes its own
+metadata unconditionally; downloading bytes always requires an explicit ad-hoc request
+(Operator role) or a **Subscription** (Admin role). A Subscription is built from a
+shipped, read-only **preset** (stack -- VCF or VVF -- x generation, clone-to-custom),
+tracks at subminor/minor/major granularity (never a hardcoded major version), and pulls
+the whole release when adopted. Subscription evaluation and cross-lane supersession
+share one product-aware version comparator (issue #1039, closing the `#572` bug
+class); unparseable-but-dated catalog entries order by catalog `releaseDate`, and
+undated+unparseable entries are quarantined from automation entirely.
+
+Superseded content inside a subscription's tracked scope enters a grace period before
+an automated retention sweep removes it (alertable, pinnable, purge-now available,
+[ADR-0034](adr/0034-grace-period-retention.md)); manual/ad-hoc downloads use a
+separate, independently configured retention dial. Orphaned content (no subscription
+still matches it) and out-of-scope content (never subscribed) are never auto-removed --
+only surfaced for explicit operator deletion, since a later disconnected-side transfer
+may still need them even though nothing on the connected side currently tracks them.
+
+Download acquisition reuses the same **Run -> per-item-Job fanout** pattern the
+compliance domain already uses for scans (see "Run and Job" above): one Run per
+subscription evaluation or ad-hoc request, one Job per acquired item, so
+parallelism/resume/cancel are per-item without a second scheduler. The legacy
+`download` job type and `POST /downloads` are retired
+([ADR-0030](adr/0030-retire-legacy-download-job-type.md), issue #1040) -- vendor
+acquisition is tool-driven (`binaries-download`, already a live job type below) and
+mirror lanes get their own sync job types over the `Save-WebFile` primitive rather than
+sharing the generic `download` type. Disk space joins CPU/memory as a third resource
+the shared capacity lease pool admits against, using indexed metadata to project a
+job's byte size before it is ever dispatched
+([ADR-0033](adr/0033-disk-admission-joins-capacity-model.md), amends ADR-0018).
+
+The repo-serving path-space (one appliance nginx, per-store `location`s over one
+shared depot volume plus the content-library store's own volume) enforces
+per-location independent auth, defaulting to Waypoint-managed repo users/tokens and
+keeping Keycloak out of the serving path entirely
+([ADR-0031](adr/0031-repo-serving-per-location-auth.md)).
 
 ### OCI bundle store and push-target consumer (planned)
 
