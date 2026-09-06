@@ -112,4 +112,4 @@ retired alongside it (ADR-0030) — it is not repurposed as either of these.
   #1753 against issue #614's read-only-depot scenario; the fix there documents the
   precondition (`docs/rationale/deploy.md#content-libraries-nested-mount-readonly-depot-precondition`)
   rather than de-nesting the mount, since de-nesting would reverse this ADR's Decision
-  and was already ruled out without re-posing the question on #1706.
+  and #1753 records that it must not be taken without re-posing the question to the owner.
