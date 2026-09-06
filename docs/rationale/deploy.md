@@ -1059,7 +1059,7 @@ Refs: #614
 
 ### content-libraries-nested-mount-readonly-depot-precondition
 
-`content-libraries-own-volume` (below) nests the `content-libraries` volume
+`content-libraries-own-volume` (above) nests the `content-libraries` volume
 at `/vcf/ContentLibrary`, INSIDE the depot mount. Docker must create that
 nested mountpoint inside the parent filesystem at container-create time; on
 a read-only depot mount whose tree does not already contain a
