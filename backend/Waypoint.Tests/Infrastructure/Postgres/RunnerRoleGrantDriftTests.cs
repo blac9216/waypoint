@@ -1560,6 +1560,27 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.True(stored.InspecCheckPassed);
 	}
 
+	/// <summary>
+	/// Issue #1707 (#573 umbrella): the download-runner role must still be denied on
+	/// <c>content_pull_checks</c> -- migration 0073 grants it to
+	/// <c>waypoint_compliance_runner</c> only, since content-pull reconciliation is a
+	/// compliance-domain concern (ADR-0017). This is the grant-hygiene half of #1707's
+	/// fix: <see cref="ComplianceRunnerRole_ContentPullCheckFanOutProtocol_Succeeds"/>
+	/// above already proves the compliance-runner role CAN use this table; this proves
+	/// the download-runner role CANNOT, closing the exact live symptom (a stray
+	/// download-runner-side sweep hitting 42501 every tick) without widening the grant.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotSelectContentPullChecks()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM content_pull_checks LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
 	private async Task<Guid> SeedCredentialAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

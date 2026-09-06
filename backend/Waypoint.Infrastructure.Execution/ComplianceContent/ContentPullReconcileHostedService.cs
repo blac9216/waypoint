@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Waypoint.Core.ComplianceContent;
 
 namespace Waypoint.Infrastructure.Execution.ComplianceContent;
@@ -24,15 +25,28 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// fanned-out <c>content-check</c> jobs have all reported. Structurally mirrors
 /// <c>Waypoint.Infrastructure.Runs.RunPurgeFinalizeHostedService</c> ("nobody else can
 /// resolve who-else's-job-finished, so a periodic sweep does"), but registered in
-/// <c>compliance-runner</c> (via <c>AddWaypointExecution</c>), not the API: reconcile's
-/// atomic staging step (<see cref="ContentPullReconcileService"/> -&gt;
+/// <c>compliance-runner</c> only, via
+/// <c>ExecutionServiceCollectionExtensions.AddContentPullReconcileSweep</c> (issue
+/// #1707) -- not <c>AddWaypointExecution</c>, which both runner hosts call, and not the
+/// API: reconcile's atomic staging step (<see cref="ContentPullReconcileService"/> -&gt;
 /// <c>IContentRevisionStager</c>) touches the content working tree on disk, which only
 /// the compliance-runner process mounts (ADR-0017's same placement reasoning that
 /// already put <c>content-pull</c>/<c>content-import</c> execution here instead of the
 /// API). One sweep pass is independent per pull: one pull's reconcile failure is logged
 /// and does not block the others, and the row stays selectable for the next pass
 /// (<c>ContentPullReconcileService.TryReconcileAsync</c> only marks rows reconciled on
-/// success), so a transient fault self-heals on the following tick.
+/// success), so a transient fault self-heals on the following tick. The one exception
+/// to that per-pull independence is a <c>42501</c> (insufficient_privilege): it is not
+/// transient at either level, so both the pending-list call and the per-pull reconcile
+/// path log it once and stop the loop rather than repeating it per pull per tick.
+///
+/// Known trade-off (PR #1745 round 1, deferred to issue #1762): when
+/// <see cref="ExecuteAsync"/> stops the sweep loop after an
+/// <see cref="SweepOutcome.AuthorizationDenied"/> outcome, nothing downstream of that
+/// stop changes -- <c>RunnerHealthReportingHostedService</c>'s health/readiness report
+/// has no channel for "the sweep stopped" and keeps reporting healthy. Wiring that
+/// visibility through is a design change (a new degraded-state channel into the
+/// readiness report) beyond the scope of this fix; issue #1762 tracks doing it.
 /// </summary>
 public sealed partial class ContentPullReconcileHostedService : BackgroundService
 {
@@ -66,13 +80,25 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		using PeriodicTimer timer = new(interval);
 		do
 		{
-			await SweepOnceAsync(stoppingToken).ConfigureAwait(false);
+			SweepOutcome outcome = await SweepOnceAsync(stoppingToken).ConfigureAwait(false);
+			if (outcome == SweepOutcome.AuthorizationDenied)
+			{
+				// Issue #1707: a 42501 here is never transient -- it means this process's
+				// database role has no grant on content_pull_checks (migration 0073 grants
+				// it to waypoint_compliance_runner only), and no amount of retrying at
+				// SweepInterval will change that until an operator re-migrates or this
+				// service is simply not started in the wrong host (the actual fix; see
+				// AddContentPullReconcileSweep). Stop the loop entirely rather than
+				// flooding the log once per interval forever -- SweepOnceAsync already
+				// logged the single error above.
+				return;
+			}
 		}
 		while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
 	}
 
 	/// <summary>One sweep pass, exposed for tests -- mirrors <c>RunPurgeFinalizeHostedService.SweepOnceAsync</c>'s test seam.</summary>
-	internal async Task SweepOnceAsync(CancellationToken cancellationToken)
+	internal async Task<SweepOutcome> SweepOnceAsync(CancellationToken cancellationToken)
 	{
 		IReadOnlyList<Guid> pending;
 		try
@@ -81,12 +107,17 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		}
 		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 		{
-			return;
+			return SweepOutcome.Cancelled;
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+		{
+			LogAuthorizationDenied(exception);
+			return SweepOutcome.AuthorizationDenied;
 		}
 		catch (Exception exception)
 		{
 			LogListFailed(exception);
-			return;
+			return SweepOutcome.TransientFailure;
 		}
 
 		foreach (Guid contentPullJobId in pending)
@@ -100,13 +131,26 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 			}
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
-				return;
+				return SweepOutcome.Cancelled;
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+			{
+				// PR #1745 round 2 (note C): the same non-transient case as the list call
+				// above, one layer down. A 42501 raised while reconciling an individual
+				// pull would otherwise fall into the generic catch below and log once per
+				// pending pull per tick forever -- the exact flood shape issue #1707 is
+				// about. Log once, stop the loop with the same outcome, and let the rows
+				// stay for a sweep started by a correctly-granted role.
+				LogAuthorizationDenied(exception);
+				return SweepOutcome.AuthorizationDenied;
 			}
 			catch (Exception exception)
 			{
 				LogReconcileFailed(contentPullJobId, exception);
 			}
 		}
+
+		return SweepOutcome.Completed;
 	}
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Content-pull reconcile sweeping every {Interval}")]
@@ -118,8 +162,25 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep could not list pending pulls")]
 	private partial void LogListFailed(Exception exception);
 
+	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep has no permission on content_pull_checks (42501) -- this process's database role lacks the grant migration 0073 gives waypoint_compliance_runner. Stopping the sweep instead of retrying forever; see issue #1707.")]
+	private partial void LogAuthorizationDenied(Exception exception);
+
 	[LoggerMessage(Level = LogLevel.Error, Message = "Reconcile failed for content-pull job {ContentPullJobId}; row remains for the next sweep")]
 	private partial void LogReconcileFailed(Guid contentPullJobId, Exception exception);
+}
+
+/// <summary>
+/// Issue #1707: <see cref="ContentPullReconcileHostedService.SweepOnceAsync"/>'s outcome
+/// -- distinguishes the one non-transient case (<see cref="AuthorizationDenied"/>) that
+/// must stop the sweep loop from every other outcome, which keeps ticking at
+/// <see cref="ContentPullReconcileOptions.SweepInterval"/> as before.
+/// </summary>
+internal enum SweepOutcome
+{
+	Completed,
+	Cancelled,
+	TransientFailure,
+	AuthorizationDenied,
 }
 
 /// <summary>How often <see cref="ContentPullReconcileHostedService"/> sweeps for pulls ready to reconcile.</summary>

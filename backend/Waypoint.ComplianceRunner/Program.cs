@@ -70,6 +70,13 @@ DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
 builder.Services.AddWaypointInfrastructure(builder.Configuration);
 ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, builder.Configuration);
 
+// Issue #1707: the content-pull reconcile sweep is compliance-runner only (migration
+// 0073 grants content_pull_checks to waypoint_compliance_runner alone) -- see
+// AddContentPullReconcileSweep's doc comment for why this is its own call here rather
+// than folded into AddWaypointExecution above, which Waypoint.DownloadRunner also
+// calls.
+ExecutionServiceCollectionExtensions.AddContentPullReconcileSweep(builder.Services, builder.Configuration);
+
 builder.Services.AddOptions<RunnerHealthOptions>()
 	.Bind(builder.Configuration.GetSection(RunnerHealthOptions.SectionName));
 
