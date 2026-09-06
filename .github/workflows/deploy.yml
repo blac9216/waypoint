@@ -4,8 +4,10 @@ name: deploy
 # rationale. A `changes` job decides whether deploy-relevant paths changed;
 # the real `deploy` job is gated on that output, and `deploy-gate` — the job
 # that owns the required check-run name `compose config, nginx -t,
-# shellcheck` — always runs and reports success when the real job succeeded
-# or was skipped, failure otherwise.
+# shellcheck` — runs whenever the run itself was not cancelled and reports
+# success only when BOTH `changes` succeeded AND the real job succeeded or
+# was skipped, failure otherwise (a `changes` failure would otherwise look
+# exactly like an off-path skip).
 #
 # This validates the shipped compose/nginx configuration statically — it
 # does NOT bring the stack up (no depot token, no dev/local/ material is
@@ -25,6 +27,11 @@ permissions:
   pull-requests: read
 
 jobs:
+  # On pull_request events dorny/paths-filter calls the GitHub API (needs
+  # `pull-requests: read`, no checkout depth required); on push-to-main it
+  # walks git history against `github.event.before` instead, which needs
+  # that commit present locally, hence `fetch-depth: 0` only for the push
+  # case (a shallow checkout is enough — and cheaper — on pull_request).
   changes:
     name: "changes: deploy"
     runs-on: ubuntu-latest
@@ -34,7 +41,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
 
       - name: Filter
         id: filter
@@ -85,21 +92,31 @@ jobs:
           find deploy scripts -type f -name "*.sh" -print0 | xargs -0 --no-run-if-empty shellcheck
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter, and treats a skipped
-  # `deploy` job (off-path PR) the same as a successful one, so a
-  # backend-only or docs-only PR shows this context green instead of
-  # forever pending.
+  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
+  # so a cancelled run reports failure rather than a stale/false green), and
+  # treats a skipped `deploy` job (off-path PR) the same as a successful
+  # one, so a backend-only or docs-only PR shows this context green instead
+  # of forever pending.
   deploy-gate:
     name: "compose config, nginx -t, shellcheck"
     needs: [changes, deploy]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `changes.result` is checked explicitly, not just `deploy.result`: a
+      # `changes` failure skips `deploy` exactly the way an off-path PR
+      # would, and the two are indistinguishable from `deploy.result` alone.
       - name: Require success or skip
         run: |
-          result="${{ needs.deploy.result }}"
-          echo "deploy job result: $result"
-          case "$result" in
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.deploy.result }}"
+          echo "changes job result: $changes_result"
+          echo "deploy job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
             success|skipped) exit 0 ;;
             *) exit 1 ;;
           esac

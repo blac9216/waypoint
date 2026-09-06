@@ -5,11 +5,15 @@ name: backend
 # A `changes` job (dorny/paths-filter) decides that once; every real job
 # below is gated on its output (`if: needs.changes.outputs.backend ==
 # 'true'`), and a final `backend-gate` job — the one that owns the required
-# check-run name `build, test, coverage` — always runs (`if: always()`) and
-# reports success when the real job succeeded OR was skipped, failure
-# otherwise. This is what makes the context eligible to be a required check
-# (a GitHub required check that a path filter can make "never runs" would
-# otherwise deadlock every PR that doesn't touch the path — see #232).
+# check-run name `build, test, coverage` — always runs (`if: ${{ !cancelled()
+# }}`, so a cancelled run — e.g. superseded by `cancel-in-progress` below —
+# does not get a false green) and reports success only when BOTH `changes`
+# itself succeeded AND the real job succeeded or was skipped; any other
+# combination (including a `changes` failure, which would otherwise look
+# exactly like an off-path skip) fails the gate. This is what makes the
+# context eligible to be a required check (a GitHub required check that a
+# path filter can make "never runs" would otherwise deadlock every PR that
+# doesn't touch the path — see #232).
 #
 # docs/compliance-content-shape-inventory.md is listed too, even though it is a
 # doc: the `pester` job below treats that document as the shape inventory's
@@ -36,8 +40,10 @@ permissions:
 jobs:
   # Decides whether the paths below changed. On pull_request events this
   # calls the GitHub API (needs `pull-requests: read`, no checkout depth
-  # required); on push-to-main it walks git history instead, hence
-  # `fetch-depth: 0` on the checkout.
+  # required); on push-to-main it walks git history against
+  # `github.event.before` instead, which needs that commit to be present
+  # locally, hence `fetch-depth: 0` only for the push case (a shallow
+  # checkout is enough — and cheaper — on pull_request).
   changes:
     name: "changes: backend"
     runs-on: ubuntu-latest
@@ -47,7 +53,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
 
       - name: Filter
         id: filter
@@ -210,20 +216,33 @@ jobs:
           retention-days: 14
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter (`if: always()`), and treats
-  # a skipped `backend` job (off-path PR) the same as a successful one, so a
-  # docs-only PR shows this context green instead of forever pending.
+  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
+  # so a cancelled run reports failure rather than a stale/false green), and
+  # treats a skipped `backend` job (off-path PR) the same as a successful
+  # one, so a docs-only PR shows this context green instead of forever
+  # pending.
   backend-gate:
     name: "build, test, coverage"
     needs: [changes, backend]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `changes.result` is checked explicitly, not just `backend.result`:
+      # a `changes` failure (e.g. the paths-filter API call erroring) skips
+      # `backend` exactly the way an off-path PR would, and the two are
+      # indistinguishable from `backend.result` alone. Requiring `changes`
+      # to have actually succeeded closes that hole.
       - name: Require success or skip
         run: |
-          result="${{ needs.backend.result }}"
-          echo "backend job result: $result"
-          case "$result" in
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.backend.result }}"
+          echo "changes job result: $changes_result"
+          echo "backend job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
             success|skipped) exit 0 ;;
             *) exit 1 ;;
           esac

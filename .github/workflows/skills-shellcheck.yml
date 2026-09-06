@@ -3,8 +3,11 @@ name: skills-shellcheck
 # Always-report pattern (issue #232): see backend.yml's header for the full
 # rationale. A `changes` job decides whether .claude/skills/**/*.sh changed;
 # the two real jobs below are each gated on that output, and a matching
-# always-run gate job owns each required check-run name (`shellcheck
-# .claude/skills`, `test .claude/skills`) so both report on every PR.
+# gate job owns each required check-run name (`shellcheck .claude/skills`,
+# `test .claude/skills`), running whenever the run itself was not cancelled
+# and reporting success only when BOTH `changes` succeeded AND its real job
+# succeeded or was skipped, so both report on every PR (a `changes` failure
+# would otherwise look exactly like an off-path skip).
 #
 # deploy.yml's own shellcheck step only searches deploy/ and scripts/, so
 # scripts under .claude/skills/ (agent-facing automation, not deploy
@@ -23,6 +26,11 @@ permissions:
   pull-requests: read
 
 jobs:
+  # On pull_request events dorny/paths-filter calls the GitHub API (needs
+  # `pull-requests: read`, no checkout depth required); on push-to-main it
+  # walks git history against `github.event.before` instead, which needs
+  # that commit present locally, hence `fetch-depth: 0` only for the push
+  # case (a shallow checkout is enough — and cheaper — on pull_request).
   changes:
     name: "changes: .claude/skills"
     runs-on: ubuntu-latest
@@ -32,7 +40,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
 
       - name: Filter
         id: filter
@@ -76,21 +84,32 @@ jobs:
             xargs -0 --no-run-if-empty shellcheck -S warning
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter, and treats a skipped
-  # `shellcheck` job (off-path PR) the same as a successful one, so a
-  # docs-only or backend-only PR shows this context green instead of
-  # forever pending.
+  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
+  # so a cancelled run reports failure rather than a stale/false green), and
+  # treats a skipped `shellcheck` job (off-path PR) the same as a successful
+  # one, so a docs-only or backend-only PR shows this context green instead
+  # of forever pending.
   shellcheck-gate:
     name: "shellcheck .claude/skills"
     needs: [changes, shellcheck]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `changes.result` is checked explicitly, not just `shellcheck.result`:
+      # a `changes` failure skips `shellcheck` exactly the way an off-path
+      # PR would, and the two are indistinguishable from `shellcheck.result`
+      # alone.
       - name: Require success or skip
         run: |
-          result="${{ needs.shellcheck.result }}"
-          echo "shellcheck job result: $result"
-          case "$result" in
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.shellcheck.result }}"
+          echo "changes job result: $changes_result"
+          echo "shellcheck job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
             success|skipped) exit 0 ;;
             *) exit 1 ;;
           esac
@@ -158,21 +177,32 @@ jobs:
           exit "$fail"
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter, and treats a skipped
-  # `skills-tests` job (off-path PR) the same as a successful one, so a
-  # docs-only or backend-only PR shows this context green instead of
-  # forever pending.
+  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
+  # so a cancelled run reports failure rather than a stale/false green), and
+  # treats a skipped `skills-tests` job (off-path PR) the same as a
+  # successful one, so a docs-only or backend-only PR shows this context
+  # green instead of forever pending.
   skills-tests-gate:
     name: "test .claude/skills"
     needs: [changes, skills-tests]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `changes.result` is checked explicitly, not just
+      # `skills-tests.result`: a `changes` failure skips `skills-tests`
+      # exactly the way an off-path PR would, and the two are
+      # indistinguishable from `skills-tests.result` alone.
       - name: Require success or skip
         run: |
-          result="${{ needs.skills-tests.result }}"
-          echo "skills-tests job result: $result"
-          case "$result" in
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.skills-tests.result }}"
+          echo "changes job result: $changes_result"
+          echo "skills-tests job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
             success|skipped) exit 0 ;;
             *) exit 1 ;;
           esac

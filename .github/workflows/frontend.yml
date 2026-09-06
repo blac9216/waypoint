@@ -4,8 +4,10 @@ name: frontend
 # rationale. A `changes` job decides whether frontend-relevant paths
 # changed; the real `frontend` job is gated on that output, and
 # `frontend-gate` — the job that owns the required check-run name
-# `build, test, lint` — always runs and reports success when the real job
-# succeeded or was skipped, failure otherwise.
+# `build, test, lint` — runs whenever the run itself was not cancelled and
+# reports success only when BOTH `changes` succeeded AND the real job
+# succeeded or was skipped, failure otherwise (a `changes` failure would
+# otherwise look exactly like an off-path skip).
 #
 # scripts/check-coverage-floor.py is a shared input that controls the
 # coverage gate below — issue #412.
@@ -23,6 +25,11 @@ permissions:
   pull-requests: read
 
 jobs:
+  # On pull_request events dorny/paths-filter calls the GitHub API (needs
+  # `pull-requests: read`, no checkout depth required); on push-to-main it
+  # walks git history against `github.event.before` instead, which needs
+  # that commit present locally, hence `fetch-depth: 0` only for the push
+  # case (a shallow checkout is enough — and cheaper — on pull_request).
   changes:
     name: "changes: frontend"
     runs-on: ubuntu-latest
@@ -32,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
 
       - name: Filter
         id: filter
@@ -129,21 +136,32 @@ jobs:
         run: npm run lint
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter, and treats a skipped
-  # `frontend` job (off-path PR) the same as a successful one, so a
-  # backend-only or docs-only PR shows this context green instead of
-  # forever pending.
+  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
+  # so a cancelled run reports failure rather than a stale/false green), and
+  # treats a skipped `frontend` job (off-path PR) the same as a successful
+  # one, so a backend-only or docs-only PR shows this context green instead
+  # of forever pending.
   frontend-gate:
     name: "build, test, lint"
     needs: [changes, frontend]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      # `changes.result` is checked explicitly, not just `frontend.result`:
+      # a `changes` failure skips `frontend` exactly the way an off-path PR
+      # would, and the two are indistinguishable from `frontend.result`
+      # alone.
       - name: Require success or skip
         run: |
-          result="${{ needs.frontend.result }}"
-          echo "frontend job result: $result"
-          case "$result" in
+          changes_result="${{ needs.changes.result }}"
+          job_result="${{ needs.frontend.result }}"
+          echo "changes job result: $changes_result"
+          echo "frontend job result: $job_result"
+          if [ "$changes_result" != "success" ]; then
+            echo "changes job did not succeed ($changes_result) -- failing gate"
+            exit 1
+          fi
+          case "$job_result" in
             success|skipped) exit 0 ;;
             *) exit 1 ;;
           esac

@@ -569,26 +569,35 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## What CI covers — and does not
 
-GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
+GitHub Actions runs five workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
 [`backend.yml`](../.github/workflows/backend.yml),
 [`frontend.yml`](../.github/workflows/frontend.yml),
-[`deploy.yml`](../.github/workflows/deploy.yml) — added in issue
-[#79](https://github.com/blac9216/waypoint/issues/79):
+[`deploy.yml`](../.github/workflows/deploy.yml) (all four added in issue
+[#79](https://github.com/blac9216/waypoint/issues/79)), and
+[`skills-shellcheck.yml`](../.github/workflows/skills-shellcheck.yml) (issue #1231):
 
-| Workflow | Triggers on | What it runs |
-| --- | --- | --- |
-| `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IPv4 addresses, non-documentation/non-loopback/non-unspecified IPv6 addresses (issue #112), and Broadcom/VMware depot-token shapes |
-| `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate |
-| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` |
-| `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
-| `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 |
+| Workflow | Real work gated on | What it runs | Check-run context(s) |
+| --- | --- | --- | --- |
+| `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IPv4 addresses, non-documentation/non-loopback/non-unspecified IPv6 addresses (issue #112), and Broadcom/VMware depot-token shapes | secret + identifier scan |
+| `backend` | `backend/**` (and shared inputs — see the workflow header) | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate | `build, test, coverage` |
+| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` | `build, test, lint` |
+| `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` | `compose config, nginx -t, shellcheck` |
+| `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 — and the skill script regression suite | `shellcheck .claude/skills`, `test .claude/skills` |
 
-Every job is path-filtered except `sanitize`, which is a hard gate on everything —
-a docs-only change still gets scanned, because a leaked hostname or token is just as
-real in a markdown file as in code. Every job sets its own `concurrency` group with
-`cancel-in-progress`, so a superseded push doesn't keep burning runner time. No
-workflow references a repository secret; PR triggers are plain `pull_request`, never
-`pull_request_target`; every third-party action is pinned by full commit SHA.
+`sanitize` is a hard gate on everything — a docs-only change still gets scanned,
+because a leaked hostname or token is just as real in a markdown file as in code. The
+other four workflows are **always-report** (issue #232): each runs on every PR/push
+regardless of path, but the real work above only executes when its own `changes` job
+(dorny/paths-filter) says the relevant paths changed. A final always-run gate job in
+each workflow owns the check-run context listed above, and reports success when the
+real job succeeded or was correctly skipped (off-path), failure otherwise — so an
+off-path PR shows the context green instead of leaving it forever pending, which is
+what made these contexts safe to add to the branch protection required set. Every
+workflow sets its own `concurrency` group with `cancel-in-progress`, so a superseded
+push doesn't keep burning runner time. No workflow references a repository secret; PR
+triggers are plain `pull_request`, never `pull_request_target`; every third-party
+action is pinned by full commit SHA. Full gating rationale and required-check list:
+[`docs/process/testing.md` § Required checks](process/testing.md#required-checks).
 
 ### Coverage gate: a committed floor, not a stored baseline (issue #102)
 
