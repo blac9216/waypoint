@@ -224,6 +224,34 @@ jobs:
           path: testResults.xml
           retention-days: 14
 
+  # Issue #1237: backend/docker-entrypoint.sh's half of the entrypoint-lint
+  # gap (the two runner entrypoints are covered by download-runner.yml and
+  # compliance-runner.yml's own shellcheck jobs, #1356/#1355). Mirrors those
+  # jobs' step verbatim apart from the path.
+  shellcheck:
+    name: "shellcheck (job)"
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: shellcheck
+        run: |
+          set -eu
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          entrypoint="backend/docker-entrypoint.sh"
+          if [ ! -f "$entrypoint" ]; then
+            echo "::error::expected $entrypoint to exist" >&2
+            exit 1
+          fi
+          shellcheck "$entrypoint"
+
   # Always-report gate (#232): owns the required check-run name. Runs on
   # every PR/push regardless of the path filter (`if: always()` — GitHub's
   # documented construct for a required check that depends on other jobs).
@@ -231,11 +259,11 @@ jobs:
   # so the gate must never skip: on a cancelled run it still runs, sees
   # `changes.result` == `cancelled` and fails, which is the honest answer
   # for a run that verified nothing. The gate also treats a skipped
-  # `backend` job (off-path PR) the same as a successful one, so a
-  # docs-only PR shows this context green instead of forever pending.
+  # `backend`/`shellcheck` job (off-path PR) the same as a successful one,
+  # so a docs-only PR shows this context green instead of forever pending.
   backend-gate:
     name: "build, test, coverage"
-    needs: [changes, backend]
+    needs: [changes, backend, shellcheck]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -248,13 +276,21 @@ jobs:
         run: |
           changes_result="${{ needs.changes.result }}"
           job_result="${{ needs.backend.result }}"
+          shellcheck_result="${{ needs.shellcheck.result }}"
           echo "changes job result: $changes_result"
           echo "backend job result: $job_result"
+          echo "shellcheck job result: $shellcheck_result"
           if [ "$changes_result" != "success" ]; then
             echo "changes job did not succeed ($changes_result) -- failing gate"
             exit 1
           fi
+          status=0
           case "$job_result" in
-            success|skipped) exit 0 ;;
-            *) exit 1 ;;
+            success|skipped) ;;
+            *) status=1 ;;
           esac
+          case "$shellcheck_result" in
+            success|skipped) ;;
+            *) status=1 ;;
+          esac
+          exit "$status"

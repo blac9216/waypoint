@@ -31,6 +31,7 @@ if [ "$(id -u)" = '0' ]; then
 	mkdir -p /var/lib/waypoint/tool-upload-staging
 	chown -R app:app /var/lib/waypoint/tool-upload-staging
 
+	# shellcheck disable=SC2016 # $0/$@ are the inner sh's positional args, deliberately unexpanded here
 	exec su -s /bin/sh app -c 'exec "$0" "$@"' -- "$@"
 fi
 
