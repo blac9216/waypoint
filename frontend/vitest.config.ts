@@ -26,7 +26,12 @@ export default defineConfig({
 			// the reported percentage would not move (issue #1314). Screens are
 			// now included; the 88.0% floor in .github/workflows/frontend.yml
 			// was re-measured with them in (base 93.37% screens-excluded, 88.57%
-			// screens-included) and still holds without a change.
+			// screens-included) and still holds — but only because #1314 also
+			// added four screen-adjacent test files (useComponentJobs,
+			// useCklExport, screens.tsx's routing wrappers, PlaceholderScreen);
+			// with src/screens/** included and those four files absent, line
+			// coverage measures 86.96%, below this floor. Removing any of them
+			// as "redundant" without re-measuring will red the gate.
 			exclude: ["src/main.tsx", "src/vite-env.d.ts", "src/**/*.test.{ts,tsx}"],
 		},
 	},
