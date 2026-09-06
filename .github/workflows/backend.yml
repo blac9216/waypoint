@@ -5,9 +5,12 @@ name: backend
 # A `changes` job (dorny/paths-filter) decides that once; every real job
 # below is gated on its output (`if: needs.changes.outputs.backend ==
 # 'true'`), and a final `backend-gate` job — the one that owns the required
-# check-run name `build, test, coverage` — always runs (`if: ${{ !cancelled()
-# }}`, so a cancelled run — e.g. superseded by `cancel-in-progress` below —
-# does not get a false green) and reports success only when BOTH `changes`
+# check-run name `build, test, coverage` — always runs (`if: always()`,
+# GitHub's documented construct for a required check that depends on other
+# jobs; a job skipped by its own condition reports Success to a required
+# check, so the gate must never skip — on a cancelled run it runs, sees
+# `changes.result` == `cancelled` and fails, which is the honest answer for
+# a run that verified nothing) and reports success only when BOTH `changes`
 # itself succeeded AND the real job succeeded or was skipped; any other
 # combination (including a `changes` failure, which would otherwise look
 # exactly like an off-path skip) fails the gate. This is what makes the
@@ -44,6 +47,12 @@ jobs:
   # `github.event.before` instead, which needs that commit to be present
   # locally, hence `fetch-depth: 0` only for the push case (a shallow
   # checkout is enough — and cheaper — on pull_request).
+  # The condition is written on `pull_request` rather than on `push`
+  # deliberately: GitHub coerces `0` to false in expressions, so
+  # `event_name == 'push' && 0 || 1` would yield 1 on every event. With
+  # `event_name == 'pull_request' && 1 || 0` the chosen value is truthy on
+  # the pull_request branch and is the `||` fallback on the push branch, so
+  # each event actually gets the depth it needs.
   changes:
     name: "changes: backend"
     runs-on: ubuntu-latest
@@ -53,7 +62,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
 
       - name: Filter
         id: filter
@@ -216,15 +225,18 @@ jobs:
           retention-days: 14
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
-  # so a cancelled run reports failure rather than a stale/false green), and
-  # treats a skipped `backend` job (off-path PR) the same as a successful
-  # one, so a docs-only PR shows this context green instead of forever
-  # pending.
+  # every PR/push regardless of the path filter (`if: always()` — GitHub's
+  # documented construct for a required check that depends on other jobs).
+  # A job skipped by its own condition reports Success to a required check,
+  # so the gate must never skip: on a cancelled run it still runs, sees
+  # `changes.result` == `cancelled` and fails, which is the honest answer
+  # for a run that verified nothing. The gate also treats a skipped
+  # `backend` job (off-path PR) the same as a successful one, so a
+  # docs-only PR shows this context green instead of forever pending.
   backend-gate:
     name: "build, test, coverage"
     needs: [changes, backend]
-    if: ${{ !cancelled() }}
+    if: always()
     runs-on: ubuntu-latest
     steps:
       # `changes.result` is checked explicitly, not just `backend.result`:

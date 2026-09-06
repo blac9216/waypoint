@@ -579,10 +579,10 @@ GitHub Actions runs five workflows — [`sanitize.yml`](../.github/workflows/san
 | Workflow | Real work gated on | What it runs | Check-run context(s) |
 | --- | --- | --- | --- |
 | `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IPv4 addresses, non-documentation/non-loopback/non-unspecified IPv6 addresses (issue #112), and Broadcom/VMware depot-token shapes | secret + identifier scan |
-| `backend` | `backend/**` (and shared inputs — see the workflow header) | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate | `build, test, coverage` |
-| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` | `build, test, lint` |
-| `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` | `compose config, nginx -t, shellcheck` |
-| `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 — and the skill script regression suite | `shellcheck .claude/skills`, `test .claude/skills` |
+| `backend` | `backend/**` (and shared inputs — see the workflow header) | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate | `changes: backend`, `build, test, coverage` (the `pester: powershell shape inventory` job is path-gated, not always-report, and is therefore not a required-check candidate) |
+| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` | `changes: frontend`, `build, test, lint` |
+| `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` | `changes: deploy`, `compose config, nginx -t, shellcheck` |
+| `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 — and the skill script regression suite | `changes: .claude/skills`, `shellcheck .claude/skills`, `test .claude/skills` |
 
 `sanitize` is a hard gate on everything — a docs-only change still gets scanned,
 because a leaked hostname or token is just as real in a markdown file as in code. The
@@ -592,7 +592,13 @@ regardless of path, but the real work above only executes when its own `changes`
 each workflow owns the check-run context listed above, and reports success when the
 real job succeeded or was correctly skipped (off-path), failure otherwise — so an
 off-path PR shows the context green instead of leaving it forever pending, which is
-what made these contexts safe to add to the branch protection required set. Every
+what makes these contexts safe to add to the branch protection required set (#100,
+owner action). The gate job carries `if: always()` rather than a condition that can
+skip it, because GitHub reports a job skipped by its own condition as **Success** to a
+required check: a cancelled run must reach the gate and fail it (`changes.result` is
+then `cancelled`, which the gate rejects) rather than skip it into a false green. Each
+workflow's own `changes: <name>` job also reports as a check-run context of its own,
+listed above; only the gate contexts are required-check candidates. Every
 workflow sets its own `concurrency` group with `cancel-in-progress`, so a superseded
 push doesn't keep burning runner time. No workflow references a repository secret; PR
 triggers are plain `pull_request`, never `pull_request_target`; every third-party

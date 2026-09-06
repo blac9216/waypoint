@@ -4,10 +4,11 @@ name: deploy
 # rationale. A `changes` job decides whether deploy-relevant paths changed;
 # the real `deploy` job is gated on that output, and `deploy-gate` — the job
 # that owns the required check-run name `compose config, nginx -t,
-# shellcheck` — runs whenever the run itself was not cancelled and reports
-# success only when BOTH `changes` succeeded AND the real job succeeded or
-# was skipped, failure otherwise (a `changes` failure would otherwise look
-# exactly like an off-path skip).
+# shellcheck` — always runs (`if: always()`, so a cancelled run fails the
+# gate instead of skipping it, since a skipped job would report Success to
+# a required check) and reports success only when BOTH `changes` succeeded
+# AND the real job succeeded or was skipped, failure otherwise (a
+# `changes` failure would otherwise look exactly like an off-path skip).
 #
 # This validates the shipped compose/nginx configuration statically — it
 # does NOT bring the stack up (no depot token, no dev/local/ material is
@@ -32,6 +33,12 @@ jobs:
   # walks git history against `github.event.before` instead, which needs
   # that commit present locally, hence `fetch-depth: 0` only for the push
   # case (a shallow checkout is enough — and cheaper — on pull_request).
+  # The condition is written on `pull_request` rather than on `push`
+  # deliberately: GitHub coerces `0` to false in expressions, so
+  # `event_name == 'push' && 0 || 1` would yield 1 on every event. With
+  # `event_name == 'pull_request' && 1 || 0` the chosen value is truthy on
+  # the pull_request branch and is the `||` fallback on the push branch, so
+  # each event actually gets the depth it needs.
   changes:
     name: "changes: deploy"
     runs-on: ubuntu-latest
@@ -41,7 +48,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: ${{ github.event_name == 'push' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
 
       - name: Filter
         id: filter
@@ -92,15 +99,19 @@ jobs:
           find deploy scripts -type f -name "*.sh" -print0 | xargs -0 --no-run-if-empty shellcheck
 
   # Always-report gate (#232): owns the required check-run name. Runs on
-  # every PR/push regardless of the path filter (`if: ${{ !cancelled() }}`,
-  # so a cancelled run reports failure rather than a stale/false green), and
-  # treats a skipped `deploy` job (off-path PR) the same as a successful
-  # one, so a backend-only or docs-only PR shows this context green instead
-  # of forever pending.
+  # every PR/push regardless of the path filter (`if: always()` — GitHub's
+  # documented construct for a required check that depends on other jobs).
+  # A job skipped by its own condition reports Success to a required check,
+  # so the gate must never skip: on a cancelled run it still runs, sees
+  # `changes.result` == `cancelled` and fails, which is the honest answer
+  # for a run that verified nothing. The gate also treats a skipped
+  # `deploy` job (off-path PR) the same as a successful one, so a
+  # backend-only or docs-only PR shows this context green instead of
+  # forever pending.
   deploy-gate:
     name: "compose config, nginx -t, shellcheck"
     needs: [changes, deploy]
-    if: ${{ !cancelled() }}
+    if: always()
     runs-on: ubuntu-latest
     steps:
       # `changes.result` is checked explicitly, not just `deploy.result`: a
