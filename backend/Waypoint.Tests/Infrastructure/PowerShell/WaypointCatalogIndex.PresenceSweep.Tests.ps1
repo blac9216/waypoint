@@ -156,72 +156,24 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		$script:Results = script:Invoke-Sweep -CatalogJson $script:CatalogJson -Manifest $script:Manifest
 	}
 
-	It 'reports a matched present file with the DepotArtifactUpsert-shaped identity fields (issue #1488)' {
-		# Round-2 review finding 1: keyed depot-relative (PROD/COMP/<Product>/<fileName>),
-		# matching how Get-FileManifest keys a real depot -- not the bare catalog
-		# fileName the pre-fix module (and this row, before round 2) looked up by.
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-patch.iso' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.Status | Should -Be 'present'
-		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-patch.iso'
-		$Row.Sha256 | Should -Be 'AAAA'
-		$Row.SizeBytes | Should -Be 100
-		$Row.Product | Should -Be 'VCENTER'
-		$Row.Version | Should -Be '9.1.0.5210.25573614'
-	}
-
-	It 'reports a catalog entry absent from disk as missing' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/NSX/nsx-missing.ova' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.Status | Should -Be 'missing'
-	}
-
-	It 'reports a size/hash mismatch as missing, not merely path-present' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-corrupt.iso' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.Status | Should -Be 'missing'
-	}
-
-	It 'reports a vCenter zip-expand directory as its own zip catalog entry''s installed-form presence (issue #1027, round-1 finding 1/2)' {
-		# Round-2 review finding 2: the zip binary's own identity is depot-relative too
-		# (PROD/COMP/<Product>/<fileName>), consistent with the ordinary-artifact rows --
-		# not the bare catalog fileName round 1 left unflagged.
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.Status | Should -Be 'present'
-		$Row.ExternalId | Should -Be 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
-	}
-
-	It 'reports a zip staged alongside its own expanded tree exactly once, never also as an unknown file (round-3 finding 1, issue #1503 AC 2)' {
-		$Rows = @($script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' })
-		$Rows.Count | Should -Be 1
-		$Rows[0].Status | Should -Be 'present'
-
-		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
-		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
-	}
+	# The following layout-asserting cases were migrated onto the shared depot-mini
+	# fixture (PR #1742 review round-1 finding 1) and are retired from here:
+	#   - present-file identity fields (issue #1488)              -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - absent-from-disk => missing                              -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - size/hash mismatch => missing                            -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - zip-expand directory installed-form presence              -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - zip staged alongside its expanded tree, present once      -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - second same-version zip stays missing (round-1 finding 5) -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - zip-expand directory contents never unknown                -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	#   - upgrade_info.xml known/indexed, never unknown              -> WaypointCatalogIndex.DepotMini.Tests.ps1
+	# This suite keeps the invariant helper below (applied to every scenario here, not
+	# fixture-shape-specific), the exact-unknown-count assertion right after it (tied to
+	# THIS hand-built manifest's deliberately small noise set, not portable to
+	# depot-mini's much larger one), and the fail-closed/logging/module-internal
+	# describes further down (none of which assert a depot layout fact).
 
 	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record (round-3 finding 2 invariant)' {
 		script:Assert-NoPresenceUnknownOverlap -Results $script:Results
-	}
-
-	It 'does not report the second same-version zip present just because the first one''s tree exists (round-1 finding 5)' {
-		$Row = $script:Results | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-b-updaterepo.zip' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.Status | Should -Be 'missing'
-	}
-
-	It 'does not enumerate the zip-expand directory''s own contents as unknown files' {
-		$Unknown = $script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' }
-		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'
-		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file2.dat'
-	}
-
-	It 'reports upgrade_info.xml as a known/indexed presence record, never unknown' {
-		$Row = $script:Results | Where-Object { $_.RelativePath -eq 'PROD/metadata/upgrade_info.xml' }
-		$Row | Should -Not -BeNullOrEmpty
-		$Row.RecordType | Should -Be 'ArtifactPresence'
-		$Row.Status | Should -Be 'present'
 	}
 
 	It 'reports the on-disk catalog document and the unrelated stray file as the only genuinely unknown files (#1634 tracks reducing this noise)' {

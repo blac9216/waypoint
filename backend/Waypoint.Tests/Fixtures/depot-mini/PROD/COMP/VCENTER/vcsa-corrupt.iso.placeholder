@@ -1,0 +1,1 @@
+invented placeholder bytes for vcsa-corrupt.iso -- disk content deliberately differs from the catalog size/hash to exercise the mismatch-is-missing rule

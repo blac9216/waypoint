@@ -63,6 +63,8 @@
 
   <ItemGroup>
     <None Include="Assets/**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Issue #1696: the shared sanitized mini-depot fixture DepotMiniFixture.cs materializes at test time. -->
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
