@@ -52,7 +52,7 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}/deploy/nginx/conf.d:/etc/nginx/conf.d:ro" \
             -v "${{ github.workspace }}/deploy/nginx/certs:/etc/nginx/certs:ro" \
-            nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 `# 1.27-alpine, matches deploy/docker-compose.yml` \
+            nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 `# 1.27-alpine, matches deploy/nginx/Dockerfile` \
             nginx -t
 
       - name: shellcheck
