@@ -40,8 +40,9 @@ public sealed class VendorProductVersionCatalogParserTests
 
 		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
 
-		// Flattens across components: VCENTER and NSX both contribute.
-		DepotArtifactUpsert vcenterBinary = Assert.Single(result, r => r.RelativePath == "vcsa-patch.iso");
+		// Flattens across components: VCENTER and NSX both contribute. RelativePath is
+		// the depot-relative identity (issue #1784), not the bare catalog fileName.
+		DepotArtifactUpsert vcenterBinary = Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-patch.iso");
 		Assert.Equal("indexed", vcenterBinary.Status);
 		Assert.Contains("\"product\":\"VCENTER\"", vcenterBinary.MetadataJson);
 		Assert.Contains("\"version\":\"9.1.0.5210.25573614\"", vcenterBinary.MetadataJson);
@@ -49,12 +50,12 @@ public sealed class VendorProductVersionCatalogParserTests
 		Assert.Contains($"\"size_bytes\":{materializedSize}", vcenterBinary.MetadataJson);
 		Assert.Equal(64, vcenterBinary.Sha256!.Length);
 
-		Assert.Single(result, r => r.RelativePath == "nsx-missing.ova");
+		Assert.Single(result, r => r.RelativePath == "PROD/COMP/NSX/nsx-missing.ova");
 
 		// Flattens across bundles of the SAME entry: 9.1.0.6543 has two bundles
 		// (b2, b2b), each contributing its own binary.
-		Assert.Single(result, r => r.RelativePath == "vcsa-fixture-9.1.0.6543.iso");
-		Assert.Single(result, r => r.RelativePath == "vcsa-fixture-9.1.0.6543-patch.iso");
+		Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-fixture-9.1.0.6543.iso");
+		Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-fixture-9.1.0.6543-patch.iso");
 	}
 
 	[Fact]
@@ -67,7 +68,7 @@ public sealed class VendorProductVersionCatalogParserTests
 		// NSX's "4.2.0" entry carries "nsx-missing.ova" in two bundles (b3, b3b) with
 		// different checksums -- the parser must keep exactly one entry, the LAST
 		// bundle in document order (b3b's checksum), never two rows for one filename.
-		DepotArtifactUpsert nsxBinary = Assert.Single(result, r => r.RelativePath == "nsx-missing.ova");
+		DepotArtifactUpsert nsxBinary = Assert.Single(result, r => r.RelativePath == "PROD/COMP/NSX/nsx-missing.ova");
 		Assert.Equal("0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b0b3b", nsxBinary.Sha256);
 	}
 

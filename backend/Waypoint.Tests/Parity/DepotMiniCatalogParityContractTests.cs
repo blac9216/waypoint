@@ -22,22 +22,27 @@ using Xunit.Abstractions;
 namespace Waypoint.Tests.Parity;
 
 /// <summary>
-/// Issue #1696 deliverable 4: runs the C# <see cref="VendorProductVersionCatalogParser"/>
-/// and the REAL PowerShell <c>Invoke-WaypointCatalogIndex</c> sweep (issue #1503) over
-/// two independent materializations of the SAME shared <c>depot-mini</c> catalog
-/// document, then compares the depot-relative identity SET each consumer derives --
-/// printing both lists and a per-index diff, not just a pass/fail boolean (the PR
-/// #1629 round-2 divergence class this test exists to catch).
+/// Issue #1696 deliverable 4 (strengthened by issue #1784's fix): runs the C#
+/// <see cref="VendorProductVersionCatalogParser"/> and the REAL PowerShell
+/// <c>Invoke-WaypointCatalogIndex</c> sweep (issue #1503) over two independent
+/// materializations of the SAME shared <c>depot-mini</c> catalog document, then
+/// compares the depot-relative identity SET each consumer derives -- printing both
+/// lists and a per-index diff, not just a pass/fail boolean (the PR #1629 round-2
+/// divergence class this test exists to catch).
 ///
-/// The two consumers are not identity-equivalent by construction:
-/// <see cref="VendorProductVersionCatalogParser"/> emits a bare catalog
-/// <c>fileName</c> as its own <see cref="DepotArtifactUpsert.RelativePath"/> (its own
-/// doc comment: "presence-sweep behavior (#1503), out of this slice's scope"), while
-/// the PowerShell module resolves every entry to <c>PROD/COMP/&lt;Product&gt;/&lt;fileName&gt;</c>.
-/// This test normalizes the C# side using the SAME rule
-/// (<see cref="DepotRelativePath"/>) before comparing -- the contract this proves is
-/// "given the documented resolution rule, both consumers agree on every catalog
-/// entry's identity", not "the two consumers already emit identical strings".
+/// Before #1784, the two consumers were not identity-equivalent by construction:
+/// <see cref="VendorProductVersionCatalogParser"/> emitted a bare catalog
+/// <c>fileName</c> as its own <see cref="DepotArtifactUpsert.RelativePath"/>, while the
+/// PowerShell module resolved every entry to <c>PROD/COMP/&lt;Product&gt;/&lt;fileName&gt;</c>
+/// -- this test used to normalize the C# side onto the PowerShell rule before
+/// comparing, proving only "given the documented resolution rule, both consumers
+/// agree", not "the two consumers already emit identical strings" (exactly the gap
+/// live validation caught as issue #1784: a stack that both pulled and swept wrote two
+/// rows per artifact). #1784 made <see cref="VendorProductVersionCatalogParser"/>
+/// itself resolve <see cref="Waypoint.Core.Catalog.DepotRelativePaths.Resolve"/> as its
+/// identity, so this test now compares the RAW <see cref="DepotArtifactUpsert.RelativePath"/>
+/// values with no normalization step at all -- the stronger, actually-load-bearing
+/// claim.
 /// </summary>
 public sealed class DepotMiniCatalogParityContractTests
 {
@@ -57,7 +62,10 @@ public sealed class DepotMiniCatalogParityContractTests
 		SortedSet<string> csharpIdentities = new(StringComparer.OrdinalIgnoreCase);
 		foreach (DepotArtifactUpsert upsert in VendorProductVersionCatalogParser.Parse(fixture.CatalogJson))
 		{
-			csharpIdentities.Add(DepotRelativePath(upsert));
+			// Issue #1784: no normalization -- RelativePath IS the depot-relative
+			// identity now, straight from the parser, the same string the sweep must
+			// independently arrive at for the two writers to converge on one row.
+			csharpIdentities.Add(upsert.RelativePath);
 		}
 
 		List<PowerShellSweepRecord> psRecords = RunPowerShellSweep();
@@ -90,13 +98,6 @@ public sealed class DepotMiniCatalogParityContractTests
 		Assert.Equal(20, csharpIdentities.Count); // VCENTER 6 + NSX 1 + ESXI 1 + TKG 12 (depot-mini/README.md's catalog; NSX's two same-fileName bundles dedup to 1).
 	}
 
-	/// <summary>Depot-relative identity a catalog entry resolves to, per the documented rule <c>PROD/COMP/&lt;Product&gt;/&lt;fileName&gt;</c> (#1027; <c>Get-CatalogEntryDepotRelativePath</c>).</summary>
-	private static string DepotRelativePath(DepotArtifactUpsert upsert)
-	{
-		using JsonDocument metadata = JsonDocument.Parse(upsert.MetadataJson);
-		string product = metadata.RootElement.GetProperty("product").GetString()!;
-		return $"PROD/COMP/{product}/{upsert.RelativePath}";
-	}
 
 	private static List<PowerShellSweepRecord> RunPowerShellSweep()
 	{

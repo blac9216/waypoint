@@ -24,10 +24,13 @@ namespace Waypoint.Core.Catalog;
 /// <c>VCENTER</c>), each an array of entries with <c>productVersion</c> and
 /// <c>artifacts.bundles[].binaries[]</c> (each with <c>fileName</c>, <c>checksum</c>,
 /// <c>size</c>). Flattens every binary across every component/entry into one
-/// <see cref="DepotArtifactUpsert"/> per unique <c>fileName</c> (issue #687) --
-/// the same file can legitimately appear in more than one bundle of the same entry
-/// (an ISO shared across INSTALL and PATCH bundles), so last-write-wins per filename
-/// is correct here, matching the sibling reference's own flattening rationale.
+/// <see cref="DepotArtifactUpsert"/> per unique <see cref="DepotRelativePaths.Resolve"/>
+/// identity (issue #687; rekeyed from a bare <c>fileName</c> to the depot-relative
+/// path by issue #1784 -- see <see cref="DepotArtifactUpsert.RelativePath"/>'s own doc
+/// comment) -- the same file can legitimately appear in more than one bundle of the
+/// same entry (an ISO shared across INSTALL and PATCH bundles), so last-write-wins per
+/// identity is correct here, matching the sibling reference's own flattening
+/// rationale.
 /// </summary>
 public static class VendorProductVersionCatalogParser
 {
@@ -48,7 +51,7 @@ public static class VendorProductVersionCatalogParser
 			return [];
 		}
 
-		Dictionary<string, DepotArtifactUpsert> byFileName = new(StringComparer.Ordinal);
+		Dictionary<string, DepotArtifactUpsert> byRelativePath = new(StringComparer.Ordinal);
 		foreach (JsonProperty component in patches.EnumerateObject())
 		{
 			if (component.Value.ValueKind != JsonValueKind.Array)
@@ -81,14 +84,14 @@ public static class VendorProductVersionCatalogParser
 						DepotArtifactUpsert? upsert = TryParseBinary(binary, component.Name, version);
 						if (upsert is not null)
 						{
-							byFileName[upsert.RelativePath] = upsert;
+							byRelativePath[upsert.RelativePath] = upsert;
 						}
 					}
 				}
 			}
 		}
 
-		return [.. byFileName.Values];
+		return [.. byRelativePath.Values];
 	}
 
 	private static DepotArtifactUpsert? TryParseBinary(JsonElement binary, string component, string? version)
@@ -130,14 +133,14 @@ public static class VendorProductVersionCatalogParser
 
 		string metadataJson = JsonSerializer.Serialize(metadata);
 
-		// fileName is passed as RelativePath (migration 0100, issue #1488): the
-		// vendor catalog only ever gives a flat binary filename, never a nested
-		// depot-relative path, so this remains the same string value as before --
-		// what changed is that it now travels through the same explicitly named
-		// catalog-identity field the offline disk walk uses, instead of a bare
-		// ExternalId string standing in for two different things. Reconciling a
-		// nested relative path for the connected side is presence-sweep behavior
-		// (#1503), out of this slice's scope.
-		return new DepotArtifactUpsert(fileName, checksum, DepotArtifactStatuses.Indexed, metadataJson, size);
+		// Issue #1784: RelativePath is now the SAME depot-relative identity
+		// (PROD/COMP/<component>/<fileName>) the offline presence sweep resolves
+		// (WaypointCatalogIndex.psm1's Get-CatalogEntryDepotRelativePath) -- prior to
+		// this fix it was the vendor catalog's bare fileName, so a stack that both
+		// pulled and swept wrote two rows per artifact under two different identities,
+		// with contradictory statuses (live validation). DepotRelativePaths.Resolve is
+		// the single shared rule; CatalogPullJobHandler reconciles any pre-#1784 row
+		// still keyed under the legacy bare-fileName identity on the next pull.
+		return new DepotArtifactUpsert(DepotRelativePaths.Resolve(component, fileName), checksum, DepotArtifactStatuses.Indexed, metadataJson, size);
 	}
 }

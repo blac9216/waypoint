@@ -238,6 +238,19 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			foreach (DepotArtifactUpsert upsert in parsed)
 			{
 				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
+
+				// Issue #1784 reconciliation: prior to #1784, this parser identified a
+				// binary by its bare fileName (the trailing segment of the NEW
+				// depot-relative identity above); a pre-#1784 pull may have left a row
+				// under that legacy identity. Deleting it here, every pull, is a
+				// no-op once that row is gone -- self-healing the duplicate on the
+				// very next connected pull without a migration or a one-time backfill.
+				string legacyIdentity = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
+				if (!string.Equals(legacyIdentity, upsert.RelativePath, StringComparison.Ordinal))
+				{
+					await _artifacts.DeleteAsync(legacyIdentity, cancellationToken).ConfigureAwait(false);
+				}
+
 				upserted++;
 				if (upserted % 25 == 0)
 				{

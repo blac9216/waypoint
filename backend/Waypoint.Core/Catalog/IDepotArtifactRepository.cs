@@ -50,6 +50,16 @@ public interface IDepotArtifactRepository
 	/// </summary>
 	Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(
 		DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #1784 reconciliation: deletes the row at <paramref name="relativePath"/>
+	/// if one exists, returning whether a row was actually removed. The one caller
+	/// today is <c>CatalogPullJobHandler</c>, cleaning up a pre-#1784 row still keyed
+	/// under the connected pull's legacy bare-fileName identity once the SAME artifact
+	/// has been re-parsed under the new depot-relative identity -- a harmless no-op on
+	/// every subsequent pull once that legacy row is gone.
+	/// </summary>
+	Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken);
 }
 
 /// <summary>

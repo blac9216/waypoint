@@ -86,6 +86,19 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	}
 
 	/// <inheritdoc/>
+	public async Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("DELETE FROM depot_artifacts WHERE relative_path = $1", connection);
+		command.Parameters.AddWithValue(relativePath);
+		int deleted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		return deleted > 0;
+	}
+
+	/// <inheritdoc/>
 	public async Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

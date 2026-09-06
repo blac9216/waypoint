@@ -171,6 +171,9 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) =>
 			inner.UpsertAsync(artifact, cancellationToken);
 
+		public Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken) =>
+			inner.DeleteAsync(relativePath, cancellationToken);
+
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
 			id == missing ? Task.FromResult<DepotArtifact?>(null) : inner.GetByIdAsync(id, cancellationToken);
 
