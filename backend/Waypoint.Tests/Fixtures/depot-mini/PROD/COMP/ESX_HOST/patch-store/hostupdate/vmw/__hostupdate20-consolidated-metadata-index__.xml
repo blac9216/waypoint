@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadataList>
+	<metadata>
+		<productId>ESXi910</productId>
+		<version>9.1.0</version>
+		<url>metadata-fixture1696.zip</url>
+		<channelName>vmw-ESXi-9.1</channelName>
+	</metadata>
+</metadataList>

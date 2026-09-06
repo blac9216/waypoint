@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- invented placeholder upgrade_info.xml (fixture #1696) -- vendor-signed file
+     alongside the catalog naming vCenter upgrade paths; the sweep reports any file
+     with this exact basename as a known/indexed presence record, never unknown. -->
+<upgradeInfo>
+	<upgradePath from="8.0.3.00900" to="9.1.0.5210" />
+</upgradeInfo>
