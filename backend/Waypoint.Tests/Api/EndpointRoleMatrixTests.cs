@@ -388,6 +388,18 @@ public sealed class EndpointRoleMatrixTests
 		["RepoCredentialsController.Set"] = WaypointRole.Admin,
 		["RepoCredentialsController.Clear"] = WaypointRole.Admin,
 
+		// RetentionController (issue #1453) -- reads (state/dial/review-list) are
+		// Viewer+ (Operator gets no wider access than Viewer here); every mutation
+		// (pin/unpin/purge-now/set-dial/review-list-delete) is Admin-only.
+		["RetentionController.ListState"] = WaypointRole.Viewer,
+		["RetentionController.Pin"] = WaypointRole.Admin,
+		["RetentionController.Unpin"] = WaypointRole.Admin,
+		["RetentionController.PurgeNow"] = WaypointRole.Admin,
+		["RetentionController.GetDial"] = WaypointRole.Viewer,
+		["RetentionController.SetDial"] = WaypointRole.Admin,
+		["RetentionController.GetReviewList"] = WaypointRole.Viewer,
+		["RetentionController.DeleteReviewListEntry"] = WaypointRole.Admin,
+
 		// UsersController -- Admin-only in full (domain-model.md: "users/roles" is an
 		// Admin capability; role itself is a read-only IdP mirror -- see class doc
 		// comment -- but the whole surface, including reads, is still Admin-gated).
