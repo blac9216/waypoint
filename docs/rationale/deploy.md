@@ -538,12 +538,15 @@ Refs: #498
 
 Repo path-space content is seeded straight into the throwaway `depot`
 volume before `up`, at exactly the paths the runner writes (`PROD/`,
-`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `Transfer/`, plus a stray marker
-under `ContentLibrary/` -- see below) -- the same trick
-smoke-seeding-preconditions already uses for `compliance-profiles`.
-Nothing in this stack yet produces real repo content (that's later
-lanes), so the smoke test has to plant it itself to prove nginx serves
-what a producer will eventually write.
+`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `Transfer/`, `VCSA/`, plus a
+stray marker under `ContentLibrary/` -- see below) -- the same trick
+smoke-seeding-preconditions already uses for `compliance-profiles`. A
+`NewStore/` marker is seeded too, at a path the runner has never
+written and `default.conf` never names, to prove the allowlist denies a
+subtree by construction rather than by an entry a denylist would need
+maintaining (#1608). Nothing in this stack yet produces real repo
+content (that's later lanes), so the smoke test has to plant it itself
+to prove nginx serves what a producer will eventually write.
 
 Seeding the real layout rather than a set of separate placeholder volumes
 is what makes the isolation assertions mean anything: the stores overlap
@@ -805,19 +808,31 @@ yet -- on a fresh stack the runner has written nothing, so nginx would
 refuse to start. So nginx mounts the one volume read-only at `/srv/repo`
 and each location `alias`es its own distinct subtree.
 
-Isolation is therefore enforced at the location layer, and it has to be
-explicit: `/repo/depot/` aliases the store root, so a regex location
-404s `/repo/depot/{UMDS,Photon,VKS,VMTools,ContentLibrary,VCSA,Transfer}`
-before the prefix search can reach it (regex locations are matched ahead
-of the settled prefix match). Without that deny, `/repo/depot/UMDS/`
-would be a second route to a store that owns its own location -- an
-acceptance-criterion failure today and a bypass of #1510's per-location
-auth toggle tomorrow. The deny list is a denylist of the runner's own
-store directory names: a store directory added to `/vcf` later must be
-added here at the same time, which is what the smoke test's cross-store
-isolation assertions exist to catch.
+Isolation is therefore enforced at the location layer. It was originally
+a denylist naming the runner's seven store/staging directories
+(`UMDS|Photon|VKS|VMTools|ContentLibrary|VCSA|Transfer`), which is
+fail-open: a store directory added to `/vcf` after the regex was written
+is silently reachable through `/repo/depot/` until someone edits it, and
+the smoke test's cross-store isolation assertions only catch a
+*regression* of a name already listed, not a *new* name nobody added.
 
-Refs: #1043, #1502
+`/repo/depot/` is now an ALLOWLIST instead (#1608): `location ^~
+/repo/depot/PROD/` aliases only the vendor's own depot-proper tree
+(`PROD/` -- research #1027 confirms this is the whole VCF 9 depot
+contract; the vendor's other root sibling, `umds-patch-store`, is this
+runner's `UMDS/`, already served at its own `/repo/umds/` location and
+never through `/repo/depot/`), and a second `location ^~ /repo/depot/`
+404s everything else. Both locations use `^~` so the longest-prefix
+search settles between them directly -- `/repo/depot/PROD/...` always
+resolves to the first, and every other path under `/repo/depot/`
+(any of the seven store/staging directories, or a directory nobody has
+named yet) falls to the second and 404s by construction. A store
+directory added to `/vcf` tomorrow needs no config change here at all;
+the smoke test's cross-store isolation assertions (extended in #1609,
+plus a `NewStore/` marker never named anywhere) exist to prove that,
+not to enumerate names that could drift out of sync.
+
+Refs: #1043, #1502, #1608, #1609, #1027
 
 ### nginx-repo-photon-case-sensitive-root
 
@@ -833,7 +848,17 @@ spelling that must serve (nginx checks regex locations only after the
 longest-prefix search, and `^~` stops that search from falling through
 to regex matching once the literal prefix matches).
 
-Refs: #1043, #1502
+Neither trailing-slash location is a prefix of a request with no
+trailing slash, so a bare `/photon` or `/Photon` fell through both and
+reached the SPA catch-all, answering 200 with `index.html` (#1598).
+Two more locations close that: `location = /photon { return 301
+/photon/; }` (exact match, so only the literal lowercase spelling with
+no trailing slash) and `location ~* ^/photon$ { return 404; }` for
+every other bare capitalization -- exact-match locations are checked
+before any other kind, so the redirect always wins for the one spelling
+that must serve.
+
+Refs: #1043, #1502, #1598
 
 ### nginx-repo-umds-disable-symlinks
 
@@ -862,7 +887,21 @@ any of the five. The map lives in one `include`d file rather than repeated
 per repo location, so every store shares one definition instead of five
 copies that can drift.
 
-Refs: #1043, #1502
+An nginx `types { }` block **replaces** the compiled-in default MIME
+table for the location it is included into, it does not extend it
+(#1591). Today that is benign: `tdnf` never validates `Content-Type`
+(the sibling README says so explicitly) and the VCSP consumer only
+cares about the five entries above, so every extension the six-entry
+map didn't know was a latent trap, not a live gap. The decision:
+re-include the handful of compiled-in `mime.types` entries a future
+store is likely to need explicitly (`.html`, `.xml`, `.gz`, `.rpm`,
+`.deb`, `.zip`, plus `.txt` alongside `.mf`) rather than leave them
+implicit, so a future editor adding a store doesn't rediscover the
+replace-not-extend trap the hard way. `.ova` has no compiled-in or
+IANA-registered type and stays on `default_type`
+(`application/octet-stream`) deliberately.
+
+Refs: #1043, #1502, #1591
 
 ## postgres/
 

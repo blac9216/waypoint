@@ -101,14 +101,20 @@ public sealed class ContentLibraryVolumeTopologyTests
 		Assert.Contains("alias /srv/content-libraries/;", location.Groups["body"].Value);
 	}
 
+	// Issue #1608: /repo/depot/ moved from a denylist naming each store
+	// subtree to an allowlist of exactly `PROD/`, so a stray depot-side
+	// `ContentLibrary/` is denied by construction (nothing names it) rather
+	// than by an entry that could go stale. This asserts the allowlist
+	// shape stays intact -- content-library isolation itself is the smoke
+	// test's job (docs/rationale/deploy.md#smoke-repo-path-space).
 	[Fact]
-	public void Nginx_depot_denylist_still_names_content_library()
+	public void Nginx_depot_location_is_an_allowlist_of_PROD_only()
 	{
 		string conf = File.ReadAllText(ResolveRepoPath(Path.Combine("deploy", "nginx", "conf.d", "default.conf")));
-		Match denylist = Regex.Match(conf, @"location\s+~\*\s+\^/repo/depot/\(([^)]*)\)");
 
-		Assert.True(denylist.Success, "expected the /repo/depot/ store-subtree denylist regex in default.conf");
-		Assert.Contains("ContentLibrary", denylist.Groups[1].Value.Split('|'));
+		Assert.Matches(@"location\s+\^~\s+/repo/depot/PROD/\s*\{", conf);
+		Assert.Matches(@"location\s+\^~\s+/repo/depot/\s*\{[^}]*return\s+404;", conf);
+		Assert.DoesNotContain("alias /srv/repo/ContentLibrary/;", conf);
 	}
 
 	// --- YAML helpers -----------------------------------------------------

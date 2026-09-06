@@ -172,6 +172,18 @@ docker run --rm -v "${PROJECT}_depot:/x" alpine sh -c "
 	# reachable through /repo/depot/ either.
 	mkdir -p /x/Transfer
 	printf 'transfer-marker' > /x/Transfer/transfer-marker.txt
+
+	# VCSA staging tree: no location serves it either (issue #1609 --
+	# previously unseeded and unasserted).
+	mkdir -p /x/VCSA
+	printf 'vcsa-marker' > /x/VCSA/vcsa-marker.txt
+
+	# A store directory the runner has never written and default.conf
+	# never names -- proves the depot guard is an allowlist (only PROD/
+	# serves) rather than a denylist that would need this name added to
+	# it (issue #1608).
+	mkdir -p /x/NewStore
+	printf 'newstore-marker' > /x/NewStore/newstore-marker.txt
 "
 
 # Content-library registry: its OWN volume (docs/rationale/deploy.md#content-libraries-own-volume),
@@ -795,15 +807,40 @@ done
 # Cross-store isolation, probed where the overlap actually is: every store
 # subtree lives inside the same volume /repo/depot/ aliases, so each one
 # must be unreachable through the depot location and reachable only through
-# its own. Transfer is staging no location may serve.
+# its own. Transfer/VCSA are staging no location may serve. NewStore is a
+# directory nobody has named anywhere, proving the guard is an allowlist
+# (only PROD/ serves) rather than a denylist that this list itself would
+# have to stay in sync with (#1608) -- this loop must fail if the guard is
+# ever loosened back to a denylist that forgets a name.
+#
+# The seven runner-written names are derived from the runner's own path
+# constants (vcf-download-manager.common.ps1), not hand-copied, so a store
+# renamed there is caught here too; NewStore is deliberately NOT derived --
+# it must never appear in that file, or it stops proving the allowlist
+# claim.
 # why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases
-for depot_path in \
-	"UMDS/vmware-updates/patch1.txt" \
-	"Photon/photon_release_5.0_x86_64/repodata/marker.txt" \
-	"VKS/vks-marker.txt" \
-	"VMTools/vmtools-marker.txt" \
-	"ContentLibrary/stray.txt" \
-	"Transfer/transfer-marker.txt"; do
+RUNNER_COMMON="${REPO_ROOT}/runners/download-runner/powershell/project/vcf-download-manager.common.ps1"
+mapfile -t RUNNER_STORE_NAMES < <(grep -oP "(?<=\?\? '/vcf/)[^/']+" "${RUNNER_COMMON}" | sort -u)
+if [[ "${#RUNNER_STORE_NAMES[@]}" -eq 0 ]]; then
+	bad "could not derive any store name from ${RUNNER_COMMON} -- isolation loop below would be empty"
+fi
+
+declare -A DEPOT_MARKER_FOR_STORE=(
+	[UMDS]="UMDS/vmware-updates/patch1.txt"
+	[Photon]="Photon/photon_release_5.0_x86_64/repodata/marker.txt"
+	[VKS]="VKS/vks-marker.txt"
+	[VMTools]="VMTools/vmtools-marker.txt"
+	[ContentLibrary]="ContentLibrary/stray.txt"
+	[Transfer]="Transfer/transfer-marker.txt"
+	[VCSA]="VCSA/vcsa-marker.txt"
+)
+
+for store in "${RUNNER_STORE_NAMES[@]}"; do
+	depot_path="${DEPOT_MARKER_FOR_STORE[$store]:-}"
+	if [[ -z "${depot_path}" ]]; then
+		bad "runner store '${store}' (from ${RUNNER_COMMON}) has no seeded marker in this script -- add one"
+		continue
+	fi
 	DEPOT_ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/${depot_path}")"
 	if [[ "${DEPOT_ISOLATION_CODE}" == "404" ]]; then
 		ok "/repo/depot/${depot_path} is not a second route to that store (404)"
@@ -811,6 +848,13 @@ for depot_path in \
 		bad "/repo/depot/${depot_path} returned ${DEPOT_ISOLATION_CODE} -- the depot location is a superset route, stores are not isolated"
 	fi
 done
+
+NEWSTORE_ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/NewStore/newstore-marker.txt")"
+if [[ "${NEWSTORE_ISOLATION_CODE}" == "404" ]]; then
+	ok "/repo/depot/NewStore/newstore-marker.txt (unnamed anywhere) is denied by the allowlist (404)"
+else
+	bad "/repo/depot/NewStore/newstore-marker.txt returned ${NEWSTORE_ISOLATION_CODE} -- the depot guard is not an allowlist"
+fi
 
 # The same denial must hold for a lowercase spelling of the subtree name,
 # so a case-insensitive filesystem cannot reopen the route.

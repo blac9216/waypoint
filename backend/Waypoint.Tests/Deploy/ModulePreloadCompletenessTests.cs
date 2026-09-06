@@ -123,6 +123,67 @@ public sealed class ModulePreloadCompletenessTests
 		return (YamlMappingNode)parent.Children[new YamlScalarNode(key)];
 	}
 
+	// Issue #1625: WaypointLogging is deliberately excluded from the pairing table
+	// above (it is a support module dot-sourced/preloaded, not handler-invoked by
+	// command name), so a dropped WaypointLogging preload line left both runners
+	// green there. This guards it separately, deriving "does this runner need it"
+	// from its own shipped source rather than a second hand-maintained list: a
+	// runner needs WaypointLogging preloaded iff any file it ships -- its own
+	// preloaded shim modules, or its dot-sourced sibling-repo scripts under
+	// runners/<runner>/powershell/ -- calls one of WaypointLogging's exported
+	// functions (Write-Log, Get-LogSplat), qualified or not.
+	[Theory]
+	[InlineData("compliance-runner")]
+	[InlineData("download-runner")]
+	public void Runner_preloads_WaypointLogging_when_its_shipped_source_calls_into_it(string runner)
+	{
+		bool needsLogging = ShippedShimSourceFiles(runner)
+			.Select(File.ReadAllText)
+			.Any(text => text.Contains("Write-Log", StringComparison.Ordinal)
+				|| text.Contains("Get-LogSplat", StringComparison.Ordinal));
+
+		if (!needsLogging)
+		{
+			return; // nothing this runner ships today calls into WaypointLogging
+		}
+
+		List<string> preloadPaths = ModulePreloadPaths(runner);
+		Assert.Contains(
+			preloadPaths,
+			path => path.EndsWith("/WaypointLogging", StringComparison.Ordinal));
+	}
+
+	private static IEnumerable<string> ShippedShimSourceFiles(string runner)
+	{
+		string repoRoot = RepoRoot();
+
+		foreach (string module in ExpectedModuleRunnerPairs
+			.Where(pair => pair.Runner == runner)
+			.Select(pair => pair.Module))
+		{
+			string moduleDir = Path.Combine(
+				repoRoot, "backend", "Waypoint.Infrastructure.Execution", "PowerShell", "Modules", module);
+			foreach (string file in Directory.GetFiles(moduleDir, "*.psm1", SearchOption.AllDirectories))
+			{
+				yield return file;
+			}
+		}
+
+		string runnerPowershellDir = Path.Combine(repoRoot, "runners", runner, "powershell");
+		if (Directory.Exists(runnerPowershellDir))
+		{
+			foreach (string file in Directory.GetFiles(runnerPowershellDir, "*.ps1", SearchOption.AllDirectories))
+			{
+				yield return file;
+			}
+		}
+	}
+
+	private static string RepoRoot()
+	{
+		return Path.GetDirectoryName(Path.GetDirectoryName(ResolveComposePath()))!;
+	}
+
 	private static YamlMappingNode LoadCompose()
 	{
 		string path = ResolveComposePath();
