@@ -256,8 +256,13 @@ jobs:
   # Issue #1710: scripts/check-coverage-floor.py gained a scripts/tests/
   # unittest suite (issue #1354) with no CI job running it. Separate job
   # rather than a step in `backend`: it needs no .NET SDK or restore, so it
-  # gives its own fast red/green signal (mirrors the `pester`/`shellcheck`
-  # jobs above).
+  # gives its own fast red/green signal. Guards against zero-tests-discovered
+  # the same way the `pester` job above (L214-L217) and the
+  # download-runner/compliance-runner workflows' own gates do: plain
+  # `unittest discover` exits 0 on an empty suite, so a rename/move/delete of
+  # the test file would otherwise leave this job green while running
+  # nothing -- the exact "suite exists, nothing runs it" failure mode #1710
+  # exists to close (review finding, PR #1730 round 1).
   coverage-gate-tests:
     name: "coverage-gate tests (job)"
     needs: changes
@@ -268,7 +273,26 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Run scripts/tests unittest suite
-        run: python3 -m unittest discover -s scripts/tests -v
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.TestLoader().discover("scripts/tests")
+          count = suite.countTestCases()
+          print(f"discovered {count} test case(s)")
+          if count == 0:
+              print(
+                  "::error::coverage-gate-tests discovered zero tests -- "
+                  "the guard is not actually running.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
 
   # Always-report gate (#232): owns the required check-run name. Runs on
   # every PR/push regardless of the path filter (`if: always()` — GitHub's
