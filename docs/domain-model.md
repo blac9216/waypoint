@@ -530,10 +530,11 @@ job's byte size before it is ever dispatched
 ([ADR-0033](adr/0033-disk-admission-joins-capacity-model.md), amends ADR-0018).
 
 The repo-serving path-space (one appliance nginx, per-store `location`s over one
-shared depot volume plus the content-library store's own volume) enforces
-per-location independent auth, defaulting to Waypoint-managed repo users/tokens and
-keeping Keycloak out of the serving path entirely
-([ADR-0031](adr/0031-repo-serving-per-location-auth.md)).
+shared depot volume, plus the content-library store's own volume — 📋 planned / in
+flight, [owner ruling 2026-09-06 on #1706](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532),
+not yet merged as of this head) enforces per-location independent auth, defaulting to
+Waypoint-managed repo users/tokens and keeping Keycloak out of the serving path
+entirely ([ADR-0031](adr/0031-repo-serving-per-location-auth.md)).
 
 ### OCI bundle store and push-target consumer (planned)
 

@@ -425,11 +425,13 @@ of the air gap.
 issue #1502/PR #1587): `vcf-download-tool` owns one `depot` volume and writes every
 runner-written store (`UMDS`/ESX-patch, `Photon`, `VKS`, `VMTools`, `ContentLibrary`,
 `VCSA`, `Transfer`) as a subtree of it; nginx mounts that volume read-only and aliases
-each subtree as its own `location`, denying direct access to the shared root. The
-content-library store — the one store the backend itself writes to, not the
-acquisition tool — gets its own named volume, independent of the depot's lifecycle
-(ADR-0029, decision amended 2026-09-06 on issue #1706). This replaces the original
-per-store-named-volume plan; ADR-0029 records why.
+each subtree as its own `location`, denying direct access to the shared root. This
+replaces the original per-store-named-volume plan; ADR-0029 records why.
+📋 **Planned / in flight** (ADR-0029,
+[owner ruling 2026-09-06 on #1706](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532)):
+the content-library store — the one store the backend itself writes to, not the
+acquisition tool — gets its own `content-libraries` named volume, independent of the
+depot's lifecycle. Implementation is on #1706's PR, not yet merged as of this head.
 
 **Lanes.** Vendor acquisition is tool-driven (`binaries download --id`, issue
 #795/#1479 ✅ **built**) rather than routed through a generic download job type — the

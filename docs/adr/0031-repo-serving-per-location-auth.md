@@ -68,7 +68,7 @@ and amended by research (#1027); issue #1043 is its implementation.
 
 - Repo credential management (issuance, rotation, per-store binding) is new Waypoint
   application state distinct from both Keycloak accounts and the legacy Download
-  Token — it needs its own storage and RBAC (Admin-only, per decision 8/ADR pending on
+  Token — it needs its own storage and RBAC (Admin-only, per R2-10/ADR pending on
   RBAC in #1034).
 - A store cannot be assumed authenticated just because "the appliance has auth" — every
   consumer integration must be validated against that specific store's configured dial,

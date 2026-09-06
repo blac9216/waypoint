@@ -22,12 +22,23 @@ fresh stack the runner has written nothing, so nginx would refuse to start entir
 `docs/rationale/deploy.md#nginx-repo-store-subtree-aliases` records the operational
 detail; this ADR records the architectural decision it implements.
 
-A second question surfaced independently on #1706 (2026-09-06): the content-library
-store is not runner-written at all — the backend and operator UI write library items
-directly (chunked upload, add-to-library actions) and must never touch the vendor
-`PROD` depot tree the acquisition tool owns. That store needs its own lifecycle
-(independent backup/restore, independent capacity accounting, survives a read-only
-depot mount) that the shared depot volume cannot give it.
+A second question surfaced independently on #1706: the content-library store is not
+runner-written at all — the backend and operator UI write library items directly
+(chunked upload, add-to-library actions) and must never touch the vendor `PROD` depot
+tree the acquisition tool owns. That store needs its own lifecycle (independent
+backup/restore, independent capacity accounting, survives a read-only depot mount)
+that the shared depot volume cannot give it. The owner ruled on this question
+([#1706 owner ruling, 2026-09-06](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532)):
+Option A — a dedicated `content-libraries` named volume, mounted read-write on
+`backend` at the existing `ContentLibraryOptions.RootPath` default, read-only on
+`nginx` (with the `/repo/content-libraries/` alias re-pointed to it), and nested into
+`download-runner` at `/vcf/ContentLibrary` so the runner's store-path conventions stay
+unchanged; runner-written stores keep the one-volume topology decided above — this
+ruling carves out the content-library store only. #1647 folds into the implementing
+PR. Implementation is **in flight** on #1706's PR and not merged as of this ADR's
+acceptance; this ADR records the decision as accepted and binding, not the shipped
+state of `deploy/compose.yaml` and `deploy/nginx/conf.d/default.conf`, which still
+reflect the pre-ruling shape until #1706 merges.
 
 ## Decision Drivers
 
@@ -66,12 +77,17 @@ read-write at `/vcf` in `download-runner` and read-only at `/srv/repo` in nginx;
 enforces per-store isolation at the **location** layer, not the volume layer — each
 store gets its own `alias`ed location, and a regex location denies direct access to
 the shared root (`/repo/depot/`) ahead of any prefix match, so no store subtree is
-reachable through another store's path or the shared root. The content-library store
-gets its **own** named volume, mounted only where the backend writes library items;
-the backend never writes into the depot tree, and the depot volume may be mounted
-read-only for maintenance without affecting library operations. The M1 `artifacts`
-volume's role is retired to the retirement of the legacy `download` job type
-(ADR-0030) — it is not repurposed as either of these.
+reachable through another store's path or the shared root. Per the
+[#1706 owner ruling](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532),
+the content-library store gets its **own** `content-libraries` named volume — mounted
+read-write on `backend`, read-only on `nginx` (with the `/repo/content-libraries/`
+alias re-pointed to it), and nested at `/vcf/ContentLibrary` in `download-runner`; the
+backend never writes into the depot tree, and the depot volume may be mounted
+read-only for maintenance without affecting library operations. Runner-written stores
+keep the one-volume topology above — this carve-out is for the content-library store
+only, and its implementation is in flight on #1706's PR (not merged as of this ADR's
+acceptance). The M1 `artifacts` volume's role, tied to the retired job type, is
+retired alongside it (ADR-0030) — it is not repurposed as either of these.
 
 ## Consequences
 
