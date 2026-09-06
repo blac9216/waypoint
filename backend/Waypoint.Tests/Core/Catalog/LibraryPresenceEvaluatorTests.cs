@@ -49,6 +49,34 @@ public sealed class LibraryPresenceEvaluatorTests
 	}
 
 	[Fact]
+	public void Evaluate_NinePointTenRanksAboveNinePointNine_Issue572Regression()
+	{
+		// #572: ordinal string comparison put "9.9" ahead of "9.10" (lexicographic:
+		// '1' < '9'), wrongly marking the actually-newer 9.10 artifact superseded.
+		DepotArtifact nineNine = Artifact("a1", "present", "VCF", "9.9");
+		DepotArtifact nineTen = Artifact("a2", "present", "VCF", "9.10");
+
+		IReadOnlyList<LibraryItem> items = LibraryPresenceEvaluator.Evaluate([nineNine, nineTen], connected: true);
+
+		Assert.Equal(LibraryPresenceStates.Superseded, items.Single(i => i.ExternalId == "a1").Presence);
+		Assert.Equal(LibraryPresenceStates.Present, items.Single(i => i.ExternalId == "a2").Presence);
+	}
+
+	[Fact]
+	public void Evaluate_UnparseableVersion_IsNeverSuperseded_AndNeverSupersedesOthers()
+	{
+		// Epic #16 decision R2-5: quarantined (here: unparseable, no releaseDate on
+		// DepotArtifact to fall back to) versions are "never auto-pruned/superseded".
+		DepotArtifact parsed = Artifact("a1", "present", "VCF", "9.1");
+		DepotArtifact unparseable = Artifact("a2", "present", "VCF", "RTM-Special-Build");
+
+		IReadOnlyList<LibraryItem> items = LibraryPresenceEvaluator.Evaluate([parsed, unparseable], connected: true);
+
+		Assert.Equal(LibraryPresenceStates.Present, items.Single(i => i.ExternalId == "a1").Presence);
+		Assert.Equal(LibraryPresenceStates.Present, items.Single(i => i.ExternalId == "a2").Presence);
+	}
+
+	[Fact]
 	public void Evaluate_NotPresent_Connected_IsInDepot()
 	{
 		DepotArtifact artifact = Artifact("a1", "indexed", "NSX", "4.2");
