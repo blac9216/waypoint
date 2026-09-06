@@ -311,7 +311,7 @@ download-runner has heartbeated at least once).
 
 ## Cross-links
 
-- Roadmap: [`../roadmap.md`](../roadmap.md#download--depot-parity) — story sequencing,
+- Roadmap: [`../roadmap.md`](../roadmap.md#download--depot-parity--open--milestone-design-record-epic-16) — story sequencing,
   Wave 0 status, and implementation progress for the epics this IA proposes screens
   against.
 - Domain model: [`../domain-model.md`](../domain-model.md#depot-catalog-identity-subscriptions-and-presence-sweep-planned) —
