@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
+import type { WaypointEvent } from "../../lib/events";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import { useSystem } from "../../lib/system-context";
 import {
@@ -54,6 +55,12 @@ const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	{ value: "failed", label: "Failed" },
 ];
 
+// Run-level terminal states (docs/api-contract.md's `run.progress` `state`
+// field, mirroring HistoryPanel.tsx's TERMINAL_STATES) — used only to know
+// when to drop this screen's own `queuedByArtifact` bookkeeping below, never
+// to fabricate a per-artifact status.
+const RUN_TERMINAL_STATES = new Set(["completed", "completed_with_failures", "aborted"]);
+
 function formatSyncTime(iso: string | null): string {
 	if (!iso) {
 		return "never synced";
@@ -86,8 +93,49 @@ export function DownloadCatalogScreen() {
 	const [queueing, setQueueing] = useState(false);
 	const [binariesQueueError, setBinariesQueueError] = useState<string | null>(null);
 	const [binariesQueueing, setBinariesQueueing] = useState(false);
+	// Issue #1487 finding 1: `POST /downloads/binaries` never touches
+	// `downloads`/`depot_artifacts` (that's issue #1482), so there is no
+	// server-side "queued" status to re-fetch. This is client-only,
+	// session-scoped bookkeeping from the enqueue response itself — never a
+	// fabricated persisted status — cleared once the run reaches a terminal
+	// state (see the `run.progress` subscription below) or on reload (this
+	// state does not survive one).
+	const [binariesRunNotice, setBinariesRunNotice] = useState<{ runId: string; count: number } | null>(null);
+	const [queuedByArtifact, setQueuedByArtifact] = useState<Map<string, string>>(new Map());
 
-	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user));
+	// Drops `queuedByArtifact`/`binariesRunNotice` bookkeeping for a run once
+	// it reaches a terminal state — the only "clear" trigger besides a reload
+	// (this state is in-memory only, so a reload already starts empty). Fed
+	// as `useDownloadQueue`'s `onEvent` sink below (docs/api-contract.md
+	// "Event streams (SSE)": `run.progress` is run-scoped and carries the
+	// run's lifecycle `state`) rather than a second `connectEventStream` call
+	// on the same `/api/v1/events` URL — two independent readers of one
+	// stream is not a real distinction the mock (and, more importantly, an
+	// actual SSE `EventSource`) is built to share cleanly.
+	const handleQueueEvent = useCallback((event: WaypointEvent) => {
+		if (event.type !== "run.progress" || !event.run_id) {
+			return;
+		}
+		const data = event.data as { state?: string };
+		if (!data.state || !RUN_TERMINAL_STATES.has(data.state)) {
+			return;
+		}
+		const runId = event.run_id;
+		setQueuedByArtifact((prev) => {
+			let changed = false;
+			const next = new Map(prev);
+			for (const [artifactId, artifactRunId] of prev) {
+				if (artifactRunId === runId) {
+					next.delete(artifactId);
+					changed = true;
+				}
+			}
+			return changed ? next : prev;
+		});
+		setBinariesRunNotice((prev) => (prev && prev.runId === runId ? null : prev));
+	}, []);
+
+	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user), handleQueueEvent);
 	const catalogPull = useCatalogPull();
 
 	const load = useCallback((query: CatalogArtifactsQuery) => {
@@ -147,7 +195,11 @@ export function DownloadCatalogScreen() {
 
 	const groups = useMemo(() => groupArtifactsByProduct(typedArtifacts), [typedArtifacts]);
 
+	// Issue #1487 finding 3: a stale binariesQueueError from a previous
+	// selection must not resurface once the operator changes the selection —
+	// every path that mutates `selected` also drops it.
 	const toggleSelected = useCallback((id: string) => {
+		setBinariesQueueError(null);
 		setSelected((prev) => {
 			const next = new Set(prev);
 			if (next.has(id)) {
@@ -162,6 +214,7 @@ export function DownloadCatalogScreen() {
 	// Toggles selection for exactly the given ids (one product group's
 	// artifacts) — selects them all if any is unselected, else clears them.
 	const toggleSelectGroup = useCallback((ids: string[]) => {
+		setBinariesQueueError(null);
 		setSelected((prev) => {
 			const allSelected = ids.length > 0 && ids.every((id) => prev.has(id));
 			const next = new Set(prev);
@@ -176,7 +229,10 @@ export function DownloadCatalogScreen() {
 		});
 	}, []);
 
-	const clearSelection = useCallback(() => setSelected(new Set()), []);
+	const clearSelection = useCallback(() => {
+		setBinariesQueueError(null);
+		setSelected(new Set());
+	}, []);
 
 	const canQueue = user ? roleAtLeast(user.role, "Operator") : false;
 	const queueGate = user
@@ -219,10 +275,20 @@ export function DownloadCatalogScreen() {
 	 * Issue #1487: the new connected binaries-download path
 	 * (`POST /downloads/binaries`), distinct from `doQueue`'s legacy
 	 * `POST /downloads` above. Same Operator+ floor (the endpoint's own
-	 * `[RequireOperatorRole]`, mirrored client-side by `canQueue`/`queueGate`)
-	 * and the same optimistic pattern: clear the selection and re-fetch
-	 * immediately on success so the queued rows flip state without waiting on
-	 * SSE, surfacing any failure inline rather than losing the selection.
+	 * `[RequireOperatorRole]`, mirrored client-side by `canQueue`/`queueGate`).
+	 *
+	 * Unlike the legacy path, this one is honestly NOT optimistic about
+	 * per-artifact status: `DownloadsController.QueueBinariesDownload` only
+	 * creates a run + one `binaries-download` job per artifact (finding 1 —
+	 * the invoking job/catalog write is #1482), so a `load()` re-fetch here
+	 * would show nothing changed and the doc comment this used to carry
+	 * ("re-fetch so freshly-queued rows flip to `queued` immediately") would
+	 * be false. Instead: clear the selection, surface the created run id
+	 * (`binariesRunNotice`, with a link to Live Jobs) and mark the selected
+	 * ids as queued for this session only (`queuedByArtifact`, fed straight
+	 * from this response) — both cleared when the run reaches a terminal
+	 * state via the `run.progress` subscription below, never persisted, never
+	 * fabricated.
 	 */
 	const doBinariesQueue = useCallback(
 		async (ids: string[]) => {
@@ -232,21 +298,23 @@ export function DownloadCatalogScreen() {
 			setBinariesQueueing(true);
 			setBinariesQueueError(null);
 			try {
-				await queueBinariesDownload(ids);
-				clearSelection();
-				load({
-					search: search.trim() || undefined,
-					product: product || undefined,
-					version: version || undefined,
-					status: status || undefined,
+				const res = await queueBinariesDownload(ids);
+				setBinariesRunNotice({ runId: res.run_id, count: res.depot_artifact_ids.length });
+				setQueuedByArtifact((prev) => {
+					const next = new Map(prev);
+					for (const id of res.depot_artifact_ids) {
+						next.set(id, res.run_id);
+					}
+					return next;
 				});
+				clearSelection();
 			} catch (err) {
 				setBinariesQueueError(err instanceof ApiError ? err.message : "Could not queue the selected downloads.");
 			} finally {
 				setBinariesQueueing(false);
 			}
 		},
-		[canQueue, clearSelection, load, search, product, version, status],
+		[canQueue, clearSelection],
 	);
 
 	const doSync = useCallback(async () => {
@@ -289,6 +357,30 @@ export function DownloadCatalogScreen() {
 		0,
 	);
 	const transferEstimate = formatTransferEstimate(selectedTotalBytes, liveAggregateRate);
+
+	// Merges the real SSE-driven `byArtifact` (legacy `download` path) with a
+	// synthesized "queued" placeholder for every artifact this session's own
+	// `POST /downloads/binaries` calls just enqueued (`queuedByArtifact`) —
+	// reuses ArtifactTable's existing `queued`/`--warn` status rendering
+	// rather than inventing a second display path. The real queue item wins
+	// on any overlap (it carries live progress the placeholder cannot).
+	const displayByArtifact = new Map(byArtifact);
+	for (const [artifactId, runId] of queuedByArtifact) {
+		if (displayByArtifact.has(artifactId)) {
+			continue;
+		}
+		displayByArtifact.set(artifactId, {
+			id: `binaries-${artifactId}`,
+			artifact_id: artifactId,
+			job_id: `binaries-${artifactId}`,
+			run_id: runId,
+			state: "queued",
+			progress_percent: 0,
+			rate_bytes_per_sec: null,
+			eta_seconds: null,
+			retries: 0,
+		});
+	}
 
 	return (
 		<div className="catalog-screen">
@@ -345,6 +437,16 @@ export function DownloadCatalogScreen() {
 
 				{loadError && <div className="catalog-screen__error">{loadError}</div>}
 
+				{binariesRunNotice && (
+					<div className="catalog-screen__notice" aria-live="polite">
+						Queued run {binariesRunNotice.runId} — {binariesRunNotice.count} artifact
+						{binariesRunNotice.count === 1 ? "" : "s"}.{" "}
+						<a href={`/live-jobs?run=${binariesRunNotice.runId}`} className="catalog-screen__notice-link">
+							View in Live Jobs
+						</a>
+					</div>
+				)}
+
 				<CatalogPullPanel pull={catalogPull} adminGate={adminGate} />
 
 				<ProductGroupList
@@ -353,7 +455,7 @@ export function DownloadCatalogScreen() {
 					selected={selected}
 					onToggle={toggleSelected}
 					onToggleGroup={toggleSelectGroup}
-					byArtifact={byArtifact}
+					byArtifact={displayByArtifact}
 					onRetry={retryArtifact}
 					canQueue={canQueue}
 				/>

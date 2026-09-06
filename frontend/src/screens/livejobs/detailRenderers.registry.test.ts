@@ -50,12 +50,19 @@ describe("JOB_DETAIL_RENDERERS / resolveJobDetailRenderer (issue #591)", () => {
 		expect(resolveJobDetailRenderer("some-future-type")).toBe(GenericJobDetail);
 	});
 
-	it("covers every job_type in JobCapabilities.cs's closed set (Compliance + Download) with a registered renderer", () => {
-		// Mirrors backend/Waypoint.Core/Jobs/JobCapabilities.cs's two allowlists
-		// verbatim — a future job_type added there without a corresponding
-		// registry entry falls through to GenericJobDetail (a safe, documented
-		// fallback per the AC), which this test does not treat as a failure;
-		// it only guards that today's known set is NOT silently generic.
+	it("covers every currently-registered job_type with a non-generic renderer (subset of JobCapabilities.cs's two allowlists)", () => {
+		// NOT the full JobCapabilities.Compliance/.Download allowlists (PR #1759
+		// review: this test used to claim it was, but its DOWNLOAD array omitted
+		// three JobCapabilities.Download members -- depot-enrollment, catalog-pull,
+		// retention-sweep -- which have no registered renderer in
+		// detailRenderers.registry.ts today and so correctly fall through to
+		// GenericJobDetail; asserting them here would fail against the intended
+		// behavior, not guard it). This only lists the two allowlists' members that
+		// ARE registered in JOB_DETAIL_RENDERERS, so a future renderer removal
+		// (rather than a JobCapabilities.cs addition) is what this test catches —
+		// a future job_type added to JobCapabilities.cs with no renderer falls
+		// through to GenericJobDetail (a safe, documented fallback per the AC),
+		// which this test does not, and must not, treat as a failure.
 		const COMPLIANCE = ["discover", "credential-test", "scan", "remediate", "content-pull", "content-import", "purge"];
 		const DOWNLOAD = [
 			"catalog-index",
@@ -69,6 +76,14 @@ describe("JOB_DETAIL_RENDERERS / resolveJobDetailRenderer (issue #591)", () => {
 		];
 		for (const jobType of [...COMPLIANCE, ...DOWNLOAD]) {
 			expect(resolveJobDetailRenderer(jobType)).not.toBe(GenericJobDetail);
+		}
+
+		// The three JobCapabilities.Download members this test deliberately does
+		// NOT cover above — pinned here so a future renderer for one of them
+		// updates this list in the same change, rather than leaving a silently
+		// stale "not yet covered" claim.
+		for (const jobType of ["depot-enrollment", "catalog-pull", "retention-sweep"]) {
+			expect(resolveJobDetailRenderer(jobType)).toBe(GenericJobDetail);
 		}
 	});
 });
