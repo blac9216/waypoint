@@ -138,6 +138,8 @@ describe("DownloadCatalogScreen", () => {
 	let sse: ReturnType<typeof createDriveableSse>;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let queuePostBody: unknown;
+	let binariesPostBody: unknown;
+	let binariesPostResponse: { status: number; body: unknown };
 	let pullPostCount: number;
 	let pullStatus: CatalogPullStatus;
 	let pullPostResponse: { status: number; body: unknown };
@@ -152,6 +154,7 @@ describe("DownloadCatalogScreen", () => {
 		pullPostCount = 0;
 		pullStatus = initialPullStatus;
 		pullPostResponse = { status: 202, body: { run_id: "pull-run-1", job_id: "pull-job-1" } };
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-1", depot_artifact_ids: [] } };
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			fetchCalls.push({ url, init });
@@ -187,6 +190,10 @@ describe("DownloadCatalogScreen", () => {
 				queuePostBody = JSON.parse(init.body as string);
 				return jsonResponse({ run_id: "run-1", job_ids: ["job-1", "job-2"] });
 			}
+			if (url === "/api/v1/downloads/binaries" && init?.method === "POST") {
+				binariesPostBody = JSON.parse(init.body as string);
+				return jsonResponse(binariesPostResponse.body, binariesPostResponse.status);
+			}
 			if (url === "/api/v1/system") {
 				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null });
 			}
@@ -210,6 +217,7 @@ describe("DownloadCatalogScreen", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		queuePostBody = undefined;
+		binariesPostBody = undefined;
 	});
 
 	afterEach(() => {
@@ -278,18 +286,63 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument();
 	});
 
-	it("selecting rows shows the sticky footer and queues N downloads via POST /downloads", async () => {
+	it("selecting rows shows the sticky footer and the legacy path still queues N downloads via POST /downloads", async () => {
 		installFetchMock("Operator");
 		await mount();
 
 		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
 		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
 
-		expect(screen.getByText("Queue 2 downloads")).toBeInTheDocument();
+		expect(screen.getByText("Legacy download (UMDS-only) — 2")).toBeInTheDocument();
 
-		fireEvent.click(screen.getByText("Queue 2 downloads"));
+		fireEvent.click(screen.getByText("Legacy download (UMDS-only) — 2"));
 
 		await waitFor(() => expect(queuePostBody).toEqual({ artifact_ids: ["art-1", "art-2"] }));
+	});
+
+	it("issue #1487: the new Download action queues the selection via POST /downloads/binaries", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+
+		const button = screen.getByText("Download 2");
+		expect(button).toBeInTheDocument();
+		fireEvent.click(button);
+
+		await waitFor(() => expect(binariesPostBody).toEqual({ depot_artifact_ids: ["art-1", "art-2"] }));
+		// Optimistic: the selection clears on success without waiting for SSE.
+		await waitFor(() => expect(screen.queryByText("Download 2")).not.toBeInTheDocument());
+	});
+
+	it("issue #1487: a failed Download call surfaces its error and keeps the selection", async () => {
+		installFetchMock("Operator");
+		await mount();
+		binariesPostResponse = {
+			status: 403,
+			body: { error: { code: "forbidden", message: "Operator or Admin role required." } },
+		};
+
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+		fireEvent.click(screen.getByText("Download 1"));
+
+		await waitFor(() => expect(screen.getByText("Operator or Admin role required.")).toBeInTheDocument());
+		expect(screen.getByText("Download 1")).toBeInTheDocument();
+	});
+
+	it("issue #1487: the Download action is disabled with a reason below Operator, same as the legacy path", async () => {
+		installFetchMock("Cyber");
+		await mount();
+
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+
+		const download = screen.getByText("Download 1");
+		expect(download).toBeDisabled();
+		expect(download).toHaveAttribute("title", expect.stringContaining("Requires Operator"));
+
+		const legacy = screen.getByText("Legacy download (UMDS-only) — 1");
+		expect(legacy).toBeDisabled();
 	});
 
 	it("shows a transfer-time estimate in the footer for a non-empty selection (assumed-bandwidth basis)", async () => {
@@ -354,13 +407,13 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.queryByText(/^est\./)).not.toBeInTheDocument();
 	});
 
-	it("disables the queue action with a reason below Operator", async () => {
+	it("disables the legacy queue action with a reason below Operator", async () => {
 		installFetchMock("Cyber");
 		await mount();
 
 		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
 
-		const button = screen.getByText("Queue 1 downloads");
+		const button = screen.getByText("Legacy download (UMDS-only) — 1");
 		expect(button).toBeDisabled();
 		expect(button).toHaveAttribute("title", expect.stringContaining("Requires Operator"));
 	});

@@ -9,6 +9,7 @@ import {
 	CredentialTestJobDetail,
 	ContentJobDetail,
 	DownloadJobDetail,
+	BinariesDownloadJobDetail,
 	CatalogIndexJobDetail,
 	BundleJobDetail,
 	ContentLibrarySyncJobDetail,
@@ -135,6 +136,20 @@ describe("Operational (non-compliance) renderers (issue #591)", () => {
 		expect(screen.getByText("Download")).toBeInTheDocument();
 		expect(screen.getByRole("link", { name: "View Library →" })).toHaveAttribute("href", "/library");
 		expect(screen.queryByText(/error/i)).not.toBeInTheDocument();
+	});
+
+	it("BinariesDownloadJobDetail (issue #1487) shows the raw state and log lines for an in-flight job with no progress bar", () => {
+		renderRenderer(BinariesDownloadJobDetail, {
+			job: job({ job_type: "binaries-download", state: "running", logLines: ["Fetching ESXi-8.0U3-patch.zip…"] }),
+			group: group({ run_type: "binaries-download" }),
+		});
+		expect(screen.getByText("Binaries download")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "View Download Catalog →" })).toHaveAttribute("href", "/catalog");
+		expect(screen.getByText("running")).toBeInTheDocument();
+		expect(screen.getByText("Fetching ESXi-8.0U3-patch.zip…")).toBeInTheDocument();
+		// No fabricated progress bar — file-growth sampling is not yet
+		// available (issue #1487 AC 2); only state and raw log lines render.
+		expect(document.querySelector("[class*='progress']")).not.toBeInTheDocument();
 	});
 
 	it("BundleJobDetail links to Transfer", () => {

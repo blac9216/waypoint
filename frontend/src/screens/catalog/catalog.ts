@@ -60,14 +60,32 @@ const KNOWN_PRODUCT_NAMES: Record<string, string> = {
 	VKR: "VKR (Kubernetes Release)",
 };
 
-/** `SUPERVISOR_SERVICE_ABC` -> "Supervisor Service ABC"; short (<=3 char)
+/**
+ * `SUPERVISOR_SERVICE_ABC` -> "Supervisor Service ABC"; short (<=3 char)
  * segments (version numbers, acronyms) are upper-cased rather than
- * title-cased. */
+ * title-cased.
+ *
+ * Issue #1588: a segment that is not entirely upper-case (i.e. already has
+ * interior capitalisation, e.g. `ESXi`, `Installer` inside a key like
+ * `VCF Installer`) is left exactly as written rather than force-lowercased
+ * after its first letter — the prior rule (`word[0] + rest.toLowerCase()`)
+ * mangled `ESXi` to `Esxi`. Only a segment that is entirely uppercase
+ * (`word === word.toUpperCase()`, the true SNAKE_CASE case this catalog's
+ * keys are otherwise made of) is re-cased at all: short ones stay upper
+ * (acronyms/version numbers), longer ones are title-cased.
+ */
 function humanizeProductKey(key: string): string {
 	return key
 		.split("_")
 		.filter(Boolean)
-		.map((word) => (word.length <= 3 ? word.toUpperCase() : word[0] + word.slice(1).toLowerCase()))
+		.map((word) => {
+			if (word !== word.toUpperCase()) {
+				// Already mixed-case (or already lower/title-case) — not a pure
+				// SNAKE_CASE segment, so leave its casing untouched.
+				return word;
+			}
+			return word.length <= 3 ? word.toUpperCase() : word[0] + word.slice(1).toLowerCase();
+		})
 		.join(" ");
 }
 
@@ -285,9 +303,39 @@ export interface QueueDownloadsResponse {
 	job_ids: string[];
 }
 
-/** One run, N jobs (PR #228) — the whole selection is a single POST. */
+/**
+ * One run, N jobs (PR #228) — the whole selection is a single POST.
+ *
+ * This is the LEGACY queue path (`runs.run_type = "download"`), superseded
+ * by `queueBinariesDownload` below (issue #1479, ADR-0030) — kept only until
+ * issue #1040 removes it. Every caller of this function must present it as
+ * the "Legacy download (UMDS-only)" action, visually distinct from the new
+ * binaries-download path, per issue #1487 AC 3.
+ */
 export function queueDownloads(artifactIds: string[]): Promise<QueueDownloadsResponse> {
 	return apiPost<QueueDownloadsResponse>("/downloads", { artifact_ids: artifactIds });
+}
+
+export interface QueueBinariesDownloadResponse {
+	run_id: string;
+	depot_artifact_ids: string[];
+}
+
+/**
+ * `POST /downloads/binaries` (issue #1479, epic #1181): the connected VCFDT
+ * catalog-selection path — one run with one `binaries-download` job per
+ * artifact id (Operator+, same one-run-N-jobs fanout `queueDownloads` uses).
+ * This module only ever sends the id-list selector; the endpoint's
+ * alternative whole-release `{release: {product, version}}` selector
+ * (`ReleaseSelector` on the backend) is not wired up here — the grouped
+ * catalog view's own multi-select (a product group's checkbox selects every
+ * artifact currently shown for that product, which may already span several
+ * versions) already gives an operator the same "download this whole
+ * release" outcome through the id-list, so a second, narrower
+ * product+version selector would be a redundant control for this slice.
+ */
+export function queueBinariesDownload(depotArtifactIds: string[]): Promise<QueueBinariesDownloadResponse> {
+	return apiPost<QueueBinariesDownloadResponse>("/downloads/binaries", { depot_artifact_ids: depotArtifactIds });
 }
 
 /** `GET /system`'s disk-usage-by-store fields (api-contract.md "System, users,

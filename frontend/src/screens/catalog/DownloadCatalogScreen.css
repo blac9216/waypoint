@@ -198,6 +198,23 @@
 	font-weight: 600;
 }
 
+/* Issue #1487 AC 3: the legacy `download` path (ADR-0030, removed by #1040)
+   stays visually distinct from the new binaries-download primary action —
+   muted rather than accent-colored, and never the visually dominant button. */
+.catalog-footer__queue--legacy {
+	background: var(--panel);
+	border: 1px dashed var(--txt3);
+	color: var(--txt2);
+	font-weight: 400;
+}
+
+.catalog-footer__queue--binaries {
+	background: var(--accd);
+	border: 1px solid var(--acc);
+	color: var(--txt);
+	font-weight: 700;
+}
+
 /* --- Right rail --- */
 
 .catalog-rail {

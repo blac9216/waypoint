@@ -7,6 +7,7 @@ import {
 	CredentialTestJobDetail,
 	ContentJobDetail,
 	DownloadJobDetail,
+	BinariesDownloadJobDetail,
 	CatalogIndexJobDetail,
 	BundleJobDetail,
 	ContentLibrarySyncJobDetail,
@@ -33,6 +34,7 @@ describe("JOB_DETAIL_RENDERERS / resolveJobDetailRenderer (issue #591)", () => {
 		["purge", PurgeJobDetail],
 		["catalog-index", CatalogIndexJobDetail],
 		["download", DownloadJobDetail],
+		["binaries-download", BinariesDownloadJobDetail],
 		["bundle-export", BundleJobDetail],
 		["bundle-import", BundleJobDetail],
 		["content-library-sync", ContentLibrarySyncJobDetail],
@@ -55,7 +57,16 @@ describe("JOB_DETAIL_RENDERERS / resolveJobDetailRenderer (issue #591)", () => {
 		// fallback per the AC), which this test does not treat as a failure;
 		// it only guards that today's known set is NOT silently generic.
 		const COMPLIANCE = ["discover", "credential-test", "scan", "remediate", "content-pull", "content-import", "purge"];
-		const DOWNLOAD = ["catalog-index", "download", "bundle-export", "bundle-import", "content-library-sync", "update", "tool-install"];
+		const DOWNLOAD = [
+			"catalog-index",
+			"download",
+			"binaries-download",
+			"bundle-export",
+			"bundle-import",
+			"content-library-sync",
+			"update",
+			"tool-install",
+		];
 		for (const jobType of [...COMPLIANCE, ...DOWNLOAD]) {
 			expect(resolveJobDetailRenderer(jobType)).not.toBe(GenericJobDetail);
 		}

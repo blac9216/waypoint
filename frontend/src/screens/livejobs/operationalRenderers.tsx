@@ -115,6 +115,31 @@ export function DownloadJobDetail({ job, group }: JobDetailProps) {
 }
 
 /**
+ * Binaries download (issue #1479/#1482, ADR-0030): the connected VCFDT
+ * catalog-selection path queued by the Download Catalog screen's "Download"
+ * action, distinct from the legacy `download` job type above (labeled
+ * "Legacy download (UMDS-only)" in that screen — see issue #1487).
+ *
+ * Renders through the same `TypeDetailShell` -> `GenericJobDetail` state/log
+ * presentation every other type uses here, which is exactly the raw
+ * state-and-log-lines view issue #1487 AC 2 asks for. No progress bar:
+ * progress sampling for file-growth-based transfers is not yet available
+ * (a future addition, separately tracked) — this renderer only ever shows
+ * the job's own `state` and raw log lines, never a fabricated percentage.
+ */
+export function BinariesDownloadJobDetail({ job, group }: JobDetailProps) {
+	return (
+		<TypeDetailShell
+			job={job}
+			group={group}
+			kicker="Binaries download"
+			facts={<SummaryFact label="Stage" value={job.stage ?? "—"} />}
+			domainLink={{ to: "/catalog", label: "View Download Catalog" }}
+		/>
+	);
+}
+
+/**
  * Bundle export/import (ADR-0015 air-gap bundles): no registered handler yet
  * (`JobCapabilities.cs`: "later") — the closed `job_type` set already
  * reserves these values, so the registry maps them now rather than falling

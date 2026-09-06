@@ -24,6 +24,7 @@ import {
 	friendlyProductName,
 	groupArtifactsByProduct,
 	isKubernetesProduct,
+	queueBinariesDownload,
 	queueDownloads,
 	syncCatalog,
 	type ArtifactStatus,
@@ -83,6 +84,8 @@ export function DownloadCatalogScreen() {
 	const [selected, setSelected] = useState<Set<string>>(new Set());
 	const [queueError, setQueueError] = useState<string | null>(null);
 	const [queueing, setQueueing] = useState(false);
+	const [binariesQueueError, setBinariesQueueError] = useState<string | null>(null);
+	const [binariesQueueing, setBinariesQueueing] = useState(false);
 
 	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user));
 	const catalogPull = useCatalogPull();
@@ -212,6 +215,40 @@ export function DownloadCatalogScreen() {
 
 	const retryArtifact = useCallback((id: string) => doQueue([id]), [doQueue]);
 
+	/**
+	 * Issue #1487: the new connected binaries-download path
+	 * (`POST /downloads/binaries`), distinct from `doQueue`'s legacy
+	 * `POST /downloads` above. Same Operator+ floor (the endpoint's own
+	 * `[RequireOperatorRole]`, mirrored client-side by `canQueue`/`queueGate`)
+	 * and the same optimistic pattern: clear the selection and re-fetch
+	 * immediately on success so the queued rows flip state without waiting on
+	 * SSE, surfacing any failure inline rather than losing the selection.
+	 */
+	const doBinariesQueue = useCallback(
+		async (ids: string[]) => {
+			if (ids.length === 0 || !canQueue) {
+				return;
+			}
+			setBinariesQueueing(true);
+			setBinariesQueueError(null);
+			try {
+				await queueBinariesDownload(ids);
+				clearSelection();
+				load({
+					search: search.trim() || undefined,
+					product: product || undefined,
+					version: version || undefined,
+					status: status || undefined,
+				});
+			} catch (err) {
+				setBinariesQueueError(err instanceof ApiError ? err.message : "Could not queue the selected downloads.");
+			} finally {
+				setBinariesQueueing(false);
+			}
+		},
+		[canQueue, clearSelection, load, search, product, version, status],
+	);
+
 	const doSync = useCallback(async () => {
 		setSyncing(true);
 		try {
@@ -328,19 +365,33 @@ export function DownloadCatalogScreen() {
 							<span className="mono">{formatBytesInline(selectedTotalBytes)}</span>
 							{transferEstimate && <span className="mono">{transferEstimate}</span>}
 						</div>
+						{binariesQueueError && <div className="catalog-footer__error">{binariesQueueError}</div>}
 						{queueError && <div className="catalog-footer__error">{queueError}</div>}
 						<div className="catalog-footer__spacer" />
 						<button type="button" onClick={clearSelection}>
 							Clear
 						</button>
+						{/* Legacy path (ADR-0030): POST /downloads, removed entirely by
+						    issue #1040. Kept visually and lexically distinct from the new
+						    binaries-download action below — never the primary button. */}
 						<button
 							type="button"
-							className="catalog-footer__queue"
+							className="catalog-footer__queue catalog-footer__queue--legacy"
 							onClick={() => doQueue(Array.from(selected))}
 							{...queueGate}
 							disabled={queueGate.disabled || queueing}
+							title={queueGate.title ?? "Legacy queue path — superseded by Download, removed in a later issue."}
 						>
-							{queueing ? "Queuing…" : `Queue ${selected.size} downloads`}
+							{queueing ? "Queuing…" : `Legacy download (UMDS-only) — ${selected.size}`}
+						</button>
+						<button
+							type="button"
+							className="catalog-footer__queue catalog-footer__queue--binaries"
+							onClick={() => doBinariesQueue(Array.from(selected))}
+							{...queueGate}
+							disabled={queueGate.disabled || binariesQueueing}
+						>
+							{binariesQueueing ? "Queuing…" : `Download ${selected.size}`}
 						</button>
 					</div>
 				)}
