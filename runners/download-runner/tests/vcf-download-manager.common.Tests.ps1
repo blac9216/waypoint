@@ -211,20 +211,27 @@ Describe 'Get-FileManifest' {
 			return
 		}
 
-		$Root = Join-Path -Path $TestDrive -ChildPath 'manifest-locked'
+		# Round-1 review finding F4: the fixture root must NOT contain the
+		# locked child's own name, or a wildcard match against the root name
+		# alone (which every thrown message already interpolates via
+		# "under '$Directory'") would pass against an implementation that
+		# reports nothing useful about which subdirectory failed.
+		$Root = Join-Path -Path $TestDrive -ChildPath 'manifest-scan-root'
 		$Good = Join-Path $Root 'good'
-		$Locked = Join-Path $Root 'locked'
+		$Sealed = Join-Path $Root 'sealed'
 		New-Item -Path $Good -ItemType Directory -Force | Out-Null
-		New-Item -Path $Locked -ItemType Directory -Force | Out-Null
+		New-Item -Path $Sealed -ItemType Directory -Force | Out-Null
 		Set-Content -Path (Join-Path $Good 'f.txt') -Value 'abc' -NoNewline
-		Set-Content -Path (Join-Path $Locked 'hidden.txt') -Value 'xyz' -NoNewline
+		Set-Content -Path (Join-Path $Sealed 'hidden.txt') -Value 'xyz' -NoNewline
 
 		try {
-			& chmod 000 $Locked
+			& chmod 000 $Sealed
+			Mock Write-Log {}
 
-			{ Get-FileManifest -Directory $Root } | Should -Throw -ExpectedMessage '*locked*'
+			{ Get-FileManifest -Directory $Root } | Should -Throw -ExpectedMessage "*$Sealed*"
+			Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like "*$Sealed*" }
 		} finally {
-			& chmod 700 $Locked
+			& chmod 700 $Sealed
 		}
 	}
 }
@@ -272,18 +279,23 @@ Describe 'Remove-EmptyDirs' {
 			return
 		}
 
-		$Root = Join-Path -Path $TestDrive -ChildPath 'prune-locked'
-		$Locked = Join-Path $Root 'locked'
-		New-Item -Path $Locked -ItemType Directory -Force | Out-Null
-		Set-Content -Path (Join-Path $Locked 'hidden.txt') -Value 'xyz' -NoNewline
+		# Round-1 review finding F4: same rationale as Get-FileManifest's case
+		# above -- the root's own name must not contain the locked child's
+		# name, and the assertion must key off the child's own path.
+		$Root = Join-Path -Path $TestDrive -ChildPath 'prune-scan-root'
+		$Sealed = Join-Path $Root 'sealed'
+		New-Item -Path $Sealed -ItemType Directory -Force | Out-Null
+		Set-Content -Path (Join-Path $Sealed 'hidden.txt') -Value 'xyz' -NoNewline
 
 		try {
-			& chmod 000 $Locked
+			& chmod 000 $Sealed
+			Mock Write-Log {}
 
-			{ Remove-EmptyDirs -Directory $Root } | Should -Throw -ExpectedMessage '*locked*'
-			Test-Path -Path $Locked | Should -BeTrue
+			{ Remove-EmptyDirs -Directory $Root } | Should -Throw -ExpectedMessage "*$Sealed*"
+			Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like "*$Sealed*" }
+			Test-Path -Path $Sealed | Should -BeTrue
 		} finally {
-			& chmod 700 $Locked
+			& chmod 700 $Sealed
 		}
 	}
 }
