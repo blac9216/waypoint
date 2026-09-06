@@ -36,7 +36,9 @@ public sealed class VmToolsVersionsFileParserTests
 		13322 esx/9.0.2u1 25300111 13.0.10 25100222
 		13317 esx/9.0.1u1 25290000 RC-unparseable-string 25090000
 		13312 esx/0.0 12.5.4 24900000-build
+		6224 esx/4.1 260247 8.3.2
 		this row has too many columns to ever be five 1 2 3
+		99999 esx/1.0 1.2.3
 		""";
 
 	[Fact]
@@ -44,8 +46,8 @@ public sealed class VmToolsVersionsFileParserTests
 	{
 		VmToolsVersionsFileParseResult result = new VmToolsVersionsFileParser().Parse(FixtureVersionsFile);
 
-		Assert.Equal(4, result.Mappings.Count);
-		Assert.Equal([0, 1, 2, 3], result.Mappings.Select(m => m.SequenceInFile));
+		Assert.Equal(5, result.Mappings.Count);
+		Assert.Equal([0, 1, 2, 3, 4], result.Mappings.Select(m => m.SequenceInFile));
 	}
 
 	[Fact]
@@ -93,6 +95,28 @@ public sealed class VmToolsVersionsFileParserTests
 		Assert.Equal(2, unparseable.SequenceInFile);
 	}
 
+	/// <summary>
+	/// The other blankable-column shape from #1030 finding 1: a 4-token row whose
+	/// column 2 is NOT "esx/0.0" is missing column 5 (Tools build), on very old rows --
+	/// not column 3 (ESXi build). Column-2-based disambiguation must tell this apart
+	/// from <see cref="Parse_EsxZeroZero_MeansNotBundled_AndIsNotTreatedAsAnError"/>'s
+	/// shape rather than treating every 4-token row as "ESXi build missing".
+	/// </summary>
+	[Fact]
+	public void Parse_FourTokenRow_NotEsxZeroZero_MeansToolsBuildMissing_NotEsxiBuild()
+	{
+		VmToolsVersionsFileParseResult result = new VmToolsVersionsFileParser().Parse(FixtureVersionsFile);
+
+		VmToolsEsxVersionMapping row = result.Mappings.Single(m => m.ToolsVersionCode == "6224");
+		Assert.Equal("esx/4.1", row.EsxiVersionDir);
+		Assert.Equal("260247", row.EsxiBuild);
+		Assert.Equal("8.3.2", row.ToolsVersionRaw);
+		Assert.Equal(8, row.ToolsVersionMajor);
+		Assert.Equal(3, row.ToolsVersionMinor);
+		Assert.Equal(2, row.ToolsVersionPatch);
+		Assert.Null(row.ToolsBuild);
+	}
+
 	[Fact]
 	public void Parse_EsxZeroZero_MeansNotBundled_AndIsNotTreatedAsAnError()
 	{
@@ -101,16 +125,18 @@ public sealed class VmToolsVersionsFileParserTests
 		VmToolsEsxVersionMapping notBundled = result.Mappings.Single(m => m.EsxiVersionDir == "esx/0.0");
 		Assert.Null(notBundled.EsxiBuild);
 		Assert.Equal("12.5.4", notBundled.ToolsVersionRaw);
+		Assert.Equal("24900000-build", notBundled.ToolsBuild);
 	}
 
 	[Fact]
-	public void Parse_MalformedRow_IsSkippedAndSurfacedAsAWarning_NeverSwallowed()
+	public void Parse_MalformedRows_AreSkippedAndSurfacedAsWarnings_NeverSwallowed()
 	{
 		VmToolsVersionsFileParseResult result = new VmToolsVersionsFileParser().Parse(FixtureVersionsFile);
 
-		Assert.Single(result.Warnings);
-		Assert.Contains("malformed row", result.Warnings[0], StringComparison.Ordinal);
+		Assert.Equal(2, result.Warnings.Count);
+		Assert.All(result.Warnings, w => Assert.Contains("malformed row", w, StringComparison.Ordinal));
 		Assert.DoesNotContain(result.Mappings, m => m.RawRow.StartsWith("this row has too many", StringComparison.Ordinal));
+		Assert.DoesNotContain(result.Mappings, m => m.ToolsVersionCode == "99999");
 	}
 
 	[Fact]

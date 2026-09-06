@@ -40,9 +40,14 @@ public sealed partial class VmToolsVersionsFileParser : IVmToolsVersionsFilePars
 				continue;
 			}
 
-			// Whitespace-separated, but the last column (Tools build) is legitimately
-			// blank on very old rows (#1030 finding 1) -- split on runs of whitespace so a
-			// blank trailing column collapses rather than shifting the others.
+			// Whitespace-separated, but two columns are legitimately blank on some rows
+			// (#1030 finding 1: column 3, ESXi build, when column 2 is "esx/0.0"; column 5,
+			// Tools build, on very old rows) -- split on runs of whitespace so either
+			// blank column collapses to a 4-token row rather than shifting the others. A
+			// 4-token row is disambiguated below by inspecting column 2, since token count
+			// alone cannot tell the two blankable-column cases apart. Any row that is not
+			// 4 or 5 tokens is some other malformed shape and is captured and skipped with
+			// a warning below.
 			string[] columns = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
 			if (columns.Length is < 4 or > 5)
 			{
@@ -52,10 +57,16 @@ public sealed partial class VmToolsVersionsFileParser : IVmToolsVersionsFilePars
 
 			string toolsVersionCode = columns[0];
 			string esxiVersionDir = columns[1];
-			// A row with only 4 whitespace-separated tokens is missing the ESXi-build
-			// column entirely (#1030 finding 1: blank when column 2 is esx/0.0, this Tools
-			// build not being bundled with any ESXi) -- the remaining two tokens are still
-			// the Tools version and Tools build, just shifted left by the missing column.
+			// A 4-token row is missing exactly one of two blankable columns (#1030
+			// finding 1), and which one is missing is disambiguated by column 2, not by
+			// token count alone:
+			//   - column 3 (ESXi build) is blank exactly when column 2 is "esx/0.0" --
+			//     "this Tools build is not (yet) bundled with any ESXi" -- so the
+			//     remaining two tokens are Tools-version-raw and Tools-build, shifted
+			//     left by the missing ESXi-build column.
+			//   - otherwise, column 5 (Tools build) is the one blank on very old rows,
+			//     so the remaining two tokens are ESXi-build and Tools-version-raw,
+			//     unshifted, with Tools-build null.
 			string? esxiBuild;
 			string? toolsVersionRaw;
 			string? toolsBuild;
@@ -65,11 +76,17 @@ public sealed partial class VmToolsVersionsFileParser : IVmToolsVersionsFilePars
 				toolsVersionRaw = columns[3];
 				toolsBuild = columns[4];
 			}
-			else
+			else if (esxiVersionDir == "esx/0.0")
 			{
 				esxiBuild = null;
 				toolsVersionRaw = columns[2];
 				toolsBuild = columns[3];
+			}
+			else
+			{
+				esxiBuild = columns[2];
+				toolsVersionRaw = columns[3];
+				toolsBuild = null;
 			}
 
 			(int? major, int? minor, int? patch) = ParseVersionSegments(toolsVersionRaw);
