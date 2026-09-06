@@ -569,12 +569,14 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## What CI covers — and does not
 
-GitHub Actions runs five workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
+GitHub Actions runs six workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
 [`backend.yml`](../.github/workflows/backend.yml),
 [`frontend.yml`](../.github/workflows/frontend.yml),
 [`deploy.yml`](../.github/workflows/deploy.yml) (all four added in issue
 [#79](https://github.com/blac9216/waypoint/issues/79)), and
-[`skills-shellcheck.yml`](../.github/workflows/skills-shellcheck.yml) (issue #1231):
+[`skills-shellcheck.yml`](../.github/workflows/skills-shellcheck.yml) (issue #1231),
+plus [`download-runner.yml`](../.github/workflows/download-runner.yml) (PR #1716),
+which is still plain path-filtered and is therefore not in the table below:
 
 | Workflow | Real work gated on | What it runs | Check-run context(s) |
 | --- | --- | --- | --- |
@@ -586,7 +588,7 @@ GitHub Actions runs five workflows — [`sanitize.yml`](../.github/workflows/san
 
 `sanitize` is a hard gate on everything — a docs-only change still gets scanned,
 because a leaked hostname or token is just as real in a markdown file as in code. The
-other four workflows are **always-report** (issue #232): each runs on every PR/push
+other four workflows in the table are **always-report** (issue #232): each runs on every PR/push
 regardless of path, but the real work above only executes when its own `changes` job
 (dorny/paths-filter) says the relevant paths changed. A final always-run gate job in
 each workflow owns the check-run context listed above, and reports success when the
