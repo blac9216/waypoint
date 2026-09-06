@@ -140,6 +140,11 @@ describe("DownloadCatalogScreen", () => {
 	let queuePostBody: unknown;
 	let binariesPostBody: unknown;
 	let binariesPostResponse: { status: number; body: unknown };
+	/** Seed for `GET /api/v1/downloads` — the whole legacy queue,
+	 * unfiltered by state, mirroring `DownloadsController.ListDownloads`
+	 * (review round 2 finding C: a terminal legacy row for an artifact must
+	 * not block that artifact's fresh binaries-download "queued" badge). */
+	let legacyQueueSeed: unknown[];
 	let pullPostCount: number;
 	let pullStatus: CatalogPullStatus;
 	let pullPostResponse: { status: number; body: unknown };
@@ -155,6 +160,7 @@ describe("DownloadCatalogScreen", () => {
 		pullStatus = initialPullStatus;
 		pullPostResponse = { status: 202, body: { run_id: "pull-run-1", job_id: "pull-job-1" } };
 		binariesPostResponse = { status: 202, body: { run_id: "bin-run-1", depot_artifact_ids: [] } };
+		legacyQueueSeed = [];
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			fetchCalls.push({ url, init });
@@ -183,8 +189,8 @@ describe("DownloadCatalogScreen", () => {
 				pullPostCount += 1;
 				return jsonResponse(pullPostResponse.body, pullPostResponse.status);
 			}
-			if (url === "/api/v1/downloads" && (!init || init.method === undefined)) {
-				return jsonResponse([]);
+			if (url === "/api/v1/downloads" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse(legacyQueueSeed);
 			}
 			if (url === "/api/v1/downloads" && init?.method === "POST") {
 				queuePostBody = JSON.parse(init.body as string);
@@ -337,6 +343,37 @@ describe("DownloadCatalogScreen", () => {
 		// this response, not a re-fetch (the backend does not touch
 		// depot_artifacts yet — issue #1482).
 		expect(screen.getAllByTitle("queued").length).toBe(2);
+	});
+
+	it("review round 2 finding C: a fresh Download still shows queued for an artifact with a terminal legacy GET /downloads row", async () => {
+		installFetchMock("Operator");
+		// A prior legacy download of this same artifact left a TERMINAL row in
+		// GET /downloads (DownloadsController.ListDownloads lists the whole
+		// queue, unfiltered by state) — this must not block the fresh
+		// binaries-download enqueue's own "queued" badge for the same artifact.
+		legacyQueueSeed = [
+			{
+				id: "q-legacy-1",
+				artifact_id: "art-1",
+				job_id: "job-legacy-1",
+				run_id: "run-legacy-1",
+				state: "verified",
+				progress_percent: 100,
+				rate_bytes_per_sec: null,
+				eta_seconds: null,
+				retries: 0,
+			},
+		];
+		await mount();
+		await waitFor(() => expect(screen.getByTitle("verified")).toBeInTheDocument());
+
+		binariesPostResponse = { status: 202, body: { run_id: "bin-run-8", depot_artifact_ids: ["art-1"] } };
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		fireEvent.click(screen.getByText("Download 1"));
+
+		await waitFor(() => expect(binariesPostBody).toEqual({ depot_artifact_ids: ["art-1"] }));
+		await waitFor(() => expect(screen.getByTitle("queued")).toBeInTheDocument());
+		expect(screen.queryByTitle("verified")).not.toBeInTheDocument();
 	});
 
 	it("issue #1487 finding 1: an errored Download leaves nothing marked queued and no run notice", async () => {

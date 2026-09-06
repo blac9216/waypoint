@@ -61,6 +61,14 @@ const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 // to fabricate a per-artifact status.
 const RUN_TERMINAL_STATES = new Set(["completed", "completed_with_failures", "aborted"]);
 
+// `DownloadQueueItem.state` values that mean an artifact is genuinely in
+// flight on the legacy `download` path (docs/api-contract.md's queue-item
+// states) — used only to decide whether a fresh binaries-download enqueue's
+// "queued" placeholder should yield to an existing `byArtifact` entry
+// (review round 2 finding C: a TERMINAL legacy entry — `verified`/`failed` —
+// carries no live progress and must not win over the fresh enqueue).
+const IN_FLIGHT_QUEUE_STATES = new Set(["queued", "downloading", "verifying"]);
+
 function formatSyncTime(iso: string | null): string {
 	if (!iso) {
 		return "never synced";
@@ -362,11 +370,19 @@ export function DownloadCatalogScreen() {
 	// synthesized "queued" placeholder for every artifact this session's own
 	// `POST /downloads/binaries` calls just enqueued (`queuedByArtifact`) —
 	// reuses ArtifactTable's existing `queued`/`--warn` status rendering
-	// rather than inventing a second display path. The real queue item wins
-	// on any overlap (it carries live progress the placeholder cannot).
+	// rather than inventing a second display path. `byArtifact` is seeded
+	// from `GET /downloads`, which lists the WHOLE legacy queue with no state
+	// filter (`DownloadsController.ListDownloads`), so an artifact previously
+	// downloaded through the legacy path can already carry a TERMINAL entry
+	// here (`verified`/`failed`) — that entry carries no live progress and
+	// must not win over a fresh enqueue. The placeholder only yields to an
+	// existing entry that is genuinely in flight (`queued`/`downloading`/
+	// `verifying`); it overwrites a terminal one (or a missing one) so a
+	// re-download of an already-verified/failed artifact still shows queued.
 	const displayByArtifact = new Map(byArtifact);
 	for (const [artifactId, runId] of queuedByArtifact) {
-		if (displayByArtifact.has(artifactId)) {
+		const existing = displayByArtifact.get(artifactId);
+		if (existing && IN_FLIGHT_QUEUE_STATES.has(existing.state)) {
 			continue;
 		}
 		displayByArtifact.set(artifactId, {
