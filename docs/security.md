@@ -432,6 +432,95 @@ secret material; several (trust bypass, SSH cleanup failure) additionally surfac
 persistent in-app alerts because they represent an ongoing risk posture, not merely
 a historical fact.
 
+## Download domain: repo credentials, legacy token, and serving auth (epic #16, ADRs 0029–0032/0034, issue #1034)
+
+Reconciles this document with the approved download-parity design (#16, ratified
+research #1026) against what has actually shipped. Full endpoint list is
+`docs/api-contract.md`'s "Depot catalog & downloads" section; this section states the
+security-relevant facts and consequences.
+
+**Legacy Download Token — demoted, not retired, and no new consumer is built.** The
+2026-08-29 research ratification (owner agreement comment on #16) demoted the legacy
+Download Token credential (`CredentialTypes.LegacyDownloadToken`) to a legacy slot for
+ad-hoc 7.x/8.x host/vApp updates only, with "nothing new built on the token." The
+original design's UMDS URL-swap/ephemeral-render/log-redaction consumer described in
+issue #1034's proposed changes was written against the pre-ratification UMDS-binary
+plan (owner grill decisions 9–10); **ADR-0032 retired that whole plan** — UMDS
+acquisition is VCFDT-only, and the ESX/patch store's credential is the Activation Code,
+never the legacy token. As shipped, `CredentialTypes.LegacyDownloadToken` is: stored
+like any other credential (envelope-encrypted, write-only responses, control 3 above);
+health-reported independently and non-gating at `GET /downloads/readiness`
+(`DownloadsController.GetReadiness` — "reported for visibility... but never gates
+`Ready`"); and exercised by `CredentialTestJobHandler`'s connectivity test. **No code
+path performs a URL swap, an ephemeral render, or redaction specific to this token** —
+there is no consumer built yet, and per the ratification none beyond the legacy
+ad-hoc-update use case is planned. If a future ad-hoc update lane is built against it,
+it inherits the same log-scrubbing-at-the-sink and never-in-argv controls (Leakage
+controls, above) as every other secret — no token-specific mechanism exists to
+document beyond those general controls.
+
+**Repo-serving credentials (issue #1517, shipped).** `CredentialTypes.RepoBasicAuth` is
+a new credential type reusing the *existing* credential store/rotation/test machinery
+(`CredentialsController` — issue #1517's own AC: "no new rotation mechanism"). What is
+new is the **binding** layer: `RepoCredentialsController` (`/api/v1/repo-credentials`)
+maps a repo store name (ADR-0029's store vocabulary) to one such credential, gated
+**Admin-only for every verb including read** — stricter than the generic credential
+surface's Viewer-readable metadata, because per-store serving credentials sit directly
+on the machine-to-machine trust boundary ADR-0031 defines (see below), not behind
+interactive OIDC auth. The credential itself never appears in a `RepoCredentialBinding`
+response — only the bound credential's id and display name (never secret material),
+same write-only-secrets contract as every other credential.
+
+**EULA acceptance records — not built, and not planned.** The original design (owner
+grill decision 9) specified an EULA-acceptance ledger (who/when/EULA-hash) gating a
+UMDS-binary install. ADR-0032 states this plainly in its Consequences: "No
+EULA-acceptance ledger, no extracted-EULA UI flow... exist for this lane — that entire
+subsystem from decisions 9–10 is not built." Confirmed here for security-model
+completeness: there is no EULA-acceptance credential, ledger table, or endpoint
+anywhere in this codebase, and none is planned under the current (VCFDT-only) ESX
+acquisition design.
+
+**Per-location nginx auth boundaries (ADR-0031).** The app's CAC/mTLS posture (ADR-0003,
+ADR-0004) is enforced at the nginx server level (`ssl_verify_client optional`) and must
+never bleed into repo path-space — a machine consumer (vLCM, a subscribed content
+library, SDDC Manager, `tdnf`) cannot present a client certificate and must not be
+locked out by an app-level mechanism reaching further than intended. Concretely (see
+`docs/rationale/deploy.md#nginx-repo-mtls-carve-out`): every repo location leaves
+`ssl_verify_client optional` as a commented-out, explicitly-absent placeholder rather
+than inheriting the app's posture, so a later per-location auth toggle (ADR-0031's
+Waypoint-managed repo credentials, above) has a documented seam instead of an implicit
+one. Each store's auth level is independently configurable from anonymous to
+Basic-authed; research (#1027) found the consumers are not uniform (vLCM
+anonymous-only; subscribed libraries Basic-or-none, never a client cert on repo paths;
+SDDC Manager 9.1 Basic-over-HTTPS/anonymous), so ADR-0031's blocking rule — Basic only
+ever offered over HTTPS — and its anonymous-by-default posture for a store whose known
+consumer cannot authenticate at all (the ESX/patch store, for vLCM) are both
+intentional, disclosed exposures, not gaps: an operator relying on network-layer
+isolation for an anonymous-by-default store must configure that isolation themselves.
+Store isolation itself is enforced at the nginx **location** layer (a regex location
+denies direct access to the shared depot root ahead of any per-store prefix match —
+`docs/rationale/deploy.md#nginx-repo-store-subtree-aliases`), not by the underlying
+volume boundary — see the next paragraph for why that distinction has a real
+consequence for the content-library store specifically.
+
+**Content-library volume isolation — a security consequence, not just an operational
+one (ADR-0029).** Every runner-written depot store (ESX/patch, Photon, VMware Tools,
+VKS, plus VCSA/Transfer staging) is a subdirectory of one shared `depot` volume,
+isolated from each other only at the nginx location layer described above. The
+content-library store is the one exception: per the
+[#1706 owner ruling](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532)
+it gets its **own** named volume, mounted read-write on `backend` and read-only on
+`nginx`, so that a nginx/Compose misconfiguration or a bug in the backend's own
+library-write path is **architecturally incapable** of reaching into the vendor-owned
+`PROD` depot tree — a stronger guarantee than the location-layer isolation the
+runner-written stores rely on, because the content-library store is the one store a
+non-runner process (the backend, driven by interactive uploads) writes into at all. The
+depot volume can be mounted read-only for maintenance without affecting library
+operations, and vice versa. **Implementation is in flight** on issue #1706's PR at the
+time of this reconciliation — `deploy/compose.yaml` and
+`deploy/nginx/conf.d/default.conf` still reflect the pre-ruling shared-volume shape
+until that PR merges; ADR-0029 records the decision as accepted and binding regardless.
+
 ## RBAC reconciliation (epic #726)
 
 `docs/domain-model.md`'s Roles table and `docs/api-contract.md`'s RBAC summary are
@@ -478,6 +567,22 @@ beyond what those two documents already specify.
   the same baseline as separate audited events. This is a deliberate scope decision
   (single-appliance operational reality, not a large approval bureaucracy), not an
   oversight — flagged here so a reviewer does not mistake its absence for a gap.
+
+## RBAC reconciliation — download domain (epic #16, decision R2-10, issue #1034)
+
+`docs/api-contract.md`'s new "RBAC map — download domain" table is the wire-facing
+reconciliation of owner grill decision R2-10 against shipped controllers, checked
+attribute-by-attribute rather than inferred. It is not repeated here; this paragraph
+states the one finding worth a security-document callout. **One divergence is flagged,
+not silently resolved**: R2-10 names "Operator: ad-hoc downloads, library
+upload/organize," but the in-flight content-library folder/organize surface
+(`ContentLibraryFoldersController`, issue #1389, no PR opened at the time of this
+reconciliation) gates every write — including folder-only reassignment, which carries
+no destructive or persistent-configuration weight beyond the library's own existing
+scope — at Admin. This is documented as shipped-pending-review, not corrected in this
+doc-only PR (the branch is another agent's live work tonight); deferred issue #1746
+tracks resolving it either by widening the branch's authorization before merge or by
+amending R2-10 if Admin-only organize turns out to be the intended floor.
 
 ## Residual risks (accepted, documented)
 

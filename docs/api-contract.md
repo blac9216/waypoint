@@ -58,6 +58,32 @@ does not widen any non-scan job family's authority (e.g. it grants nothing towar
 `download`/`bundle-import`/`update` control), matching ADR-0022/epic #726's explicit
 "without widening non-scan job authority."
 
+### RBAC map — download domain (reconciled, decision R2-10, issue #1034)
+
+Owner grill decision R2-10 (#16): "Viewer reads; Operator: ad-hoc downloads, library
+upload/organize; Admin: subscriptions/presets, schedules/retention dials,
+deletes/purges, UMDS install/config, serving/auth dials, enrollment, tool install,
+alert acknowledge." The table below is that ruling reconciled row-by-row against the
+shipped controllers' actual `[RequireViewerRole]`/`[RequireOperatorRole]`/
+`[RequireAdminRole]` attributes (grepped directly, not inferred) as of this
+reconciliation. A ⚠️ marks a divergence between the ruling and shipped behavior — none
+are silently normalized away; each is documented as an accepted-for-now shipped state
+plus a deferred issue.
+
+| Action family | Viewer | Operator | Admin | Shipped in | Matches R2-10? |
+|---|---|---|---|---|---|
+| Read catalog/downloads/enrollment/library/retention state | ✅ | ✅ | ✅ | `CatalogController`, `DownloadsController`, `DepotEnrollmentController`, `LibraryController`, `EsxAcquisitionController` (reads), `RetentionController` (⏳ #1453, reads) | ✅ yes |
+| Ad-hoc download enqueue (`POST /downloads/binaries`), cancel | — | ✅ | ✅ | `DownloadsController.QueueBinariesDownload`/`CancelDownload` | ✅ yes |
+| Content-library registry create/delete | — | — | ✅ | `ContentLibrariesController.Create`/`Delete` | Admin-only; R2-10 does not name library *registry* creation specifically (only "upload/organize" within one) — treated as persistent configuration, consistent with the ruling's Admin catch-all rather than a divergence. |
+| Content-library **organize** (folder create/rename/delete, item→folder assignment) | — | — | ✅ | `ContentLibraryFoldersController` (⏳ #1389, no PR yet) | ⚠️ **Divergence.** R2-10 explicitly names "library upload/organize" as Operator-tier; the in-flight branch gates every folder-organize action `[RequireAdminRole]`. Documented here, not silently narrowed to match the doc — filed as deferred issue #1746 rather than fixed in this doc-only PR (#1389 is another agent's live branch tonight). |
+| Content-library item upload | — | 🚧 planned | 🚧 planned | none yet (no upload endpoint exists) | Cannot yet be checked against shipped code; when built it must land Operator+ per R2-10 or be flagged the same way. |
+| ESX/other-lane subscriptions & presets | — | — | ✅ | `EsxAcquisitionController.CreateSubscription`/`UpdateSubscription` | ✅ yes |
+| Retention pin/unpin/purge-now/dial/review-list delete | — | — | ✅ | `RetentionController` (⏳ #1453) | ✅ yes |
+| Repo-serving credential binding (create/read/rotate/delete) | — | — | ✅ | `RepoCredentialsController` (all verbs, including read) | ✅ yes — stricter than R2-10's floor even names ("serving/auth dials" is Admin; this controller also gates *read*, which R2-10 does not explicitly require but does not forbid either). |
+| Depot enrollment (Software Depot ID, Activation Code, validate, reset) | — | — | ✅ | `DepotEnrollmentController` (all writes) | ✅ yes |
+| Catalog sync/pull (tool-driven acquisition) | — | — | ✅ | `CatalogController.Sync`/`Pull` | Not explicitly named in R2-10's list, but falls under "Admin: everything persistent or destructive" via the domain-model.md Roles catch-all; consistent, not a gap. |
+| Alert acknowledge | — | — | ✅ (🚧 planned surface) | `docs/api-contract.md` Alerts section | ✅ yes (planned, matches the existing epic #726 alert model adopted wholesale per decision R2-9) |
+
 ## Resources
 
 ### Auth
@@ -698,29 +724,65 @@ overwriting it, giving a versioned audit trail entirely from table state.
 | `/stigman/test` | POST | Reachability + API version. Outcome is a closed set: `ok`\|`unreachable`\|`auth_failed`\|`not_configured`\|`master_key_unavailable` — the last is distinct from `auth_failed`: it means the appliance's own secrets master key (ADR-0005) could not decrypt the configured credential, not that the STIG Manager credential itself is wrong (issue #430). |
 
 ### Depot catalog & downloads (connected mode)
+
+Reconciled against the approved design (#16, ratified research #1026, ADRs 0028–0034)
+per issue #1034. ✅ marks a shipped resource (issue/PR cited); 🚧 marks planned; ⏳
+marks an in-flight PR at the time of this reconciliation (branch/issue cited — no PR
+number exists yet where none is given). `POST /downloads` and the `download` job type
+are **retired by design** (ADR-0030) — the row below is kept only so a caller migrating
+off it can find the replacement; removing it from the schema/allowlist/UI is tracked
+separately as issue #1040 (not yet landed).
+
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/catalog/artifacts` | GET | Indexed depot: artifact, sha256, product, version, size, status (incl. `downloading` w/ progress). Browsable without the tool installed. |
-| `/catalog/sync` | POST | Local, credential-free re-index of the offline depot share only (issue #690 AC). 202 → `catalog-index` job. |
-| `/catalog/pull` | GET | Issue #687: connected vendor catalog-pull readiness (gated on `/downloads/enrollment` state `validated`) plus last attempt/success facts (`last_outcome`, `last_failure_reason`, `last_success_at`, `last_success_item_count`) (Viewer+). Null-valued fields are omitted, not `null`. |
-| `/catalog/pull` | POST | Distinct from `/catalog/sync`: runs the installed managed tool's `metadata download` with the stored Activation Code, authenticates and atomically promotes the result, then indexes it (Admin-only). 202 → `catalog-pull` job; 409 `catalog_pull_not_ready` if the enrollment gate is not satisfied. A zero-item result is only reported success when the authenticated vendor catalog is genuinely empty. |
-| `/downloads` | GET, POST | POST: artifact ids → queued `download` jobs (Operator+). Queue view: rate, ETA, retries. Legacy URL-template path (#1040 removes it). |
-| `/downloads/{id}` | DELETE | Cancel. |
-| `/downloads/binaries` | POST | Issue #1479 (epic #1181): connected VCFDT catalog-selection path — a set of depot artifact ids, or a whole release (`product`+`version`, resolved to its member artifacts at enqueue time) → one run with one `binaries-download` job per artifact (Operator+, same scan-style run→per-item-job fanout as `/downloads`). This slice only enqueues; the download-runner handler that claims and executes these jobs is #1482. |
-| `/downloads/readiness` | GET | Issue #560, extended by #690: combined Activation Code health + legacy Download Token health (reported independently; the legacy token never gates readiness) + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
-| `/downloads/enrollment` | GET | Issue #691: assisted VCF 9.1 Software Depot enrollment state machine (`tool_unavailable`→`depot_id_unavailable`→`awaiting_portal_registration`→`activation_code_stored`→`validated`/`auth_failing`), the non-secret Depot ID/pairing timestamps, and the corrected `.com` registration URL (Viewer+). The Activation Code value never appears in this or any other response. |
-| `/downloads/enrollment/depot-id` | POST | 202 → `depot-enrollment` job (`generate-depot-id`): invokes the installed tool noninteractively for the Software Depot ID (Admin-only, same floor as the credential this flow produces). |
-| `/downloads/enrollment/activation-code` | POST | Accepts an existing-or-portal-issued code; 409 if its decoded `asset_id` does not match the generated Depot ID, else stores it encrypted as the `depot-activation-code` credential (Admin-only). |
-| `/downloads/enrollment/validate` | POST | 202 → `depot-enrollment` job (`validate-code`): bounded noninteractive tool validation of the stored code (Admin-only). |
-| `/downloads/enrollment/reset` | POST | Explicit confirmed identity reset (`{"confirm": true}` required); clears the Depot ID/pairing without touching the stored credential or any legacy Download Token (Admin-only). |
+| `/catalog/artifacts` | GET | ✅ Indexed depot: artifact, sha256, product, version, size, status (incl. `downloading` w/ progress). Browsable without the tool installed (issue #193). |
+| `/catalog/unknown-files` | GET | ✅ Issue #1495/#1488: depot-share files the authenticated vendor catalog does not describe, surfaced (never silently dropped) per decision Q11's presence-model reframe (owner decision 7). Viewer+, no pagination. |
+| `/catalog/sync` | POST | ✅ Local, credential-free re-index of the offline depot share only (issue #690 AC). 202 → `catalog-index` job (Admin-only). |
+| `/catalog/pull` | GET | ✅ Issue #687: connected vendor catalog-pull readiness (gated on `/downloads/enrollment` state `validated`) plus last attempt/success facts (`last_outcome`, `last_failure_reason`, `last_success_at`, `last_success_item_count`) (Viewer+). Null-valued fields are omitted, not `null`. |
+| `/catalog/pull` | POST | ✅ Distinct from `/catalog/sync`: runs the installed managed tool's `metadata download` with the stored Activation Code, authenticates and atomically promotes the result, then indexes it (Admin-only). 202 → `catalog-pull` job; 409 `catalog_pull_not_ready` if the enrollment gate is not satisfied. A zero-item result is only reported success when the authenticated vendor catalog is genuinely empty. |
+| `/downloads` | GET, POST | 🪦 **Retired by design (ADR-0030).** POST queued the M1 `download` job type (a bare `Save-WebFile` fetch against `external_id`) — issue #968 found no authenticated Broadcom depot artifact was ever reachable through it. Superseded by `/downloads/binaries` below for vendor acquisition; mirror lanes (Photon/VMTools/VKS) get their own sync job types as each lands (Wave 5). Removal from the job-type allowlist/schema/queue UI is issue #1040, open. GET (queue list) survives unaffected — it lists whichever job types exist in the queue, not only the retired one. |
+| `/downloads/{id}` | DELETE | ✅ Cancel a single download's job without aborting the run (issue #30). |
+| `/downloads/binaries` | POST | ✅ Issue #1479/#1482 (epic #1181): the vendor-acquisition replacement for `POST /downloads` — a set of depot artifact ids, or a whole release (`product`+`version`, resolved to its member artifacts at enqueue time — decision R2-2, "whole release") → one run with one `binaries-download` job per artifact (Operator+, same scan-style run→per-item-job fanout, owner decision 18). Exactly one selection mode is required (both or neither is 400); an unknown id or empty release match is 404 before any run is created. |
+| `/downloads/readiness` | GET | ✅ Issue #560, extended by #690: combined Activation Code health + legacy Download Token health (reported independently — see `docs/security.md` — the legacy token never gates readiness) + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
+| `/downloads/enrollment` | GET | ✅ Issue #691: assisted VCF 9.1 Software Depot enrollment state machine (`tool_unavailable`→`depot_id_unavailable`→`awaiting_portal_registration`→`activation_code_stored`→`validated`/`auth_failing`), the non-secret Depot ID/pairing timestamps, and the corrected `.com` registration URL (Viewer+). The Activation Code value never appears in this or any other response. |
+| `/downloads/enrollment/depot-id` | POST | ✅ 202 → `depot-enrollment` job (`generate-depot-id`): invokes the installed tool noninteractively for the Software Depot ID (Admin-only, same floor as the credential this flow produces). |
+| `/downloads/enrollment/activation-code` | POST | ✅ Accepts an existing-or-portal-issued code; stores it encrypted as the `depot-activation-code` credential (Admin-only). **Correction (this issue): the previous note describing a 409 on decoded `asset_id` mismatch against the generated Depot ID was stale — "identity follows the code" (owner decision 2026-08-25) means no such match is required or enforced.** `DepotEnrollmentController.AcceptActivationCode` only rejects a structurally-undecodable code (400 `invalid_activation_code`, no `asset_id` field) or a same-request race on credential creation (409 `name_taken`); any structurally valid code is accepted and re-pairs the enrollment, replacing a prior code in place. |
+| `/downloads/enrollment/validate` | POST | ✅ 202 → `depot-enrollment` job (`validate-code`): bounded noninteractive tool validation of the stored code (Admin-only). 409 `activation_code_unavailable` when no code is stored yet. |
+| `/downloads/enrollment/reset` | POST | ✅ Explicit confirmed identity reset (`{"confirm": true}` required); clears the Depot ID/pairing without touching the stored credential or any legacy Download Token (Admin-only). |
+| `/downloads/esx/platforms` | GET | ✅ Issue #1470 (epic #1181): the `lcm.esx.supported.host.platforms` vendor vocabulary, read fresh at request time — never hardcoded (Viewer+). Backs the ESX patch store's VCFDT-only acquisition (ADR-0032; the original UMDS-binary install/config/EULA design from owner grill decisions 9–10 is **not built and will not be** — see `docs/security.md`). |
+| `/downloads/esx/subscriptions` · `/downloads/esx/subscriptions/{id}` | GET, POST, PATCH | ✅ Issue #1470: ESX acquisition subscription CRUD — `name`, `selected_platforms` (validated against the current vocabulary; an unknown key is 400), `enabled`. Read Viewer+, write Admin-only (decision R2-10 "Admin: subscriptions/presets"). `PATCH {enabled:false}` disables without deleting history. **Not yet wired**: the sync job that consumes these subscriptions (#1484) and the platform×generation shipped presets themselves (ADR-0028) — this controller only manages the rows a future sync job will read. |
+| `/download-retention/state` | GET | ⏳ In flight (issue #1453, branch `1453-retention-api`, no PR opened yet as of this reconciliation): ADR-0034 grace-period retention state per tracked item — approaching/past grace period/pinned, three distinct states per the ADR. Viewer+. |
+| `/download-retention/{id}/pin` · `/download-retention/{id}/unpin` | POST | ⏳ In flight (#1453): exempt/restore an item from the retention sweep indefinitely. Admin-only. |
+| `/download-retention/{id}/purge-now` | POST | ⏳ In flight (#1453): skip the remaining grace period deliberately. Admin-only. |
+| `/download-retention/dial` | GET, PUT | ⏳ In flight (#1453): the separate, operator-configurable manual/ad-hoc download retention dial (ADR-0034 — distinct from any subscription's own grace period). Read Viewer+, write Admin-only. |
+| `/download-retention/review-list` | GET, DELETE | ⏳ In flight (#1453): the union of orphaned (no longer matched by any subscription) and out-of-scope (never subscribed) content — per ADR-0034, never auto-removed by the sweep, surfaced here for explicit operator deletion only. Read Viewer+, delete Admin-only. |
+| `/repo-credentials` · `/repo-credentials/{store}` | GET, PUT, DELETE | ✅ Issue #1517: per-store (ADR-0029's store name vocabulary) binding to an existing `repo-basic-auth`-type credential — this controller owns only the binding record; creating/rotating the underlying credential is the existing `/credentials` surface, reused unmodified (no new rotation mechanism, issue #1517 AC). **Admin-only for every verb, including read** — stricter than the generic `/credentials` surface's Viewer-readable metadata, per issue #1517's explicit AC that a non-Admin cannot "create, read, or rotate a repo-serving credential." 400 `invalid_store`/`credential_not_found`/`incompatible_credential_type`; 404 when a valid store has no binding yet. |
+
+### ESX patch store — what is and is not built
+
+ADR-0032 replaced the original owner-grill UMDS-binary design (decisions 9–10: a
+prepare/install two-job split, an extracted-EULA accept gate, ephemeral `-S`-flag
+token/config commands) with VCFDT-only acquisition across every supported generation
+(6.7–9.1). **None of the UMDS-binary install/config/EULA API surface is built, and
+none is planned** — there is no `POST /downloads/esx/install`, no EULA-acceptance
+endpoint, and no ephemeral-token-config endpoint. `/downloads/esx/platforms` and
+`/downloads/esx/subscriptions` above are the entire shipped surface for this lane; the
+sync job that actually acquires content (#1484) and the generation-scoped hardlinked
+view-tree machinery (ADR-0032) are planned, not yet implemented.
 
 ### Library & content library
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/library/items` | GET | Presence model per mode: `present`\|`superseded`\|`in_depot`(connected)\|`missing`(air-gapped, vs last bundle manifest); provenance. |
-| `/library/request-manifest` | GET | Air-gapped "export request manifest". |
-| `/content-library/items` | GET, POST, DELETE | OVF/ISO/files only; upload, import-from-repository. |
-| `/content-library/copy-to-vcenter` | POST | 202 → `content-library-sync` job. |
+| `/library/items` | GET | ✅ Presence model per mode: `present`\|`superseded`\|`in_depot`(connected)\|`missing`(air-gapped, vs last bundle manifest); provenance (issue #36). |
+| `/library/request-manifest` | GET | ✅ Air-gapped "export request manifest" (issue #36). |
+| `/content-libraries` · `/content-libraries/{id}` | GET, POST, DELETE | ✅ Issue #1391 (epic #1185, design #16 §6): the library **registry** — create/list/delete-when-empty (409 `content_library_not_empty` if the directory still has content — no cascading delete this slice). Read Viewer+, write Admin-only. Name is restricted to one safe path segment (it doubles as the directory leaf name). This is registry management only — no item CRUD or upload yet (see below). |
+| `/content-libraries/{libraryId}/folders` · `/content-libraries/{libraryId}/folders/{folderId}` | GET, POST, PATCH, DELETE | ⏳ In flight (issue #1389, no PR opened yet): the DB-only virtual organization layer (owner decision 16 — "never on disk," VCSP stays flat) — folder create/rename/delete and `PATCH /content-libraries/{libraryId}/items/{itemId}/folder` to (re)assign an item. Read Viewer+; **every write (including folder assignment) is Admin-only in the current branch.** See the RBAC reconciliation below — this is a flagged divergence from decision R2-10's "Operator: ad-hoc downloads, library upload/organize," not yet resolved. |
+| Item upload (chunked/resumable) | — | 🚧 Planned (decision 16, research #1032/#1055: UpdateSession + fleet-depot resumable APIs are the parity reference). No endpoint exists yet — the 512 MiB cap referenced in older design notes was tool-upload-specific and does not apply to the planned UI-upload path. |
+| Item CRUD (list/delete within a library) | — | 🚧 Planned (issue #1396). |
+| VCSP `lib.json`/`items.json`/`item.json` writer | — | ✅ Shipped as internal machinery (issue #1393) — atomic write, correct version-counter/hrefs semantics (the sibling repo's known defects — version-counter inversion, bare hrefs — were deliberately NOT ported, per research finding #11 on #16). Not an API surface; consumed by the item-write paths above once they land. |
+| Automated add-to-library from depot/other stores | — | 🚧 Planned (decision 16). |
+| OCI bundle store / push-target consumer | — | ✅ Domain model + schema shipped (issue #1403: `OciBundle`, `PushTargetConsumer` in `Waypoint.Core.Downloads`) — registries as a push-target consumer type (research finding #8 on #1026, → #1161). **No API controller exists yet**; this is data-model-only groundwork. |
+| `/content-library/copy-to-vcenter` | POST | 🚧 Planned. Superseded in framing by decision 16 (multiple regular libraries, operator-picked sync target) but not yet built under any route. |
 
 ### Transfer bundles
 | Endpoint | Methods | Notes |
@@ -776,6 +838,17 @@ blocks readiness, the alert only surfaces it.
 New staged content and failed sync/discovery each raise their own alert `kind` for
 their distinct review-vs-diagnostic purpose (ADR-0022/0023) — they are never
 collapsed into one generic "something changed" signal.
+
+🚧 **Download-domain extension, planned (ADR-0034, decision R2-9 "adopt #726's alert
+model wholesale").** ADR-0034's grace-period retention needs three visibly distinct
+`kind` values — `retention_grace_approaching`, `retention_grace_expired` (past grace
+period, pending next sweep), and a pinned-content informational state — so an operator
+can tell "ignorable" from "needs a pin or purge-now decision" per the ADR's own
+consequence. The three-class VKS parity alert from research finding #6 on #1026 (depot
+measured NOT a superset of the public library) and per-store auth-mismatch warning
+badges (ADR-0031) are additional planned `kind` values under this same model. None of
+these exist in `AlertKinds` yet — this is a documentation of intended scope, not a
+shipped addition; the retention sweep job itself (ADR-0034) is also not yet built.
 
 ### Schedules
 | Endpoint | Methods | Notes |
@@ -1086,8 +1159,8 @@ dual-write adapter:
 | Start a Scan | `/sites`, `/targets`, `/targets/{id}/components` (planned; `/targets/{id}/inventory` shipped), `/credentials` (names only) — never `/profiles` (ADR-0022: the wizard never selects a profile) | POST `/runs/plan-preview` (planned), POST `/runs`, POST `/schedules`, POST discover (refresh) |
 | Compliance Results | compliance-filtered `/runs`, `/runs/{id}` + artifacts + attestations-applied + `/runs/{id}/jobs/{jobId}/attempts` (planned) | export bundle; Remediate entry → POST `/runs` (Admin); `POST /runs/{id}/purge` and the graph-wide retention sweep (planned) |
 | Benchmarks | `/catalog/products`, `/content-sources`, `/candidate-content` + diff/approve/activate (planned), `/baselines` (✅ shipped, issue #731) — plus shipped `/profiles`, `/profiles/{id}/controls`, `/baselines/{id}/controls/{controlId}/settings` (planned, supersedes whole-profile `/config-docs`) | PUT per-control settings (new version), resolve content conflicts, approve/waive candidate controls, ✅ stage/activate/rollback baselines (issue #731; the fuller candidate-approval-gated `/candidate-content/{id}/activate` remains planned) |
-| Download Catalog | `/catalog/artifacts`, `/downloads`, `/system` (stores) | POST downloads, catalog sync, schedule edits |
-| Library | `/library/items`, `/content-library/items` | uploads, import-from-repo, copy-to-vcenter, request-manifest |
+| Download Catalog | `/catalog/artifacts`, `/downloads` (queue list), `/downloads/esx/*`, `/system` (stores) | `POST /downloads/binaries` (retired: `POST /downloads`, ADR-0030), catalog sync, subscription CRUD, schedule edits |
+| Library | `/library/items`, `/content-libraries` (registry), `/content-libraries/{id}/folders` (⏳ #1389) | registry create/delete, folder organize (⏳ #1389), item upload (planned), request-manifest |
 | Transfer | `/bundles`, import verification detail | POST export / import / apply |
 | Configuration | `/sites`, `/targets`, `/credentials`, `/stigman`, `/compliance-content`, `/users`, `/system` | full CRUD (Admin), tests, tool install, update upload/apply |
 
