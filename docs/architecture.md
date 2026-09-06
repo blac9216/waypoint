@@ -88,7 +88,9 @@ flowchart TB
 
 ✅ **Built** (foundation and scan-slice stories, ADRs 0013/0014, issue #443): queue, dispatcher, priority,
 in-process PowerShell runspace hosting, SSE streaming, and the per-target state
-machine below are live, serving `catalog-index`/`download` (foundation story) and discovery/scan/
+machine below are live, serving `catalog-index`/`download` (foundation story, the
+latter now retirement-planned — see "Depot, catalog, and download management" below,
+[ADR-0030](adr/0030-retire-legacy-download-job-type.md)) and discovery/scan/
 NSX/SRG job types (scan-slice story). Cooperative per-job cancellation (issue #234) and
 lease-recovery sweeps also shipped. Execution ownership is now the two long-lived
 runners' alone: each runner atomically claims only its allowlisted job types, owns the
@@ -398,6 +400,84 @@ streaming, virtualization, and five-digit-job scale implementation.
 #514 can consume normalized control severity/findings but retains its dashboard query;
 #652 retains its path-containment implementation during migration and as defense in
 depth; #784 remains the optional graph-wide hold.
+
+## Depot, catalog, and download management
+
+📋 **Planned** (*Download & depot parity*, milestone
+[#11](https://github.com/blac9216/waypoint/milestone/11), epic
+[#16](https://github.com/blac9216/waypoint/issues/16)), with a handful of pieces
+already ✅ **built**: the repo path-space (below) and the `catalog-index`/
+`binaries-download` job types. The design goal is Waypoint-native parity with the
+`vcf-docker-download` predecessor and beyond it — the appliance manages the **entire**
+vendor catalog as a true VCF depot, not just VCSA binaries.
+
+**Catalog identity and presence sweep.** The authenticated vendor
+`productVersionCatalog` (pinned publisher certificate, [ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)'s
+metadata-first indexing) is the single source of artifact identity — product, version,
+size, sha256. The local disk walk under the depot is a **presence/verification
+sweep** against catalog rows, matching by relative path and size/hash; files the
+catalog does not know about surface as unknown files, never as artifacts in their own
+right. A disconnected instance receives catalog rows via transferred metadata
+([ADR-0010](adr/0010-deployment-topology.md)) — the same identity model on both sides
+of the air gap.
+
+**Store layout.** ✅ **Built** ([ADR-0029](adr/0029-depot-store-volume-topology.md),
+issue #1502/PR #1587): `vcf-download-tool` owns one `depot` volume and writes every
+runner-written store (`UMDS`/ESX-patch, `Photon`, `VKS`, `VMTools`, `ContentLibrary`,
+`VCSA`, `Transfer`) as a subtree of it; nginx mounts that volume read-only and aliases
+each subtree as its own `location`, denying direct access to the shared root. This
+replaces the original per-store-named-volume plan; ADR-0029 records why.
+📋 **Planned / in flight** (ADR-0029,
+[owner ruling 2026-09-06 on #1706](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532)):
+the content-library store — the one store the backend itself writes to, not the
+acquisition tool — gets its own `content-libraries` named volume, independent of the
+depot's lifecycle. Implementation is on #1706's PR, not yet merged as of this head.
+
+**Lanes.** Vendor acquisition is tool-driven (`binaries download --id`, issue
+#795/#1479 ✅ **built**) rather than routed through a generic download job type — the
+legacy `download` job type and `POST /downloads` are retired
+([ADR-0030](adr/0030-retire-legacy-download-job-type.md), issue #1040, 📋 not yet
+landed). Mirror lanes get their own sync job types over the `Save-WebFile` primitive:
+Photon (metadata indexed by default, sync by subscription or manual), VMware Tools (a
+full lane beyond the predecessor — whole-repo index, export-to-content-library), and
+VKS (a dual-backend lane — depot-fed VKR primary plus a public-library mirror, with a
+three-class parity alert since the depot is not a superset of the public library). The
+ESX patch store is **VCFDT-only acquisition**
+([ADR-0032](adr/0032-esx-patch-store-vcfdt-acquisition.md)) — no UMDS binary is
+installed or configured — living inside the depot tree, with generation-agnostic
+reconciliation/retention and generated hardlinked view trees for mixed-generation
+consumers.
+
+**Subscriptions and retention.** [ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md):
+every lane indexes metadata unconditionally; bytes move only via an ad-hoc request
+(Operator) or a Subscription (Admin), built from shipped VCF/VVF × generation presets
+(clone-to-custom) and one core product-aware version comparator (issue #1039, closes
+the `#572` bug class). [ADR-0034](adr/0034-grace-period-retention.md): superseded
+content inside a subscription's tracked scope enters a grace period (alertable,
+pinnable, purge-now); orphaned and out-of-scope content is never auto-removed. A
+single global refresh schedule (catalog pull → subscription evaluation → per-lane
+syncs → retention sweep) runs as independent jobs with per-lane overrides and
+manual refresh-now.
+
+**Run → per-item-job fanout.** Download runs reuse the same scan-style pattern the
+compliance domain already uses (see "The job engine" above and "Run and Job" in
+[`domain-model.md`](domain-model.md)): one Run to track, one Job per acquired item, for
+independent parallelism/resume/cancel — no second scheduler.
+
+**Serving surface.** [ADR-0031](adr/0031-repo-serving-per-location-auth.md): one
+appliance nginx serves every store's repo path-space; auth is configured **per
+location**, independent of the app's CAC/mTLS handling
+([ADR-0004](adr/0004-identity-keycloak.md) is unaffected — Keycloak never enters the
+repo-serving path). Default credential model is Waypoint-managed repo users/tokens;
+some stores (the ESX/patch store's vLCM consumer) ship anonymous by default because
+their real consumer cannot authenticate at all, surfaced with a UI warning badge
+rather than hidden.
+
+**Disk admission.** [ADR-0033](adr/0033-disk-admission-joins-capacity-model.md) (amends
+[ADR-0018](adr/0018-shared-capacity-lease-pool.md)): disk space joins CPU/memory as a
+third resource the shared capacity lease pool admits against, using indexed
+catalog/repo metadata to project a job's byte size against free space minus a
+configurable reserve before it is ever dispatched.
 
 ## Identity & authorization
 

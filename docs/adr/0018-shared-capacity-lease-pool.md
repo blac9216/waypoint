@@ -1,6 +1,7 @@
 # ADR-0018: Host-derived capacity discovery, a startup admission invariant, and a shared capacity lease pool
 
 Status: Accepted
+Amended-by: 0033
 
 Supersedes ADR-0014 §5's per-runner admission model (the "discovered cgroup limit,
 intersected with an operator cap, enforced independently by each replica's own
@@ -133,3 +134,7 @@ admission invariant that make a single runner's advertised budget honest; the fo
   start and only reveal itself through issue #467's rate-limited runtime warning.
   Operators relying on that runtime-only signal must instead fix the cap or profile
   before the runner starts.
+- ADR-0033 adds disk space as a third resource dimension in the shared capacity lease
+  pool, for the download-lane acquisition jobs introduced by Epic #16 — a consequence
+  of this ADR's pool design generalizing cleanly to a resource neither CPU nor memory,
+  not a change to the CPU/memory model this ADR decided.

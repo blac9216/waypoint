@@ -1,7 +1,7 @@
 # compliance-runner: imported project-owned PowerShell
 
 These three files are imported unmodified (except for the added Apache-2.0 header and
-one doc-comment sanitization, both noted below and in `NOTICE`) from the sibling
+one doc-comment sanitization, both noted below) from the sibling
 [`vmware-stig-docker`](https://github.com/blac9216/vmware-stig-docker) repository,
 per [ADR-0013](../../../docs/adr/0013-control-plane-and-runners.md) and
 [ADR-0015](../../../docs/adr/0015-source-build-and-operator-export.md).
@@ -32,10 +32,12 @@ pattern is preserved here; no sibling-repository logging module is imported.
 ## Provenance and sanitization
 
 Both `vmware-stig-docker` and this repository share the same copyright holder
-(Justin Black); the sibling repo carries no `LICENSE` file, so these files are
-self-authored code being relicensed under Apache-2.0 at import time, not
-third-party code accepted under an existing license grant. See the root `NOTICE`
-file for the formal entry.
+(Justin Black); the sibling repo carries no `LICENSE` file. These are owner-authored
+files, formally licensed under Apache-2.0 for the first time at import — not
+third-party code accepted under an existing license grant (see AGENTS.md's "License &
+Borrowing Policy" for the sibling-repo carve-out this falls under). Owner-authored
+sibling imports carry no root `NOTICE` entry of their own — see the root `NOTICE`
+file's "Third-party code incorporated" section for why.
 
 One doc comment in `module.common.ps1` (`Get-TargetShortName`) originally illustrated
 FQDN/IP-collision behavior with a real lab hostname and private IP addresses; those
