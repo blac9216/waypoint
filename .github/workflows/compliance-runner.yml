@@ -53,6 +53,7 @@ jobs:
             compliance-runner:
               - "runners/compliance-runner/**"
               - ".github/workflows/compliance-runner.yml"
+              - "scripts/check-coverage-floor.py"
 
   pester:
     name: "pester, coverage (job)"
@@ -116,18 +117,22 @@ jobs:
       # ratchet up further: re-measure with a fresh run, confirm the new
       # number holds, then raise --floor here.
       - name: Coverage gate (floor)
+        shell: bash
         run: |
+          set -o pipefail
           python3 scripts/check-coverage-floor.py \
             --report runners/compliance-runner/coverage.xml \
             --format jacoco \
             --floor 88.0 \
             --metric line | tee coverage-gate.txt
+          rc=$?
           {
             echo "### compliance-runner coverage"
             echo '```'
             cat coverage-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
   shellcheck:
     name: "shellcheck (job)"
@@ -166,11 +171,17 @@ jobs:
     steps:
       - name: Require success or skip
         run: |
+          changes_result="${{ needs.changes.result }}"
           pester_result="${{ needs.pester.result }}"
           shellcheck_result="${{ needs.shellcheck.result }}"
+          echo "changes job result: $changes_result"
           echo "pester job result: $pester_result"
           echo "shellcheck job result: $shellcheck_result"
           status=0
+          case "$changes_result" in
+            success) ;;
+            *) status=1 ;;
+          esac
           case "$pester_result" in
             success|skipped) ;;
             *) status=1 ;;

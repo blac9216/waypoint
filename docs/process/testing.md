@@ -8,7 +8,7 @@ rationale, the isolation recipe and the honesty rules live in [../testing.md](..
 <!-- names exactly as they appear on PR check runs; only always-reporting jobs may be required (issue #232) -->
 - secret + identifier scan
 
-Path-filtered jobs — `build, test, coverage` (backend/**), `build, test, lint` (frontend/**), `compose config, nginx -t, shellcheck` (deploy/**, scripts/**), `shellcheck .claude/skills` + `test .claude/skills` (.claude/skills/**/*.sh), `download-runner: pester, coverage, shellcheck` (runners/download-runner/**), `compliance-runner: pester, coverage, shellcheck` (runners/compliance-runner/**) — do not report on every PR and therefore cannot be required until the always-report pattern (#232) lands.
+Path-filtered jobs — `build, test, coverage` (backend/**), `build, test, lint` (frontend/**), `compose config, nginx -t, shellcheck` (deploy/**, scripts/**), `shellcheck .claude/skills` + `test .claude/skills` (.claude/skills/**/*.sh), `download-runner: pester, coverage, shellcheck` (runners/download-runner/**) — do not report on every PR and therefore cannot be required until the always-report pattern (#232) lands. `compliance-runner: pester, coverage, shellcheck` (runners/compliance-runner/**) is path-filtered internally but its always-run gate job reports on every PR/push, so it can be made required (#100).
 
 ## Commands
 | Suite | Command | Environment |

@@ -37,6 +37,14 @@ BeforeAll {
 	. $Script:ModulePath
 }
 
+AfterAll {
+	# Remove the global stand-ins so they do not leak into later test files in the
+	# same Pester run (see review note on PR #1717 round 1).
+	Remove-Item Function:\global:Get-LogSplat -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Write-Log -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogReportGroupMap -ErrorAction SilentlyContinue
+}
+
 Describe 'Add-ScanSkip / Get-ScanSkips / Clear-ScanSkips' {
 	BeforeEach { Clear-ScanSkips }
 

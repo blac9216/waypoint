@@ -56,6 +56,26 @@ BeforeAll {
 	. (Join-Path $PSScriptRoot '../powershell/module.transport.vmware.ps1')
 }
 
+AfterAll {
+	# Remove the global stand-ins so they do not leak into later test files in the
+	# same Pester run (see review note on PR #1717 round 1).
+	Remove-Item Function:\global:Get-LogSplat -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Write-Log -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogKind -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogComponent -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogRelease -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-CatalogProfilePath -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-ScanInputFile -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-Credential -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-AttestationPaths -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Connect-VIServer -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-Credential -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-VM -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-VMHost -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-VMHostNetworkAdapter -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-NetworkAdapter -ErrorAction SilentlyContinue
+}
+
 Describe 'Connect-StigVIServer' {
 	# Connect-StigVIServer's session-reuse check reads this PowerCLI global directly;
 	# reset it every test so no test's fake sessions leak into the next.

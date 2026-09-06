@@ -47,6 +47,22 @@ BeforeAll {
 	. (Join-Path $PSScriptRoot '../powershell/module.transport.nsxapi.ps1')
 }
 
+AfterAll {
+	# Remove the global stand-ins so they do not leak into later test files in the
+	# same Pester run (see review note on PR #1717 round 1).
+	Remove-Item Function:\global:Get-LogSplat -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Write-Log -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Invoke-WebRequest -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogKind -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogComponent -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-CatalogRelease -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-CatalogProfilePath -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-ScanInputFile -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Get-SiteTargetName -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-Credential -ErrorAction SilentlyContinue
+	Remove-Item Function:\global:Resolve-AttestationFile -ErrorAction SilentlyContinue
+}
+
 Describe 'Get-NsxSessionToken' {
 	It 'returns the token and cookie parsed from the response headers' {
 		Mock Invoke-WebRequest {
