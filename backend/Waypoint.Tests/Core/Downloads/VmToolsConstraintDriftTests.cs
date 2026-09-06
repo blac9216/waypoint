@@ -22,144 +22,146 @@ namespace Waypoint.Tests.Core.Downloads;
 
 /// <summary>
 /// Drift guard for <see cref="VmToolsPlatforms.All"/>/<see cref="VmToolsFileTypes.All"/>
-/// against migration 0109's <c>vmtools_artifact_index_platform_check</c> and
-/// <c>vmtools_artifact_index_file_type_check</c> constraints, following this repo's
-/// convention for every other closed-vocabulary/CHECK pairing (named "lockstep" per
-/// this repo's most-repeated review finding: a test parsing the SQL, not just
-/// asserting the C# side in isolation).
+/// against migration 0109's NAMED <c>vmtools_artifact_index_platform_check</c> and
+/// <c>vmtools_artifact_index_file_type_check</c> constraints, following
+/// <c>DepotArtifactStatusesConstraintDriftTests</c>'s convention (review round 2 relay
+/// on this PR, PR #1765, R1 -- superseding this file's own round-1 table-scoped-paren
+/// approach, which closed a decoy-table hole but opened an ALTER-invisibility one: a
+/// later migration re-declaring the constraint via this repo's DROP CONSTRAINT/ADD
+/// CONSTRAINT idiom sits outside a CREATE TABLE's parens and would have gone unseen).
+/// Matching on the constraint NAME rather than table position is both table-scoped (the
+/// name is unique per table, and this repo's naming convention prefixes it with the
+/// table name) and ALTER-visible (an <c>ALTER TABLE ... ADD CONSTRAINT &lt;name&gt;
+/// CHECK (...)</c> re-declaration matches the same literal text pattern as the inline
+/// column-constraint form). Scans every embedded migration in order and keeps the LAST
+/// declaration -- the one the fully-migrated database actually enforces -- exactly
+/// <c>ParseLatestCheckAcrossMigrations</c>'s convention.
 /// </summary>
 public sealed class VmToolsConstraintDriftTests
 {
 	[Fact]
 	public void VmToolsPlatformsAll_IsInLockstepWithPlatformCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseCheckConstraintValues("platform");
+		List<string> constraintValues = ParseLatestCheckAcrossMigrations(
+			ReadEmbeddedMigrations(), "vmtools_artifact_index_platform_check", "platform");
 		Assert.Equal(VmToolsPlatforms.All, constraintValues);
 	}
 
 	[Fact]
 	public void VmToolsFileTypesAll_IsInLockstepWithFileTypeCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseCheckConstraintValues("file_type");
+		List<string> constraintValues = ParseLatestCheckAcrossMigrations(
+			ReadEmbeddedMigrations(), "vmtools_artifact_index_file_type_check", "file_type");
 		Assert.Equal(VmToolsFileTypes.All, constraintValues);
 	}
 
 	/// <summary>
-	/// The table this drift guard is scoped to. A CHECK with the same column name on a
-	/// different table must never satisfy this guard -- table scope is enforced by
-	/// locating the <c>CREATE TABLE</c> block below and only searching for CHECK
-	/// constraints inside it, not by matching <c>CHECK (&lt;column&gt; IN (...))</c>
-	/// anywhere in the migration text.
-	/// </summary>
-	private const string TableName = "vmtools_artifact_index";
-
-	/// <summary>
-	/// Mutation check for the table-scoping fix: a CHECK constraint of the same column
-	/// name declared on a DIFFERENT table must never be picked up as though it belonged
-	/// to <see cref="TableName"/>. Before this guard was table-scoped, a
-	/// column-anywhere-in-file regex would have wrongly matched the decoy table's
-	/// values here.
+	/// Mutation check (direction a): a CHECK constraint with a DIFFERENT name declared
+	/// on a different table must never be picked up as though it were
+	/// <c>vmtools_artifact_index_platform_check</c>. Name-based matching excludes it
+	/// simply because the literal name differs -- unlike the round-1 fix's paren-block
+	/// approach, no table-position reasoning is needed at all.
 	/// </summary>
 	[Fact]
-	public void ExtractTableBlocks_IgnoresCheckConstraintOnADifferentTable()
+	public void ParseLatestCheckAcrossMigrations_IgnoresDifferentlyNamedConstraintOnADifferentTable()
 	{
-		const string Sql = """
+		string[] migrations =
+		[
+			"""
 			CREATE TABLE other_thing (
-			    platform TEXT NOT NULL CHECK (platform IN ('bogus'))
+			    platform TEXT NOT NULL CONSTRAINT other_thing_platform_check CHECK (platform IN ('bogus'))
 			);
 
 			CREATE TABLE IF NOT EXISTS vmtools_artifact_index (
-			    platform TEXT NOT NULL CHECK (platform IN ('windows', 'linux'))
+			    platform TEXT NOT NULL CONSTRAINT vmtools_artifact_index_platform_check CHECK (platform IN ('windows', 'linux'))
 			);
-			""";
+			""",
+		];
 
-		Regex createTablePattern = new(
-			$@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{Regex.Escape(TableName)}\s*\(",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+		List<string> values = ParseLatestCheckAcrossMigrations(
+			migrations, "vmtools_artifact_index_platform_check", "platform");
 
-		List<string> blocks = [.. ExtractTableBlocks(Sql, createTablePattern)];
-
-		string block = Assert.Single(blocks);
-		Assert.Contains("windows", block, StringComparison.Ordinal);
-		Assert.DoesNotContain("bogus", block, StringComparison.Ordinal);
+		Assert.Equal(["windows", "linux"], values);
 	}
 
 	/// <summary>
-	/// Reads every embedded <c>Data/Migrations/*.sql</c> resource in migration order
-	/// (ordinal on the zero-padded filename prefix, matching
-	/// <see cref="NpgsqlSchemaMigrator"/>), locates each file's <see cref="TableName"/>
-	/// <c>CREATE TABLE</c> block (if any), and returns the value list of the LAST
-	/// <c>&lt;column&gt; IN (...)</c> CHECK constraint found INSIDE that block across
-	/// all migrations -- i.e. the constraint the fully-migrated database actually
-	/// enforces on <see cref="TableName"/> specifically, never a same-named CHECK on
-	/// some other table.
+	/// Mutation check (direction b): the reviewer's own mutation from the round-1
+	/// relay finding -- a later migration widening
+	/// <c>vmtools_artifact_index_platform_check</c> via this repo's
+	/// <c>DROP CONSTRAINT</c>/<c>ADD CONSTRAINT</c> idiom (migration 0129's own shape
+	/// for <c>depot_artifacts_status_check</c>) -- MUST be picked up as the latest
+	/// declaration, proving this guard is ALTER-visible where the round-1 CREATE-TABLE-
+	/// paren-scoped approach was not.
 	/// </summary>
-	private static List<string> ParseCheckConstraintValues(string column)
+	[Fact]
+	public void ParseLatestCheckAcrossMigrations_PicksUpALaterAlterTableDropAddConstraint()
+	{
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS vmtools_artifact_index (
+			    platform TEXT NOT NULL CONSTRAINT vmtools_artifact_index_platform_check CHECK (platform IN ('windows', 'linux', 'arm', 'unknown'))
+			);
+			""",
+			"""
+			ALTER TABLE vmtools_artifact_index DROP CONSTRAINT IF EXISTS vmtools_artifact_index_platform_check;
+			ALTER TABLE vmtools_artifact_index ADD CONSTRAINT vmtools_artifact_index_platform_check CHECK (platform IN ('windows'));
+			""",
+		];
+
+		List<string> values = ParseLatestCheckAcrossMigrations(
+			migrations, "vmtools_artifact_index_platform_check", "platform");
+
+		Assert.Equal(["windows"], values);
+	}
+
+	private static List<string> ReadEmbeddedMigrations()
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
 		string[] resourceNames = [.. assembly.GetManifestResourceNames()
 			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
 			.OrderBy(name => name, StringComparer.Ordinal)];
 
-		Regex createTablePattern = new(
-			$@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{Regex.Escape(TableName)}\s*\(",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex checkPattern = new(
-			$@"CHECK\s*\(\s*{Regex.Escape(column)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
-
-		List<string>? latest = null;
+		List<string> sqlTexts = [];
 		foreach (string resourceName in resourceNames)
 		{
 			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
 			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
+			sqlTexts.Add(reader.ReadToEnd());
+		}
 
-			foreach (string tableBlock in ExtractTableBlocks(sql, createTablePattern))
+		return sqlTexts;
+	}
+
+	/// <summary>
+	/// Reads every migration text, in order, and returns the value list of the LAST
+	/// <paramref name="constraintName"/> CHECK constraint declared across them -- i.e.
+	/// the constraint the fully-migrated database actually enforces. Matches
+	/// <c>DepotArtifactStatusesConstraintDriftTests.ParseLatestCheckAcrossMigrations</c>'s
+	/// convention: matching on the constraint NAME (not table position) means a later
+	/// <c>DROP CONSTRAINT</c>/<c>ADD CONSTRAINT</c> re-declaration is visible, since it
+	/// is the same literal <c>CONSTRAINT &lt;name&gt; CHECK (...)</c> text shape whether
+	/// it appears inline in a <c>CREATE TABLE</c> or in a later <c>ALTER TABLE</c>.
+	/// </summary>
+	private static List<string> ParseLatestCheckAcrossMigrations(
+		IEnumerable<string> migrationSqlTexts, string constraintName, string columnName)
+	{
+		Regex checkPattern = new(
+			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
+
+		List<string>? latest = null;
+		foreach (string sql in migrationSqlTexts)
+		{
+			foreach (Match match in checkPattern.Matches(sql))
 			{
-				foreach (Match match in checkPattern.Matches(tableBlock))
-				{
-					latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
-				}
+				latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
 			}
 		}
 
 		Assert.NotNull(latest);
 		Assert.NotEmpty(latest!);
 		return latest!;
-	}
-
-	/// <summary>
-	/// Yields the substring of each <c>CREATE TABLE ... (</c> match through its matching
-	/// closing paren (tracked by depth, since column/CHECK definitions nest their own
-	/// parens), so a CHECK constraint search over the returned text can never wander
-	/// into a sibling table's definition later in the same file.
-	/// </summary>
-	private static IEnumerable<string> ExtractTableBlocks(string sql, Regex createTablePattern)
-	{
-		foreach (Match createMatch in createTablePattern.Matches(sql))
-		{
-			int depth = 1;
-			int i = createMatch.Index + createMatch.Length;
-			int start = i;
-			while (i < sql.Length && depth > 0)
-			{
-				if (sql[i] == '(')
-				{
-					depth++;
-				}
-				else if (sql[i] == ')')
-				{
-					depth--;
-				}
-				i++;
-			}
-
-			if (depth == 0)
-			{
-				yield return sql[start..(i - 1)];
-			}
-		}
 	}
 }
