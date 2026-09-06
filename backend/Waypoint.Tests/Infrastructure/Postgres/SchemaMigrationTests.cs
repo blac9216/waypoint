@@ -402,6 +402,24 @@ public sealed class SchemaMigrationTests
 	/// legality is enforced in
 	/// <c>Waypoint.Core.Downloads.RetainedContentStateTransitions</c>, not a DB
 	/// trigger --
+	/// 0111 (issue #1480, epic #1184, split from #1054 (closed as design record
+	/// 2026-08-30); research lane #1031; slot pre-assigned 2026-08-30, verified
+	/// free against both the migrations directory and open PRs at authoring time --
+	/// #1509/#1389/#1765 hold 0108/0113/0109 respectively, still in flight):
+	/// adds <c>vks_library_items</c>, the shared dual-backend VKS/VKR item
+	/// identity/dimension model (depot-fed and public-mirror) parsed by the
+	/// single name grammar #1031 measured against 138/138 live public items across
+	/// four coexisting naming eras. <c>naming_era</c> CHECK admits the four eras
+	/// plus <c>'unparsed'</c> -- an unrecognized name is still stored, never
+	/// dropped (#1031 Risk). <c>etag</c> is a change token, explicitly NOT a
+	/// checksum (#1031: 93/138 items share one etag across four files of very
+	/// different sizes; one item's served .mf MD5 differed from its own published
+	/// etag) -- proven never conflated with <c>sha256</c> by
+	/// <c>VksChangeTokenGuardTests</c>' type-level and grep-based guards. Model-
+	/// only slice: no sync logic. Grants <c>waypoint_download_runner</c>
+	/// <c>SELECT, INSERT, UPDATE</c> (no DELETE) -- proven both directions by
+	/// <c>VksLibraryIndexRunnerRoleGrantTests</c> (this repo's #556 convention).
+	/// No separate API grant: <c>Waypoint.Api</c> connects as the table owner --
 	/// 0117 (pre-assigned slot, issue #1470) adds esx_acquisition_subscriptions --
 	/// named ESX acquisition presets selecting a subset of the
 	/// lcm.esx.supported.host.platforms vendor vocabulary, TEXT[] selection validated
