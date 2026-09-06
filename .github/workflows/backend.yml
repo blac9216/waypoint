@@ -9,15 +9,16 @@ name: backend
 # has its Expected verdict edited to disagree with the corpus (issue #1099).
 # Without this path a documentation-only edit could disarm a shape with CI green.
 #
-# Directory.Build.props and scripts/check-coverage-floor.py are shared inputs
-# that control the checks above (build analyzers and the coverage gate) —
-# issue #412.
+# Directory.Build.props, .editorconfig and scripts/check-coverage-floor.py are
+# shared inputs that control the checks above (build analyzers and severities,
+# and the coverage gate) — issue #412.
 on:
   pull_request:
     paths:
       - "backend/**"
       - "docs/compliance-content-shape-inventory.md"
       - "Directory.Build.props"
+      - ".editorconfig"
       - "scripts/check-coverage-floor.py"
       - ".github/workflows/backend.yml"
   push:
@@ -26,6 +27,7 @@ on:
       - "backend/**"
       - "docs/compliance-content-shape-inventory.md"
       - "Directory.Build.props"
+      - ".editorconfig"
       - "scripts/check-coverage-floor.py"
       - ".github/workflows/backend.yml"
 
