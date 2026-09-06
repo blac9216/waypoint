@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -109,14 +110,15 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 		}
 
-		int upserted = await UpsertArtifactsAsync(result.Output, context, cancellationToken).ConfigureAwait(false);
+		(int upserted, int rejected) = await UpsertArtifactsAsync(result.Output, context, cancellationToken).ConfigureAwait(false);
 
 		string progressPayload = JsonSerializer.Serialize(new { indexed_count = upserted });
 		await context.Events
 			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded($"Indexed {upserted} artifact(s).");
+		return JobExecutionOutcome.Succeeded(
+			rejected == 0 ? $"Indexed {upserted} artifact(s)." : $"Indexed {upserted} artifact(s); rejected {rejected} row(s).");
 	}
 
 	/// <summary>
@@ -128,10 +130,19 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	/// are skipped rather than failing the whole job -- one malformed entry must not
 	/// block every other artifact from indexing (the same "individual target failures
 	/// must not halt a run" principle CLAUDE.md states for scans/downloads).
+	///
+	/// Issue #1705 Option B (defense in depth; A -- migration 0129 widening
+	/// <c>depot_artifacts_status_check</c> -- is the actual fix): a row whose
+	/// <c>status</c> the constraint rejects (23514, e.g. a status value emitted by a
+	/// future sweep/handler revision the constraint has not yet been widened for) is
+	/// counted and skipped rather than allowed to propagate and abort every other
+	/// artifact in the batch -- the handler's own documented "skip, don't halt"
+	/// posture, extended past parse failures to persistence failures.
 	/// </summary>
-	private async Task<int> UpsertArtifactsAsync(IReadOnlyList<object?> output, JobExecutionContext context, CancellationToken cancellationToken)
+	private async Task<(int Upserted, int Rejected)> UpsertArtifactsAsync(IReadOnlyList<object?> output, JobExecutionContext context, CancellationToken cancellationToken)
 	{
 		int upserted = 0;
+		int rejected = 0;
 		foreach (object? item in output)
 		{
 			DepotArtifactUpsert? upsert = TryParseArtifact(item);
@@ -140,7 +151,24 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 				continue;
 			}
 
-			await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
+			try
+			{
+				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation)
+			{
+				rejected++;
+				string warningPayload = JsonSerializer.Serialize(new
+				{
+					severity = "warning",
+					line = $"catalog-index: rejected artifact '{upsert.RelativePath}' with status '{upsert.Status}' -- constraint {exception.ConstraintName}. Skipped, not aborted.",
+				});
+				await context.Events
+					.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, warningPayload, cancellationToken)
+					.ConfigureAwait(false);
+				continue;
+			}
+
 			upserted++;
 
 			if (upserted % 25 == 0)
@@ -152,7 +180,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			}
 		}
 
-		return upserted;
+		return (upserted, rejected);
 	}
 
 	private static DepotArtifactUpsert? TryParseArtifact(object? item)

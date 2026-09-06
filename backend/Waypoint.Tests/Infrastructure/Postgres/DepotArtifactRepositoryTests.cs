@@ -81,6 +81,37 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		_ = total;
 	}
 
+	/// <summary>
+	/// Issue #1705 regression: the #1503 presence sweep's absent-from-disk result
+	/// (<see cref="DepotArtifactStatuses.Missing"/>) used to violate
+	/// <c>depot_artifacts_status_check</c> (only 'indexed'/'downloading'/'present'/
+	/// 'failed' were allowed pre-migration-0129), aborting the whole
+	/// <c>catalog-index</c> job on the first entry a real, partial depot produces.
+	/// Proves the real repository's upsert path persists a 'missing' row and that
+	/// it reads back through the same <c>GET /catalog/artifacts</c> read API
+	/// (<see cref="IDepotArtifactRepository.ListAsync"/>) every other status uses --
+	/// not a bespoke seam.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_MissingStatus_PersistsAndReadsBackViaListAsync()
+	{
+		string externalId = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		Guid id = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(externalId, Sha256: null, DepotArtifactStatuses.Missing, """{"product":"VCF","version":"9.1"}"""),
+			CancellationToken.None);
+
+		DepotArtifact? byId = await _repository.GetByIdAsync(id, CancellationToken.None);
+		Assert.NotNull(byId);
+		Assert.Equal(DepotArtifactStatuses.Missing, byId!.Status);
+
+		(IReadOnlyList<DepotArtifact> items, long total) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, DepotArtifactStatuses.Missing), new PageRequest(), CancellationToken.None);
+
+		Assert.Contains(items, item => item.ExternalId == externalId);
+		Assert.True(total >= 1);
+	}
+
 	[Fact]
 	public async Task ListAsync_FiltersByProductVersionStatus_AndPaginatesWithXTotalCount()
 	{

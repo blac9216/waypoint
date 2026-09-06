@@ -73,6 +73,42 @@ public sealed record DepotArtifactUpsert(
 public sealed record DepotArtifactFilter(string? Product, string? Version, string? Status);
 
 /// <summary>
+/// Issue #1705: the closed <c>depot_artifacts.status</c> vocabulary
+/// <c>depot_artifacts_status_check</c> (migration 0129) enforces, and the single
+/// source of truth <c>DepotArtifactStatusesConstraintDriftTests</c> parses that
+/// constraint's SQL against -- so a value added to either side alone fails a test,
+/// this repo's #1517/RepoCredentialBindingConstraintDriftTests convention. This is
+/// the minimal constant this issue needs; a fuller shared-constants pass across every
+/// depot_artifacts.status call site is issue #1675's separate, deferred scope.
+/// </summary>
+public static class DepotArtifactStatuses
+{
+	/// <summary>Connected-pull catalog entry (<see cref="VendorProductVersionCatalogParser"/>, issue #687) not yet download-verified.</summary>
+	public const string Indexed = "indexed";
+
+	/// <summary>Reserved by the original slice-1 schema (migration 0001); no current writer emits it.</summary>
+	public const string Downloading = "downloading";
+
+	/// <summary>Verified on disk (download success, or a presence-sweep entry the manifest confirms -- #1503).</summary>
+	public const string Present = "present";
+
+	/// <summary>Download verification failed (<c>DownloadJobHandler</c>/<c>BinariesDownloadJobHandler</c>).</summary>
+	public const string Failed = "failed";
+
+	/// <summary>
+	/// A cataloged entry the #1503 presence sweep did not find on disk
+	/// (<c>WaypointCatalogIndex.psm1</c>'s <c>ValidateSet('present', 'missing')</c>).
+	/// </summary>
+	public const string Missing = "missing";
+
+	/// <summary>The full <c>depot_artifacts_status_check</c> vocabulary, in the constraint's declared order.</summary>
+	public static readonly IReadOnlyList<string> All = [Indexed, Downloading, Present, Failed, Missing];
+
+	/// <summary>The subset the presence sweep itself can emit (<c>WaypointCatalogIndex.psm1</c>'s <c>ValidateSet</c>).</summary>
+	public static readonly IReadOnlyList<string> PresenceSweepEmitted = [Present, Missing];
+}
+
+/// <summary>
 /// One file found on a depot share that the authenticated vendor catalog does not
 /// describe (migration 0100, issue #1488; #1038's Motivation: today these are
 /// "silently absent from every surface"). Insert-or-touch-last-seen only -- there is
