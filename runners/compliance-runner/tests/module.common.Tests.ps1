@@ -408,7 +408,7 @@ Describe 'Resolve-SiteTargetShortName' {
 
 	It 'does not collide with a row of a different product' {
 		$TargetA = [pscustomobject]@{ product = 'vsphere'; kind = 'stig'; connection = [pscustomobject]@{ host = 'esxi-01.example.internal' } }
-		$TargetB = [pscustomobject]@{ product = 'nsx'; kind = 'stig'; connection = [pscustomobject]@{ host = 'esxi-01.other.internal' } }
+		$TargetB = [pscustomobject]@{ product = 'nsx'; kind = 'stig'; connection = [pscustomobject]@{ host = 'esxi-01.example.org' } }
 		$Script:Site = [pscustomobject]@{ targets = @($TargetA, $TargetB) }
 		Resolve-SiteTargetShortName -Target $TargetA | Should -Be 'esxi-01'
 	}

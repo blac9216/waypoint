@@ -62,7 +62,7 @@ Describe 'Connect-StigVIServer' {
 	BeforeEach { $Global:DefaultVIServers = @() }
 
 	It 'connects fresh (AllLinked) and returns the session/credential/cleanup handle' {
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 		$VCSACred = [pscredential]::new('root', (ConvertTo-SecureString 'y' -AsPlainText -Force))
 		Mock Connect-VIServer { @([pscustomobject]@{ Name = 'vcsa-01.example.internal' }) }
 
@@ -86,7 +86,7 @@ Describe 'Connect-StigVIServer' {
 	It 'never resolves or prompts for a VCSA credential when -SkipVCSACredential is set' {
 		Mock Connect-VIServer { @([pscustomobject]@{ Name = 'vcsa-03.example.internal' }) }
 		Mock Get-Credential { throw 'must not prompt' }
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 
 		$Result = Connect-StigVIServer -VCenter 'vcsa-03.example.internal' -VSphereCredential $VSCred -SkipVCSACredential
 		$Result.VCSACredential | Should -BeNullOrEmpty
@@ -94,13 +94,13 @@ Describe 'Connect-StigVIServer' {
 
 	It 'throws a wrapped error when Connect-VIServer itself throws' {
 		Mock Connect-VIServer { throw 'connection refused' }
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 		{ Connect-StigVIServer -VCenter 'vcsa-04.example.internal' -VSphereCredential $VSCred -SkipVCSACredential } | Should -Throw '*Failed to establish vCenter connection*'
 	}
 
 	It 'throws when Connect-VIServer returns no sessions at all' {
 		Mock Connect-VIServer { @() }
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 		{ Connect-StigVIServer -VCenter 'vcsa-05.example.internal' -VSphereCredential $VSCred -SkipVCSACredential } | Should -Throw '*No vCenter sessions could be established*'
 	}
 }
@@ -485,7 +485,7 @@ Describe 'Build-VsphereTransportTargets' {
 	AfterEach { Remove-Item -Path $Script:ReportRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 	It 'connects inline (bare-CLI/single-row path), builds targets, and attaches the right credential per target type' {
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 		$VCSACred = [pscredential]::new('root', (ConvertTo-SecureString 'y' -AsPlainText -Force))
 		Mock Connect-VsphereTransportRow {
 			[pscustomobject]@{
@@ -514,7 +514,7 @@ Describe 'Build-VsphereTransportTargets' {
 	}
 
 	It 'skips the connect phase and reuses a pre-connected RowContext (multi-row claim-before-build)' {
-		$VSCred = [pscredential]::new('administrator@vsphere.local', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+		$VSCred = [pscredential]::new('svc-vsphere-admin', (ConvertTo-SecureString 'x' -AsPlainText -Force))
 		Mock Connect-VsphereTransportRow { throw 'must not run the connect phase again' }
 		Mock Get-VM { @() }
 		Mock Get-VMHost { @() }
