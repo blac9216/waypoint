@@ -118,20 +118,31 @@ jobs:
       - name: Coverage gate (floor)
         shell: bash
         run: |
-          set -o pipefail
-          python3 scripts/check-coverage-floor.py \
+          # GitHub runs an explicit `shell: bash` step as
+          # `bash --noprofile --norc -eo pipefail {0}`, so -e is already
+          # active and a bare non-zero command would abort the step on the
+          # spot -- taking the summary write and the log echo with it. The
+          # `if` wrapper is what keeps a below-floor result on a path that
+          # still reports: -e does not fire on a command tested by `if`, so
+          # rc is captured, the gate output is echoed to the job log, the
+          # step summary is written on both paths, and the final `exit "$rc"`
+          # still fails the step with the script's own status.
+          if python3 scripts/check-coverage-floor.py \
             --report runners/download-runner/coverage.xml \
             --format jacoco \
             --floor 88.0 \
-            --metric line > coverage-gate.txt
-          rc=$?
+            --metric line > coverage-gate.txt 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          cat coverage-gate.txt
           {
             echo "### download-runner coverage"
             echo '```'
             cat coverage-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          cat coverage-gate.txt
           exit "$rc"
 
   shellcheck:
