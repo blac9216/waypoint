@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage line-rate="0.9" branch-rate="0.85" version="1.9">
+  <packages>
+    <package name="Invented.Backend">
+      <classes>
+        <class name="Invented.Backend.Widget" line-rate="0.9" branch-rate="0.85"/>
+      </classes>
+    </package>
+  </packages>
+</coverage>

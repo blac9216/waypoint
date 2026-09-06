@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">
+<report name="invented-runner">
+  <package name="Invented.Module">
+    <class name="Invented.Module.Widget">
+      <counter type="LINE" missed="1" covered="9"/>
+      <counter type="BRANCH" missed="1" covered="1"/>
+    </class>
+    <counter type="LINE" missed="1" covered="9"/>
+    <counter type="BRANCH" missed="1" covered="1"/>
+  </package>
+  <counter type="INSTRUCTION" missed="20" covered="180"/>
+  <counter type="LINE" missed="12" covered="88"/>
+  <counter type="BRANCH" missed="20" covered="80"/>
+  <counter type="COMPLEXITY" missed="5" covered="45"/>
+  <counter type="METHOD" missed="2" covered="18"/>
+  <counter type="CLASS" missed="0" covered="4"/>
+</report>
