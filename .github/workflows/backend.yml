@@ -26,7 +26,9 @@ name: backend
 #
 # Directory.Build.props, .editorconfig and scripts/check-coverage-floor.py are
 # shared inputs that control the checks above (build analyzers and severities,
-# and the coverage gate) — issue #412.
+# and the coverage gate) — issue #412. scripts/tests/** is listed for the
+# same reason: it is that gate script's own unittest suite, run by the
+# coverage-gate-tests job below (issue #1710).
 on:
   pull_request:
   push:
@@ -75,6 +77,7 @@ jobs:
               - "Directory.Build.props"
               - ".editorconfig"
               - "scripts/check-coverage-floor.py"
+              - "scripts/tests/**"
               - ".github/workflows/backend.yml"
 
   backend:
@@ -252,6 +255,47 @@ jobs:
           fi
           shellcheck "$entrypoint"
 
+  # Issue #1710: scripts/check-coverage-floor.py gained a scripts/tests/
+  # unittest suite (issue #1354) with no CI job running it. Separate job
+  # rather than a step in `backend`: it needs no .NET SDK or restore, so it
+  # gives its own fast red/green signal. Guards against zero-tests-discovered
+  # the same way the `pester` job above (L214-L217) and the
+  # download-runner/compliance-runner workflows' own gates do: plain
+  # `unittest discover` exits 0 on an empty suite, so a rename/move/delete of
+  # the test file would otherwise leave this job green while running
+  # nothing -- the exact "suite exists, nothing runs it" failure mode #1710
+  # exists to close (review finding, PR #1730 round 1).
+  coverage-gate-tests:
+    name: "coverage-gate tests (job)"
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Run scripts/tests unittest suite
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.TestLoader().discover("scripts/tests")
+          count = suite.countTestCases()
+          print(f"discovered {count} test case(s)")
+          if count == 0:
+              print(
+                  "::error::coverage-gate-tests discovered zero tests -- "
+                  "the guard is not actually running.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+
   # Always-report gate (#232): owns the required check-run name. Runs on
   # every PR/push regardless of the path filter (`if: always()` — GitHub's
   # documented construct for a required check that depends on other jobs).
@@ -263,7 +307,7 @@ jobs:
   # so a docs-only PR shows this context green instead of forever pending.
   backend-gate:
     name: "build, test, coverage"
-    needs: [changes, backend, shellcheck]
+    needs: [changes, backend, shellcheck, coverage-gate-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -277,9 +321,11 @@ jobs:
           changes_result="${{ needs.changes.result }}"
           job_result="${{ needs.backend.result }}"
           shellcheck_result="${{ needs.shellcheck.result }}"
+          coverage_gate_tests_result="${{ needs.coverage-gate-tests.result }}"
           echo "changes job result: $changes_result"
           echo "backend job result: $job_result"
           echo "shellcheck job result: $shellcheck_result"
+          echo "coverage-gate-tests job result: $coverage_gate_tests_result"
           if [ "$changes_result" != "success" ]; then
             echo "changes job did not succeed ($changes_result) -- failing gate"
             exit 1
@@ -290,6 +336,10 @@ jobs:
             *) status=1 ;;
           esac
           case "$shellcheck_result" in
+            success|skipped) ;;
+            *) status=1 ;;
+          esac
+          case "$coverage_gate_tests_result" in
             success|skipped) ;;
             *) status=1 ;;
           esac
