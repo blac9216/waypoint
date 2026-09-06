@@ -595,9 +595,13 @@ regardless of path, but the real work above only executes when its own `changes`
 (dorny/paths-filter) says the relevant paths changed. A final always-run gate job in
 each workflow owns the check-run context listed above, and reports success when the
 real job succeeded or was correctly skipped (off-path), failure otherwise — so an
-off-path PR shows the context green instead of leaving it forever pending, which is
-what makes these contexts safe to add to the branch protection required set (#100,
-owner action). The gate job carries `if: always()` rather than a condition that can
+off-path PR shows the context green instead of leaving it forever pending. All eight
+contexts in the table above — `secret + identifier scan`, `build, test, coverage`,
+`build, test, lint`, `compose config, nginx -t, shellcheck`, `shellcheck .claude/skills`,
+`test .claude/skills`, `download-runner: pester, coverage, shellcheck`, and
+`compliance-runner: pester, coverage, shellcheck` — are required status checks on
+`main` (classic branch protection, `strict: false`; issue #100): a red or pending
+context blocks the merge. The gate job carries `if: always()` rather than a condition that can
 skip it, because GitHub reports a job skipped by its own condition as **Success** to a
 required check: a cancelled run must reach the gate and fail it (`changes.result` is
 then `cancelled`, which the gate rejects) rather than skip it into a false green. Each

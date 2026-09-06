@@ -6,9 +6,18 @@ rationale, the isolation recipe and the honesty rules live in [../testing.md](..
 
 ## Required checks
 <!-- names exactly as they appear on PR check runs; only always-reporting jobs may be required (issue #232) -->
+Required on `main` via classic branch protection (`strict: false`; owner ruling
+2026-09-06, issue #100) — a red or pending context blocks the merge:
 - secret + identifier scan
+- build, test, coverage
+- build, test, lint
+- compose config, nginx -t, shellcheck
+- shellcheck .claude/skills
+- test .claude/skills
+- download-runner: pester, coverage, shellcheck
+- compliance-runner: pester, coverage, shellcheck
 
-Path-filtered checks — `build, test, coverage` (backend/**), `build, test, lint` (frontend/**), `compose config, nginx -t, shellcheck` (deploy/**, scripts/**), `shellcheck .claude/skills` + `test .claude/skills` (.claude/skills/**/*.sh), `download-runner: pester, coverage, shellcheck` (runners/download-runner/**), `compliance-runner: pester, coverage, shellcheck` (runners/compliance-runner/**) — now always report: each workflow gates the real work internally (a `changes` job + `if: needs.changes.outputs.<name> == 'true'`) and a final always-run gate job owns the check-run name above, succeeding when the real job succeeded or was skipped and failing otherwise (the always-report pattern, #232). The gate job uses `if: always()`, so a cancelled run fails the gate instead of skipping it — GitHub reports a job skipped by its own condition as Success to a required check. Each workflow's `changes: <name>` job reports its own context too, but only the seven gate contexts above are always-report; other path-gated jobs (e.g. `pester: powershell shape inventory`) are not, and are not required-check candidates. All seven can now be added to the branch protection ruleset's required set (owner action, #100).
+The seven path-filtered contexts above — `build, test, coverage` (backend/**), `build, test, lint` (frontend/**), `compose config, nginx -t, shellcheck` (deploy/**, scripts/**), `shellcheck .claude/skills` + `test .claude/skills` (.claude/skills/**/*.sh), `download-runner: pester, coverage, shellcheck` (runners/download-runner/**), `compliance-runner: pester, coverage, shellcheck` (runners/compliance-runner/**) — always report: each workflow gates the real work internally (a `changes` job + `if: needs.changes.outputs.<name> == 'true'`) and a final always-run gate job owns the check-run name above, succeeding when the real job succeeded or was skipped and failing otherwise (the always-report pattern, #232). The gate job uses `if: always()`, so a cancelled run fails the gate instead of skipping it — GitHub reports a job skipped by its own condition as Success to a required check. Each workflow's `changes: <name>` job reports its own context too, but only the seven gate contexts above are always-report; other path-gated jobs (e.g. `pester: powershell shape inventory`) are not, and are not required-check candidates.
 
 ## Commands
 | Suite | Command | Environment |
