@@ -78,7 +78,7 @@ public sealed partial class ReviewListDeletionService : IReviewListDeletionServi
 		RetentionPurgeOutcome purgeOutcome = await _sweep.PurgeImmediatelyAsync(stateId, actor, reason, cancellationToken).ConfigureAwait(false);
 		if (!purgeOutcome.Purged)
 		{
-			LogDeleteFailed(_logger, "out-of-scope", id.ToString(), actor, reason ?? "(none)", purgeOutcome.Error ?? "purge did not complete");
+			LogDeleteFailed(_logger, "out-of-scope", id, actor, reason ?? "(none)", purgeOutcome.Error ?? "purge did not complete");
 			return new ReviewListDeletionOutcome(false, purgeOutcome.Error ?? "purge did not complete.");
 		}
 
@@ -88,7 +88,7 @@ public sealed partial class ReviewListDeletionService : IReviewListDeletionServi
 		delete.Parameters.AddWithValue(id);
 		await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-		LogDeleted(_logger, "out-of-scope", id.ToString(), actor, reason ?? "(none)");
+		LogDeleted(_logger, "out-of-scope", id, actor, reason ?? "(none)");
 		return new ReviewListDeletionOutcome(true, null);
 	}
 
@@ -150,8 +150,8 @@ public sealed partial class ReviewListDeletionService : IReviewListDeletionServi
 	}
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "review-list: deleted {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}")]
-	private static partial void LogDeleted(ILogger logger, string kind, string identifier, string actor, string reason);
+	private static partial void LogDeleted(ILogger logger, string kind, object identifier, string actor, string reason);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "review-list: delete FAILED for {Kind} entry '{Identifier}', actor={Actor}, reason={Reason}: {Error}")]
-	private static partial void LogDeleteFailed(ILogger logger, string kind, string identifier, string actor, string reason, string error);
+	private static partial void LogDeleteFailed(ILogger logger, string kind, object identifier, string actor, string reason, string error);
 }
