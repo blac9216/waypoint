@@ -13,10 +13,10 @@
 # limitations under the License.
 #
 # Project-owned source migrated from the predecessor vcf-docker-download
-# repository (same author/copyright holder), preserved unmodified per
-# ADR-0013/ADR-0015 and AGENTS.md's License & Borrowing Policy sibling-repo
-# carve-out: Waypoint orchestrates this project-owned script via the
-# WaypointDownload/WaypointCatalogIndex shim modules, it does not fork it. Only
+# repository (same author/copyright holder) per ADR-0013/ADR-0015 and the
+# AGENTS.md License & Borrowing Policy sibling-repo carve-out. Imported
+# verbatim, then adapted in place where Waypoint needs it -- issue #1718 made
+# Get-FileManifest and Remove-EmptyDirs fail closed; not mirrored back. Only
 # the functions this runner's M1 call graph needs (Save-WebFile,
 # Get-FileManifest, and their shared helpers) are imported; workflow modules
 # for UMDS/VCSA/Photon/VKS/content-library/transfer are out of scope for M1
