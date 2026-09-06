@@ -118,6 +118,8 @@ Board field ids (for scripts and dispatch prompts):
 
 Reviewer identity: none — single account; the `## PR Review — …` comment plus the merge are the verdict of record.
 
+Session-log archive: blac9216/workflow-logs
+
 Default branch: protected by classic branch protection (`strict: false`; required checks `secret + identifier scan`, `build, test, coverage`, `build, test, lint`, `compose config, nginx -t, shellcheck`, `shellcheck .claude/skills`, `test .claude/skills`, `download-runner: pester, coverage, shellcheck`, `compliance-runner: pester, coverage, shellcheck`); the automation account cannot read or edit it.
 
 Local deviations from the skill's defaults: none.
