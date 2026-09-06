@@ -197,6 +197,36 @@ Describe 'Get-FileManifest' {
 		Test-Path -Path $Out | Should -BeTrue
 		(Get-Content -Path $Out -Raw) | Should -Match 'a\.txt'
 	}
+
+	# Issue #1718: an unreadable subdirectory must never be silently treated as
+	# empty -- the reviewer's probe on PR #1716 found a `chmod 000` subtree
+	# vanished from the manifest with no error at all.
+	It 'surfaces an unreadable subdirectory instead of silently omitting it' {
+		if (-not ($IsLinux -or $IsMacOS)) {
+			Set-ItResult -Skipped -Because 'chmod mode bits are not meaningful on Windows'
+			return
+		}
+		if ((& id -u) -eq '0') {
+			Set-ItResult -Skipped -Because 'running as root ignores mode bits, so the directory would remain readable'
+			return
+		}
+
+		$Root = Join-Path -Path $TestDrive -ChildPath 'manifest-locked'
+		$Good = Join-Path $Root 'good'
+		$Locked = Join-Path $Root 'locked'
+		New-Item -Path $Good -ItemType Directory -Force | Out-Null
+		New-Item -Path $Locked -ItemType Directory -Force | Out-Null
+		Set-Content -Path (Join-Path $Good 'f.txt') -Value 'abc' -NoNewline
+		Set-Content -Path (Join-Path $Locked 'hidden.txt') -Value 'xyz' -NoNewline
+
+		try {
+			& chmod 000 $Locked
+
+			{ Get-FileManifest -Directory $Root } | Should -Throw -ExpectedMessage '*locked*'
+		} finally {
+			& chmod 700 $Locked
+		}
+	}
 }
 
 Describe 'Remove-EmptyDirs' {
@@ -227,6 +257,34 @@ Describe 'Remove-EmptyDirs' {
 		Remove-EmptyDirs -Directory $Root -WhatIf | Out-Null
 
 		Test-Path -Path $Empty | Should -BeTrue
+	}
+
+	# Issue #1718: an unreadable directory must never be treated as empty --
+	# no removal attempt, and the caller must be able to tell the walk was
+	# incomplete rather than trusting a smaller-but-healthy-looking result.
+	It 'leaves an unreadable directory untouched and surfaces the failure' {
+		if (-not ($IsLinux -or $IsMacOS)) {
+			Set-ItResult -Skipped -Because 'chmod mode bits are not meaningful on Windows'
+			return
+		}
+		if ((& id -u) -eq '0') {
+			Set-ItResult -Skipped -Because 'running as root ignores mode bits, so the directory would remain readable'
+			return
+		}
+
+		$Root = Join-Path -Path $TestDrive -ChildPath 'prune-locked'
+		$Locked = Join-Path $Root 'locked'
+		New-Item -Path $Locked -ItemType Directory -Force | Out-Null
+		Set-Content -Path (Join-Path $Locked 'hidden.txt') -Value 'xyz' -NoNewline
+
+		try {
+			& chmod 000 $Locked
+
+			{ Remove-EmptyDirs -Directory $Root } | Should -Throw -ExpectedMessage '*locked*'
+			Test-Path -Path $Locked | Should -BeTrue
+		} finally {
+			& chmod 700 $Locked
+		}
 	}
 }
 
