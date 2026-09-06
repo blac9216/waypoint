@@ -23,8 +23,16 @@ namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// The DB-only virtual folder tree over one content library's items (migration 0113,
-/// issue #1389, epic #1185): Admin-only create/rename-move/delete/assign, Viewer+
-/// read -- matching <see cref="ContentLibrariesController"/>'s RBAC shape. Folder
+/// issue #1389, epic #1185). RBAC follows owner grill decision R2-10 (design record
+/// #16), reconciled against this controller by issue #1034/PR #1747 and closed here by
+/// issue #1746: R2-10 buckets "library upload/organize" as Operator-tier and
+/// "deletes/purges" as its own Admin-tier bucket, so folder create/rename-move and
+/// item-folder assignment (organize) are <c>[RequireOperatorRole]</c>, folder delete
+/// (a destructive action, matching the deletes/purges bucket) stays
+/// <c>[RequireAdminRole]</c>, and every read is Viewer+ -- NOT the uniform
+/// Admin-write/Viewer-read shape <see cref="ContentLibrariesController"/> uses for the
+/// library *registry* (registry create/delete is persistent configuration, outside
+/// R2-10's "organize" wording, per issue #1746's own reconciliation note). Folder
 /// structure and item-folder assignment are pure metadata; nothing here ever reads
 /// or writes the library's on-disk directory, and item identity is accepted as
 /// given -- there is no items table yet (#1396 is still queued), so <c>item_id</c> is
@@ -55,7 +63,7 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 	}
 
 	[HttpPost("folders")]
-	[RequireAdminRole]
+	[RequireOperatorRole]
 	[ProducesResponseType(typeof(ContentLibraryFolderResponse), StatusCodes.Status201Created)]
 	[ProducesResponseType(StatusCodes.Status400BadRequest)]
 	[ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -81,7 +89,7 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 
 	/// <summary>Rename and/or move (issue #1389 AC): rejects a move that would place the folder under itself or one of its own descendants.</summary>
 	[HttpPatch("folders/{folderId:guid}")]
-	[RequireAdminRole]
+	[RequireOperatorRole]
 	[ProducesResponseType(typeof(ContentLibraryFolderResponse), StatusCodes.Status200OK)]
 	[ProducesResponseType(StatusCodes.Status400BadRequest)]
 	[ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -134,7 +142,7 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 
 	/// <summary>Assigns/moves/unassigns one item (<c>folder_id: null</c> returns it to the library root). Single-parent: an item has at most one folder.</summary>
 	[HttpPatch("items/{itemId:guid}/folder")]
-	[RequireAdminRole]
+	[RequireOperatorRole]
 	[ProducesResponseType(StatusCodes.Status204NoContent)]
 	[ProducesResponseType(StatusCodes.Status404NotFound)]
 	public async Task<IActionResult> AssignItem(

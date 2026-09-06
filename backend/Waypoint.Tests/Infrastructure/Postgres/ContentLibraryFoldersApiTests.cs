@@ -185,30 +185,53 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		Assert.Equal(itemId, itemIds[0].GetGuid());
 	}
 
-	/// <summary>Issue #1389 AC: every mutating endpoint is Admin-only; Viewer/Operator are read-only, matching <c>ContentLibrariesController</c>'s own gate.</summary>
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Operator")]
-	public async Task EveryMutatingEndpoint_BelowAdmin_Returns403(string role)
+	/// <summary>Issue #1389/#1746 AC: Viewer is read-only -- every mutating endpoint (organize AND delete) is 403 for Viewer, GET is 200.</summary>
+	[Fact]
+	public async Task EveryMutatingEndpoint_AsViewer_Returns403()
 	{
-		Guid libraryId = await SeedLibraryAsync($"vcsp-api-rbac-{role.ToLowerInvariant()}");
+		Guid libraryId = await SeedLibraryAsync("vcsp-api-rbac-viewer");
 		Guid folderId = await CreateFolderAsync(libraryId, "Gate", null);
 
 		Assert.Equal(
 			HttpStatusCode.Forbidden,
-			(await SendAsync(HttpMethod.Post, $"/api/v1/content-libraries/{libraryId}/folders", role, new { name = "X" })).StatusCode);
+			(await SendAsync(HttpMethod.Post, $"/api/v1/content-libraries/{libraryId}/folders", "Viewer", new { name = "X" })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.Forbidden,
-			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", role, new { name = "X" })).StatusCode);
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Viewer", new { name = "X" })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.Forbidden,
-			(await SendAsync(HttpMethod.Delete, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", role, body: null)).StatusCode);
+			(await SendAsync(HttpMethod.Delete, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Viewer", body: null)).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.Forbidden,
-			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{Guid.NewGuid()}/folder", role, new { folder_id = folderId })).StatusCode);
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{Guid.NewGuid()}/folder", "Viewer", new { folder_id = folderId })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.OK,
-			(await SendAsync(HttpMethod.Get, $"/api/v1/content-libraries/{libraryId}/folders", role, body: null)).StatusCode);
+			(await SendAsync(HttpMethod.Get, $"/api/v1/content-libraries/{libraryId}/folders", "Viewer", body: null)).StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1746 (decision R2-10, reconciled by #1034/PR #1747): Operator can
+	/// organize -- create/rename-move a folder and assign an item -- but folder
+	/// DELETE stays Admin-only (the "deletes/purges" bucket).
+	/// </summary>
+	[Fact]
+	public async Task OrganizeEndpoints_AsOperator_Return2xx_ButDeleteReturns403()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-api-rbac-operator");
+		Guid folderId = await CreateFolderAsync(libraryId, "Gate", null);
+
+		Assert.Equal(
+			HttpStatusCode.Created,
+			(await SendAsync(HttpMethod.Post, $"/api/v1/content-libraries/{libraryId}/folders", "Operator", new { name = "Organized" })).StatusCode);
+		Assert.Equal(
+			HttpStatusCode.OK,
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Operator", new { name = "Renamed-by-operator" })).StatusCode);
+		Assert.Equal(
+			HttpStatusCode.NoContent,
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{Guid.NewGuid()}/folder", "Operator", new { folder_id = folderId })).StatusCode);
+		Assert.Equal(
+			HttpStatusCode.Forbidden,
+			(await SendAsync(HttpMethod.Delete, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Operator", body: null)).StatusCode);
 	}
 
 	[Fact]
