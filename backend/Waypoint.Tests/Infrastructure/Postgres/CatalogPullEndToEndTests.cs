@@ -543,6 +543,57 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.Contains("malformed", outcome.Note, StringComparison.OrdinalIgnoreCase);
 	}
 
+	/// <summary>
+	/// Issue #764's crash-window fix, pinned: index depot_artifacts and record
+	/// catalog_pull_state success BEFORE promoting the on-disk catalog, not after.
+	/// Forces the promotion step itself to fail (by pre-occupying its ".tmp" write
+	/// target with a directory, so <c>File.Copy</c> throws) and asserts the handler
+	/// still reports the fetched/authenticated data as indexed and recorded --
+	/// depot_artifacts has the row, catalog_pull_state shows a genuine success -- even
+	/// though the overall job outcome is Failed because the on-disk catalog itself
+	/// never caught up. Before #764's reorder, this same forced failure would have left
+	/// BOTH depot_artifacts and catalog_pull_state untouched (the old order promoted
+	/// first and never reached the index/state step at all), which is the exact
+	/// divergence issue #764 describes, just observed from the opposite failure point.
+	/// </summary>
+	[Fact]
+	public async Task PromotionFailsAfterIndexing_ArtifactsAndPullStateAlreadyReflectTheFetch_JobReportsFailed()
+	{
+		await SeedActivationCodeCredentialAsync(InventedCode);
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
+		ClaimedJob job = await EnqueuePullJobAsync();
+
+		// Pre-occupy the promotion's ".tmp" write target with a directory so
+		// File.Copy(..., overwrite: true) throws IOException at the promotion step,
+		// strictly AFTER indexing/state recording would already have run.
+		string activeCatalogPath = Path.Combine(_depotPath, "PROD", "metadata", "productVersionCatalog", "v1", "productVersionCatalog.json");
+		Directory.CreateDirectory(activeCatalogPath + ".tmp");
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("Indexed", outcome.Note);
+		Assert.Contains("could not be promoted", outcome.Note);
+
+		// The fetch was indexed and recorded as a genuine success BEFORE the promotion
+		// attempt -- the #764 ordering fix's whole point.
+		(IReadOnlyList<DepotArtifact> items, long total) = await _artifacts.ListAsync(
+			new DepotArtifactFilter(null, null, null), new Waypoint.Core.Pagination.PageRequest(), CancellationToken.None);
+		Assert.Equal(1, total);
+
+		CatalogPullState? state = await _pullState.GetAsync(CancellationToken.None);
+		Assert.Equal(CatalogPullOutcomes.Succeeded, state!.LastOutcome);
+		Assert.Equal(1, state.LastSuccessItemCount);
+
+		// On-disk catalog never caught up (the promotion never completed) -- this is
+		// the self-healing divergence window #764 accepts, just moved to the other
+		// side of the write order.
+		Assert.False(File.Exists(activeCatalogPath));
+	}
+
 	[Fact]
 	public async Task ToolCallItselfFails_ReportsOrdinaryFailure_NotAuthFailure()
 	{

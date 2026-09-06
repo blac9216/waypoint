@@ -314,7 +314,7 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			};
 
 			await _artifacts.UpsertAsync(
-				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "failed", artifact.MetadataJson),
+				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, DepotArtifactStatuses.Failed, artifact.MetadataJson),
 				cancellationToken).ConfigureAwait(false);
 			await EmitVerificationAlertAsync(context, artifact.ExternalId, artifact.Id, failureReason, cancellationToken)
 				.ConfigureAwait(false);
@@ -325,7 +325,7 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		// an echo of artifact.Sha256 -- when the catalog row had no vendor hash yet
 		// (size-only), this is the write that gives it one.
 		await _artifacts.UpsertAsync(
-			new DepotArtifactUpsert(artifact.ExternalId, verification.Sha256, "present", artifact.MetadataJson),
+			new DepotArtifactUpsert(artifact.ExternalId, verification.Sha256, DepotArtifactStatuses.Present, artifact.MetadataJson),
 			cancellationToken).ConfigureAwait(false);
 
 		return JobExecutionOutcome.Succeeded(

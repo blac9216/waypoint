@@ -138,6 +138,6 @@ public static class VendorProductVersionCatalogParser
 		// ExternalId string standing in for two different things. Reconciling a
 		// nested relative path for the connected side is presence-sweep behavior
 		// (#1503), out of this slice's scope.
-		return new DepotArtifactUpsert(fileName, checksum, "indexed", metadataJson, size);
+		return new DepotArtifactUpsert(fileName, checksum, DepotArtifactStatuses.Indexed, metadataJson, size);
 	}
 }

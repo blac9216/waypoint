@@ -130,6 +130,35 @@ public sealed class UnknownCatalogFileRepositoryTests : IAsyncLifetime
 		Assert.Single(events.Emitted);
 	}
 
+	/// <summary>
+	/// Issue #1637: the sequential test above only proves the "re-touch of an
+	/// already-known path" side of first-sighting-exactly-once. The guarantee that two
+	/// sweeps racing on the same brand-new <c>relative_path</c> produce EXACTLY one
+	/// alert -- not zero, not two -- rests on the <c>DO UPDATE</c> branch in
+	/// <see cref="UnknownCatalogFileRepository.RecordSeenAsync"/> carrying no
+	/// <c>WHERE</c> predicate, so the losing statement of the race always takes the
+	/// update path and always observes <c>xmax != 0</c>: fires both calls concurrently
+	/// via <see cref="Task.WhenAll(Task, Task)"/> against one shared
+	/// <see cref="RecordingJobEventPublisher"/> and asserts exactly one
+	/// <c>system.notice</c> landed, and that both calls resolved to the same row id
+	/// (the <c>ON CONFLICT</c> unique-key guarantee this whole scenario depends on).
+	/// </summary>
+	[Fact]
+	public async Task RecordSeenAsync_TwoConcurrentCallsOnSameNewPath_EmitsExactlyOneSystemNoticeEvent()
+	{
+		RecordingJobEventPublisher events = new();
+		UnknownCatalogFileRepository repository = new(_fixture.ConnectionString, events);
+		string relativePath = $"unknown/{Guid.NewGuid():N}.iso";
+
+		Task<Guid> first = repository.RecordSeenAsync(relativePath, 1024, CancellationToken.None);
+		Task<Guid> second = repository.RecordSeenAsync(relativePath, 2048, CancellationToken.None);
+		Guid[] ids = await Task.WhenAll(first, second);
+
+		Assert.Equal(ids[0], ids[1]);
+		Assert.Single(events.Emitted);
+		Assert.Equal(JobEventTypes.SystemNotice, events.Emitted[0].EventType);
+	}
+
 	private sealed class RecordingJobEventPublisher : IJobEventPublisher
 	{
 		public List<(string EventType, Guid? JobId, Guid? RunId, string PayloadJson)> Emitted { get; } = [];

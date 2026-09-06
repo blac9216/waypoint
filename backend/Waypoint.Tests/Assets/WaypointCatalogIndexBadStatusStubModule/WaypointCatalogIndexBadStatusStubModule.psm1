@@ -42,6 +42,7 @@ function Invoke-WaypointCatalogIndex {
 	# (relative_path) upsert key) so this suite can assert on its own rows without a
 	# table-wide row count, which the shared fixture does not otherwise guarantee.
 	[pscustomobject]@{
+		RecordType   = 'ArtifactPresence'
 		ExternalId   = 'wp1705-badstatus-artifact-1'
 		Sha256       = '00000000000000000000000000000000000000000000000000000000000011'
 		Status       = 'present'
@@ -51,6 +52,7 @@ function Invoke-WaypointCatalogIndex {
 		RelativePath = 'wp1705/badstatus/artifact-1.iso'
 	}
 	[pscustomobject]@{
+		RecordType   = 'ArtifactPresence'
 		ExternalId   = 'wp1705-badstatus-artifact-bad'
 		Sha256       = $null
 		Status       = 'not-a-real-status'
@@ -60,6 +62,7 @@ function Invoke-WaypointCatalogIndex {
 		RelativePath = 'wp1705/badstatus/artifact-bad.iso'
 	}
 	[pscustomobject]@{
+		RecordType   = 'ArtifactPresence'
 		ExternalId   = 'wp1705-badstatus-artifact-2'
 		Sha256       = '00000000000000000000000000000000000000000000000000000000000022'
 		Status       = 'missing'

@@ -59,6 +59,7 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 	private WaypointRunspacePool _pool = null!;
 	private CatalogIndexJobHandler _handler = null!;
 	private DepotArtifactRepository _artifacts = null!;
+	private UnknownCatalogFileRepository _unknownFiles = null!;
 
 	public CatalogIndexJobHandlerEndToEndTests(PostgresFixture fixture)
 	{
@@ -85,9 +86,11 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 		PowerShellExecutor executor = new(_pool, _logBuffer, wrappedPsOptions, NullLogger<PowerShellExecutor>.Instance);
 
 		_artifacts = new DepotArtifactRepository(_fixture.ConnectionString);
+		_unknownFiles = new UnknownCatalogFileRepository(_fixture.ConnectionString);
+		await ResetUnknownFilesAsync();
 
 		CatalogOptions catalogOptions = new() { DepotPath = "/invented/depot" };
-		_handler = new CatalogIndexJobHandler(executor, _artifacts, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
 	}
 
 	public async Task DisposeAsync()
@@ -116,21 +119,26 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 	/// <summary>
 	/// The full loop: fan out a <c>catalog-index</c> job (matching
 	/// <c>CatalogController.Sync</c>'s <c>CredentialId: null</c> shape) -> dispatcher
-	/// claims it -> the real handler invokes the stub module, upserts every row ->
-	/// <c>depot_artifacts</c> has the rows and <c>run.progress</c> was emitted ->
-	/// re-running the same job type again (a second sync) is idempotent (#193's
-	/// acceptance criterion, proven through this handler).
+	/// claims it -> the real handler invokes the stub module, upserts every
+	/// <c>ArtifactPresence</c> row and records the one <c>UnknownFile</c> row (#1512) ->
+	/// <c>depot_artifacts</c> has the artifact rows, <c>unknown_catalog_files</c> has the
+	/// unknown file, and <c>run.progress</c> was emitted -> re-running the same job type
+	/// again (a second sync) is idempotent (#193's acceptance criterion, proven through
+	/// this handler) and the unknown file's first-sighting alert does not fire twice.
 	/// </summary>
 	[Fact]
-	public async Task SyncToDispatchToHandler_PopulatesArtifacts_EmitsProgress_AndIsIdempotentOnRerun()
+	public async Task SyncToDispatchToHandler_PopulatesArtifacts_RecordsUnknownFile_EmitsProgress_AndIsIdempotentOnRerun()
 	{
 		Guid firstRunId = await RunCatalogIndexOnceAsync();
 		await AssertArtifactRowCountAsync(3);
+		await AssertUnknownFileSeenAsync();
 		Assert.True(await EventTypeExistsAsync(JobEventTypes.RunProgress, firstRunId));
 
-		// Re-sync: same three external ids upsert in place rather than duplicating.
+		// Re-sync: same three external ids upsert in place rather than duplicating, and
+		// the unknown file is only touched (still exactly one row), not duplicated.
 		await RunCatalogIndexOnceAsync();
 		await AssertArtifactRowCountAsync(3);
+		await AssertUnknownFileSeenAsync();
 	}
 
 	/// <summary>
@@ -174,6 +182,20 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
 		Assert.Equal(expected, total);
 		Assert.Equal(expected, items.Count);
+	}
+
+	private async Task AssertUnknownFileSeenAsync()
+	{
+		IReadOnlyList<UnknownCatalogFile> items = await _unknownFiles.ListAsync(CancellationToken.None);
+		Assert.Single(items, item => item.RelativePath == "stub/unknown-artifact.iso");
+	}
+
+	private async Task ResetUnknownFilesAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand truncate = new("TRUNCATE TABLE unknown_catalog_files RESTART IDENTITY", connection);
+		await truncate.ExecuteNonQueryAsync();
 	}
 
 	private async Task<bool> EventTypeExistsAsync(string eventType, Guid runId)

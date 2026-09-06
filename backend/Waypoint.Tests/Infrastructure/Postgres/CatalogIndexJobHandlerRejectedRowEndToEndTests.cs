@@ -57,6 +57,7 @@ public sealed class CatalogIndexJobHandlerRejectedRowEndToEndTests : IAsyncLifet
 	private WaypointRunspacePool _pool = null!;
 	private CatalogIndexJobHandler _handler = null!;
 	private DepotArtifactRepository _artifacts = null!;
+	private UnknownCatalogFileRepository _unknownFiles = null!;
 
 	public CatalogIndexJobHandlerRejectedRowEndToEndTests(PostgresFixture fixture)
 	{
@@ -83,9 +84,10 @@ public sealed class CatalogIndexJobHandlerRejectedRowEndToEndTests : IAsyncLifet
 		PowerShellExecutor executor = new(_pool, _logBuffer, wrappedPsOptions, NullLogger<PowerShellExecutor>.Instance);
 
 		_artifacts = new DepotArtifactRepository(_fixture.ConnectionString);
+		_unknownFiles = new UnknownCatalogFileRepository(_fixture.ConnectionString);
 
 		CatalogOptions catalogOptions = new() { DepotPath = "/invented/depot" };
-		_handler = new CatalogIndexJobHandler(executor, _artifacts, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
 	}
 
 	public async Task DisposeAsync()

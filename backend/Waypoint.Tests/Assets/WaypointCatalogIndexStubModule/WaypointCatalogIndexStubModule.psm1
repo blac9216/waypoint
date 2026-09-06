@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Invented stub for the catalog-index full-loop integration test (issue #194). Mirrors
-# Invoke-WaypointCatalogIndex's real signature and output shape without touching the
-# sibling repo or a real depot share -- no vendor code, no real hostnames or
-# credentials, everything here is fabricated.
+# Invented stub for the catalog-index full-loop integration test (issue #194, updated
+# #1512). Mirrors Invoke-WaypointCatalogIndex's real signature and output shape
+# (including the #1503 RecordType discriminator: 'ArtifactPresence' vs 'UnknownFile')
+# without touching the sibling repo or a real depot share -- no vendor code, no real
+# hostnames or credentials, everything here is fabricated.
 
 function Invoke-WaypointCatalogIndex {
 	[CmdletBinding()]
@@ -41,9 +42,10 @@ function Invoke-WaypointCatalogIndex {
 
 	1..3 | ForEach-Object {
 		[pscustomobject]@{
+			RecordType   = 'ArtifactPresence'
 			ExternalId   = "stub-artifact-$_"
 			Sha256       = "0000000000000000000000000000000000000000000000000000000000$_$_"
-			Status       = 'indexed'
+			Status       = 'present'
 			Product      = 'VCF'
 			Version      = "9.$_"
 			SizeBytes    = 1024 * $_
@@ -51,8 +53,16 @@ function Invoke-WaypointCatalogIndex {
 		}
 	}
 
-	Write-Information 'Indexed 3 files so far...'
-	Write-Information 'Indexing complete: 3 files.'
+	# One unknown file per sweep -- proves CatalogIndexJobHandler's UnknownFile branch
+	# through the same full-loop test the ArtifactPresence rows already exercise.
+	[pscustomobject]@{
+		RecordType   = 'UnknownFile'
+		RelativePath = 'stub/unknown-artifact.iso'
+		SizeBytes    = 2048
+	}
+
+	Write-Information 'Indexed 3 files, 1 unknown file so far...'
+	Write-Information 'Indexing complete: 3 files, 1 unknown file.'
 }
 
 Export-ModuleMember -Function Invoke-WaypointCatalogIndex

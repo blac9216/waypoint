@@ -46,13 +46,30 @@ namespace Waypoint.Infrastructure.Catalog;
 /// optional on the module signature for forward compatibility with a future
 /// vendor-catalog-refresh addition that would consume it -- see the module's own doc
 /// comment).
+///
+/// Issue #1512: rewritten to presence-sweep semantics. #1503's
+/// <c>Invoke-WaypointCatalogIndex</c> no longer treats "found on disk" as "create a
+/// row" -- it walks the authenticated vendor catalog and verifies each entry's disk
+/// presence, emitting one of two record shapes per the module's own doc comment:
+/// <c>RecordType = 'ArtifactPresence'</c> (a catalog entry, present or missing --
+/// #1495's existing <see cref="IDepotArtifactRepository.UpsertAsync"/> upsert, keyed
+/// by the depot-relative catalog identity) or <c>RecordType = 'UnknownFile'</c> (a file
+/// on disk matching no catalog entry -- #1495's <see cref="IUnknownCatalogFileRepository.RecordSeenAsync"/>,
+/// which itself raises the new-unknown-file alert on first sighting, decision Q11).
+/// Nothing is silently dropped: a row this handler cannot classify (missing/unrecognized
+/// <c>RecordType</c>, or missing required fields for its shape) is skipped, not fatal --
+/// the same "one malformed entry must not block every other artifact" posture this
+/// handler has always had.
 /// </summary>
 public sealed class CatalogIndexJobHandler : IJobHandler
 {
 	private const string InvocationCommand = "Invoke-WaypointCatalogIndex";
+	private const string ArtifactPresenceRecordType = "ArtifactPresence";
+	private const string UnknownFileRecordType = "UnknownFile";
 
 	private readonly IPowerShellExecutor _executor;
 	private readonly IDepotArtifactRepository _artifacts;
+	private readonly IUnknownCatalogFileRepository _unknownFiles;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
@@ -60,18 +77,21 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	public CatalogIndexJobHandler(
 		IPowerShellExecutor executor,
 		IDepotArtifactRepository artifacts,
+		IUnknownCatalogFileRepository unknownFiles,
 		ISecretRedactor redactor,
 		IOptions<CatalogOptions> catalogOptions,
 		IOptions<PowerShellOptions> powerShellOptions)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(artifacts);
+		ArgumentNullException.ThrowIfNull(unknownFiles);
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 
 		_executor = executor;
 		_artifacts = artifacts;
+		_unknownFiles = unknownFiles;
 		_redactor = redactor;
 		_catalogOptions = catalogOptions;
 		_powerShellOptions = powerShellOptions;
@@ -110,44 +130,76 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 		}
 
-		(int upserted, int rejected) = await UpsertArtifactsAsync(result.Output, context, cancellationToken).ConfigureAwait(false);
+		SweepOutcome outcome = await ProcessSweepOutputAsync(result.Output, context, cancellationToken).ConfigureAwait(false);
 
-		string progressPayload = JsonSerializer.Serialize(new { indexed_count = upserted });
+		string progressPayload = JsonSerializer.Serialize(new { indexed_count = outcome.Upserted, unknown_count = outcome.UnknownSeen });
 		await context.Events
 			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded(
-			rejected == 0 ? $"Indexed {upserted} artifact(s)." : $"Indexed {upserted} artifact(s); rejected {rejected} row(s).");
+		string message = $"Indexed {outcome.Upserted} artifact(s); {outcome.UnknownSeen} unknown file(s) seen.";
+		if (outcome.Rejected > 0)
+		{
+			message += $" Rejected {outcome.Rejected} row(s).";
+		}
+
+		return JobExecutionOutcome.Succeeded(message);
 	}
 
 	/// <summary>
-	/// Parses <c>Invoke-WaypointCatalogIndex</c>'s output (one PSObject per file, base
-	/// properties ExternalId/Sha256/Status/Product/Version/SizeBytes/RelativePath -- see
-	/// the module's doc comment) into <see cref="DepotArtifactUpsert"/> rows and upserts
-	/// each through the slice-1 repository's <c>ON CONFLICT</c> path (idempotent
-	/// re-sync, issue #193's acceptance criterion). Rows the parser cannot make sense of
-	/// are skipped rather than failing the whole job -- one malformed entry must not
-	/// block every other artifact from indexing (the same "individual target failures
-	/// must not halt a run" principle CLAUDE.md states for scans/downloads).
-	///
-	/// Issue #1705 Option B (defense in depth; A -- migration 0129 widening
-	/// <c>depot_artifacts_status_check</c> -- is the actual fix): a row whose
-	/// <c>status</c> the constraint rejects (23514, e.g. a status value emitted by a
-	/// future sweep/handler revision the constraint has not yet been widened for) is
-	/// counted and skipped rather than allowed to propagate and abort every other
-	/// artifact in the batch -- the handler's own documented "skip, don't halt"
-	/// posture, extended past parse failures to persistence failures.
+	/// Walks <c>Invoke-WaypointCatalogIndex</c>'s output (one PSObject per catalog entry
+	/// or unknown file -- see this type's own doc comment), branching on
+	/// <c>RecordType</c> so each of the two #1503 shapes lands through the repository
+	/// method that owns it. <c>RunProgress</c> fires every 25 rows PROCESSED
+	/// (upserted or unknown-seen together, not upserted alone) -- the same cadence this
+	/// handler has always used, extended to cover both shapes now that both count
+	/// toward real work done.
 	/// </summary>
-	private async Task<(int Upserted, int Rejected)> UpsertArtifactsAsync(IReadOnlyList<object?> output, JobExecutionContext context, CancellationToken cancellationToken)
+	private async Task<SweepOutcome> ProcessSweepOutputAsync(
+		IReadOnlyList<object?> output, JobExecutionContext context, CancellationToken cancellationToken)
 	{
 		int upserted = 0;
+		int unknownSeen = 0;
 		int rejected = 0;
+		int processed = 0;
+
 		foreach (object? item in output)
 		{
-			DepotArtifactUpsert? upsert = TryParseArtifact(item);
+			if (item is not System.Management.Automation.PSObject psObject)
+			{
+				continue;
+			}
+
+			string? recordType = GetProperty<string>(psObject, "RecordType");
+
+			if (string.Equals(recordType, UnknownFileRecordType, StringComparison.Ordinal))
+			{
+				string? unknownRelativePath = GetProperty<string>(psObject, "RelativePath");
+				if (string.IsNullOrWhiteSpace(unknownRelativePath))
+				{
+					continue;
+				}
+
+				object? unknownSizeBytes = PowerShellValueUnwrap.Unwrap(psObject.Properties["SizeBytes"]?.Value);
+				await _unknownFiles.RecordSeenAsync(unknownRelativePath, TryToInt64(unknownSizeBytes), cancellationToken).ConfigureAwait(false);
+				unknownSeen++;
+				processed++;
+				await MaybeEmitProgressAsync(context, processed, cancellationToken).ConfigureAwait(false);
+				continue;
+			}
+
+			if (!string.Equals(recordType, ArtifactPresenceRecordType, StringComparison.Ordinal))
+			{
+				// Unrecognized or missing RecordType -- malformed entry, skipped rather
+				// than failing the whole job (this handler's long-standing "skip, don't
+				// halt" posture, unchanged by #1512).
+				continue;
+			}
+
+			DepotArtifactUpsert? upsert = TryParseArtifact(psObject);
 			if (upsert is null)
 			{
+				processed++;
 				continue;
 			}
 
@@ -157,7 +209,14 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			}
 			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation)
 			{
+				// Issue #1705 Option B (defense in depth; A -- migration 0129 widening
+				// depot_artifacts_status_check -- is the actual fix): a row whose status
+				// the constraint rejects (e.g. a status value emitted by a future
+				// sweep/handler revision the constraint has not yet been widened for) is
+				// counted and skipped rather than allowed to propagate and abort every
+				// other artifact in the batch.
 				rejected++;
+				processed++;
 				string warningPayload = JsonSerializer.Serialize(new
 				{
 					severity = "warning",
@@ -170,26 +229,28 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			}
 
 			upserted++;
-
-			if (upserted % 25 == 0)
-			{
-				string payload = JsonSerializer.Serialize(new { indexed_count = upserted });
-				await context.Events
-					.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, payload, cancellationToken)
-					.ConfigureAwait(false);
-			}
+			processed++;
+			await MaybeEmitProgressAsync(context, processed, cancellationToken).ConfigureAwait(false);
 		}
 
-		return (upserted, rejected);
+		return new SweepOutcome(upserted, unknownSeen, rejected);
 	}
 
-	private static DepotArtifactUpsert? TryParseArtifact(object? item)
+	private static async Task MaybeEmitProgressAsync(JobExecutionContext context, int processed, CancellationToken cancellationToken)
 	{
-		if (item is not System.Management.Automation.PSObject psObject)
+		if (processed % 25 != 0)
 		{
-			return null;
+			return;
 		}
 
+		string payload = JsonSerializer.Serialize(new { processed_count = processed });
+		await context.Events
+			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, payload, cancellationToken)
+			.ConfigureAwait(false);
+	}
+
+	private static DepotArtifactUpsert? TryParseArtifact(System.Management.Automation.PSObject psObject)
+	{
 		string? externalId = GetProperty<string>(psObject, "ExternalId");
 		string? status = GetProperty<string>(psObject, "Status");
 		if (string.IsNullOrWhiteSpace(externalId) || string.IsNullOrWhiteSpace(status))
@@ -229,12 +290,11 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Best-effort conversion of the unwrapped <c>SizeBytes</c> PowerShell property
+	/// Best-effort conversion of an unwrapped PowerShell <c>SizeBytes</c> property
 	/// value (may arrive as <see cref="long"/>, <see cref="int"/>, or a numeric
-	/// string) into the new <see cref="DepotArtifactUpsert.SizeBytes"/> column
-	/// (migration 0100). Returns null rather than throwing on anything else -- one
-	/// unparsable size must not fail the whole row, matching this handler's existing
-	/// "skip, don't halt" posture for malformed entries.
+	/// string) into a nullable <see cref="long"/>. Returns null rather than throwing on
+	/// anything else -- one unparsable size must not fail the whole row, matching this
+	/// handler's existing "skip, don't halt" posture for malformed entries.
 	/// </summary>
 	private static long? TryToInt64(object? value)
 	{
@@ -252,4 +312,6 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	{
 		return PowerShellValueUnwrap.UnwrapAs<T>(psObject.Properties[name]?.Value);
 	}
+
+	private readonly record struct SweepOutcome(int Upserted, int UnknownSeen, int Rejected);
 }

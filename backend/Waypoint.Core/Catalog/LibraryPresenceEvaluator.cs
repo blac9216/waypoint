@@ -53,7 +53,7 @@ public static class LibraryPresenceEvaluator
 		ArgumentNullException.ThrowIfNull(artifacts);
 
 		Dictionary<string, ProductVersion?> latestPresentVersionByProduct = artifacts
-			.Where(a => string.Equals(a.Status, "present", StringComparison.Ordinal) && a.Product is not null)
+			.Where(a => string.Equals(a.Status, DepotArtifactStatuses.Present, StringComparison.Ordinal) && a.Product is not null)
 			.GroupBy(a => a.Product!)
 			.ToDictionary(
 				g => g.Key,
@@ -67,7 +67,7 @@ public static class LibraryPresenceEvaluator
 		List<LibraryItem> items = new(artifacts.Count);
 		foreach (DepotArtifact artifact in artifacts)
 		{
-			bool present = string.Equals(artifact.Status, "present", StringComparison.Ordinal);
+			bool present = string.Equals(artifact.Status, DepotArtifactStatuses.Present, StringComparison.Ordinal);
 			string presence;
 			if (present)
 			{

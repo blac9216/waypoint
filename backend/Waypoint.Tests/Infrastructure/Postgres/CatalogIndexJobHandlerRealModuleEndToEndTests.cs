@@ -72,6 +72,7 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 	private WaypointRunspacePool _pool = null!;
 	private CatalogIndexJobHandler _handler = null!;
 	private DepotArtifactRepository _artifacts = null!;
+	private UnknownCatalogFileRepository _unknownFiles = null!;
 	private string? _previousCommonPathEnv;
 
 	public CatalogIndexJobHandlerRealModuleEndToEndTests(PostgresFixture fixture)
@@ -121,9 +122,11 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 		PowerShellExecutor executor = new(_pool, _logBuffer, wrappedPsOptions, NullLogger<PowerShellExecutor>.Instance);
 
 		_artifacts = new DepotArtifactRepository(_fixture.ConnectionString);
+		_unknownFiles = new UnknownCatalogFileRepository(_fixture.ConnectionString);
+		await ResetUnknownFilesAsync();
 
 		CatalogOptions catalogOptions = new() { DepotPath = _depotDirectory };
-		_handler = new CatalogIndexJobHandler(executor, _artifacts, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
 	}
 
 	public async Task DisposeAsync()
@@ -188,6 +191,15 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 		// here would duplicate rows on every subsequent sweep instead of updating them.
 		Assert.Equal("PROD/COMP/VCENTER/vcsa-patch.iso", artifact.ExternalId);
 		Assert.Equal("present", artifact.Status);
+
+		// Issue #1512: the fake manifest's second, unmatched entry must land in
+		// unknown_catalog_files through the real module's UnknownFile emission, not
+		// silently vanish -- this is the real-module round-trip proof the stub-driven
+		// suite (CatalogIndexJobHandlerEndToEndTests) cannot provide.
+		IReadOnlyList<UnknownCatalogFile> unknownFiles = await _unknownFiles.ListAsync(CancellationToken.None);
+		UnknownCatalogFile unknownFile = Assert.Single(unknownFiles);
+		Assert.Equal("PROD/COMP/VCENTER/orphan-file.iso", unknownFile.RelativePath);
+		Assert.Equal(55, unknownFile.SizeBytes);
 	}
 
 	/// <summary>
@@ -202,6 +214,15 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand truncate = new("TRUNCATE TABLE depot_artifacts RESTART IDENTITY CASCADE", connection);
+		await truncate.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>Same known-empty-starting-table rationale as <see cref="ResetArtifactsAsync"/>, for the sibling table.</summary>
+	private async Task ResetUnknownFilesAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand truncate = new("TRUNCATE TABLE unknown_catalog_files RESTART IDENTITY", connection);
 		await truncate.ExecuteNonQueryAsync();
 	}
 
