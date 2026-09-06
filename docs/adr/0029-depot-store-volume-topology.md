@@ -93,8 +93,9 @@ retired alongside it (ADR-0030) — it is not repurposed as either of these.
 
 - A new runner-written store directory name must be added to nginx's subtree-deny
   regex at the same time it is added to the tool's `--depot-store` layout, or it
-  becomes reachable through the shared root (`docs/rationale/deploy.md
-  #nginx-repo-store-subtree-aliases` names the smoke-test guard).
+  becomes reachable through the shared root
+  (`docs/rationale/deploy.md#nginx-repo-store-subtree-aliases` names the smoke-test
+  guard).
 - Per-store auth/access dials (decision 15, ADR-0031) are enforced per nginx
   `location`, not per Compose volume — the volume boundary alone was never going to be
   fine-grained enough for that requirement even under the original six-volume plan.
