@@ -115,18 +115,23 @@ jobs:
       # baseline. To ratchet up further: re-measure with a fresh run, confirm
       # the new number holds, then raise --floor here.
       - name: Coverage gate (floor)
+        shell: bash
         run: |
+          set -o pipefail
           python3 scripts/check-coverage-floor.py \
             --report runners/download-runner/coverage.xml \
             --format jacoco \
             --floor 88.0 \
-            --metric line | tee coverage-gate.txt
+            --metric line > coverage-gate.txt
+          rc=$?
           {
             echo "### download-runner coverage"
             echo '```'
             cat coverage-gate.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          cat coverage-gate.txt
+          exit "$rc"
 
   shellcheck:
     name: "shellcheck (job)"
