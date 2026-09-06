@@ -488,8 +488,18 @@ public sealed class SchemaMigrationTests
 	/// filesystem access to a mounted patch store, ADR-0013/0014) -- proven both
 	/// directions by <c>EsxPatchStoreIndexRunnerRoleGrantTests</c> (this repo's
 	/// #556 convention) --
+	/// 0129 (issue #1705, part of validation epic #1704; slot 0129 -- the next free
+	/// slot after #1440's 0128, verified against both the migrations directory and
+	/// open PRs at authoring time): widens <c>depot_artifacts_status_check</c> to
+	/// admit <c>'missing'</c> -- the #1503 presence sweep's absent-from-disk result,
+	/// which the original slice-1 constraint never allowed, aborting the whole
+	/// <c>catalog-index</c> job on the first entry a real, partial depot produces. No
+	/// grant changes (a CHECK widening touches no privileges); the full resulting
+	/// vocabulary is <c>Waypoint.Core.Catalog.DepotArtifactStatuses.All</c>, proven
+	/// against this constraint's parsed SQL by
+	/// <c>DepotArtifactStatusesConstraintDriftTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 90;
+	private const int ExpectedMigrationCount = 91;
 
 	private readonly PostgresFixture _fixture;
 
