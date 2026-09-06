@@ -22,7 +22,7 @@ namespace Waypoint.Tests.Core.Downloads.Photon;
 
 /// <summary>
 /// Drift guard for <see cref="PhotonRepoVariants.All"/>/<see cref="PhotonArches.All"/>
-/// against migration 0108's <c>photon_repo_index_variant_check</c>/
+/// against migration 0129's <c>photon_repo_index_variant_check</c>/
 /// <c>photon_repo_index_arch_check</c>, following this repo's convention for every
 /// other closed-vocabulary/CHECK pairing (<c>OciBundleStatusesConstraintDriftTests</c>,
 /// <c>RunTypesConstraintDriftTests</c>): parse the authoritative value set out of the

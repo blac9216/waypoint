@@ -15,7 +15,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Waypoint.Core.Downloads.Photon;
 using Waypoint.Core.Jobs;
-using Waypoint.Infrastructure.Execution.Downloads.Photon;
+using Waypoint.Infrastructure.Downloads.Photon;
 using Waypoint.Infrastructure.Jobs;
 using Xunit;
 
@@ -77,6 +77,9 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 
 		public Task<IReadOnlyList<PhotonRepoIndexEntry>> ListRepoIndexEntriesAsync(CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<PhotonRepoIndexEntry>>(Upserted);
+
+		public Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(string version, string variant, string arch, CancellationToken cancellationToken) =>
+			Task.FromResult(Upserted.LastOrDefault(e => e.Version == version && e.Variant == variant && e.Arch == arch));
 	}
 
 	private sealed class FakeEventPublisher : IJobEventPublisher
@@ -143,7 +146,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 	public async Task ExecuteAsync_NoRepodataRepo_IsIndexedWithoutFailingTheJob()
 	{
 		FakeMetadataSource source = new();
-		string snapshotsRepoUrl = $"{BaseUrl}/5.0/{PhotonRepoDiscoveryJobHandler.RepoDirectoryName("5.0", PhotonRepoVariants.Snapshots, PhotonArches.X86_64)}";
+		string snapshotsRepoUrl = $"{BaseUrl}/5.0/{PhotonRepoDiscoveryJobHandler.RepoDirectoryName("5.0", PhotonRepoVariants.Snapshots, PhotonArches.X8664)}";
 		source.ProbesByRepoBaseUrl[snapshotsRepoUrl] = PhotonRepomdProbeResult.NotFound;
 		FakeIndexRepository repository = new();
 		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
@@ -152,7 +155,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		PhotonRepoIndexEntry snapshotsEntry = Assert.Single(
-			repository.Upserted, e => e.Variant == PhotonRepoVariants.Snapshots && e.Arch == PhotonArches.X86_64);
+			repository.Upserted, e => e.Variant == PhotonRepoVariants.Snapshots && e.Arch == PhotonArches.X8664);
 		Assert.False(snapshotsEntry.HasRepodata);
 		Assert.Null(snapshotsEntry.RepomdRevision);
 		Assert.Null(snapshotsEntry.PackageCount);

@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Downloads.Photon;
 
 /// <summary>
-/// Persists the Photon lane's discovered index (migration 0108). Only the RPM-repo
+/// Persists the Photon lane's discovered index (migration 0129). Only the RPM-repo
 /// side is exposed here -- <c>photon_image_index</c>/<c>photon_subscription_config</c>
 /// have no reader or writer yet (this issue's documented remainder: the
 /// image-discovery job and the sync/subscription lane, both separate issues) --
@@ -36,4 +36,12 @@ public interface IPhotonIndexRepository
 
 	/// <summary>Every currently-indexed repo row, for tests and the future read API.</summary>
 	Task<IReadOnlyList<PhotonRepoIndexEntry>> ListRepoIndexEntriesAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// The single row for one (version, variant, arch) triple, or <c>null</c> if never
+	/// discovered -- the point-lookup counterpart to <see cref="ListRepoIndexEntriesAsync"/>,
+	/// used by tests that need to assert on one row without being sensitive to
+	/// whatever else the shared test database happens to hold.
+	/// </summary>
+	Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(string version, string variant, string arch, CancellationToken cancellationToken);
 }

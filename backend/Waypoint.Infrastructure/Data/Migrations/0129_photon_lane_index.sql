@@ -1,5 +1,6 @@
 -- Issue #1509 (epic #1184, split from #1052's closing comment; migration slot 0108
--- pre-assigned 2026-08-30). Establishes the Photon lane's persisted index schema:
+-- pre-assigned 2026-08-30, RENUMBERED to 0129 at authoring time -- see MIGRATION
+-- SLOT note below). Establishes the Photon lane's persisted index schema:
 -- the RPM-repo index, the image-tree index, and an (unpopulated) subscription-config
 -- table. Layout facts encoded here come from the ratified research on lane #1029
 -- (issue #1026's research epic): version branch x repo variant x arch is the RPM
@@ -14,8 +15,16 @@
 --
 -- MIGRATION SLOT: this repo's numbered-migration sequence is a shared resource
 -- across concurrently-developed issues; 0108 was pre-assigned on 2026-08-30 while
--- #1389 (0113) and #1392 (0109) were also in flight. If a numbering collision is
--- discovered at merge time, whoever merges second renumbers (this file plus
+-- #1389 (0113) and #1392 (0109) were also in flight. By the time this issue was
+-- actually implemented, origin/main already carried 0117/0118/0127/0128 (all merged
+-- ahead of this branch) -- 0127 in particular DROPs and re-ADDs
+-- jobs_job_type_check/runs_run_type_check wholesale, which would silently erase this
+-- migration's new 'photon-repo-discovery' value if this file still ran before it in
+-- filename order. Renumbered to 0129 (the next free slot after the highest migration
+-- present on origin/main at authoring time) so this migration's ALTER TABLE runs
+-- LAST and its addition survives. #1389's 0113 and #1392's 0109 had not merged as of
+-- this renumbering -- if either lands with a numbering or constraint-redeclaration
+-- collision against 0129, whoever merges second renumbers (this file plus
 -- SchemaMigrationTests.ExpectedMigrationCount), per the convention migration 0037
 -- already documents.
 --

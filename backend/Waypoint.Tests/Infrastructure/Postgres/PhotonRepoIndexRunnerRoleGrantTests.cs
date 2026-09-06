@@ -22,7 +22,7 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Migration 0108's runner grants (issue #1509), following the
+/// Migration 0129's runner grants (issue #1509), following the
 /// <see cref="EsxPatchStoreIndexRunnerRoleGrantTests"/>/#556 convention: prove both the
 /// grant that exists (SELECT/INSERT/UPDATE on <c>photon_repo_index</c> for
 /// <c>waypoint_download_runner</c>) and the operations that must still be denied (no
@@ -67,18 +67,23 @@ public sealed class PhotonRepoIndexRunnerRoleGrantTests : IAsyncLifetime
 	public async Task DownloadRunnerRole_CanUpsertAndListRepoIndexEntries()
 	{
 		PhotonIndexRepository repository = new(_downloadRunnerConnectionString);
+		// This class shares its Postgres database with the whole "Postgres" collection
+		// -- a unique version value plus a point lookup keeps this assertion honest
+		// regardless of what other tests have already written to photon_repo_index.
+		string version = $"5.0-grant-test-{Guid.NewGuid():N}";
 
 		await repository.UpsertRepoIndexEntryAsync(
-			new PhotonRepoIndexEntry("5.0", PhotonRepoVariants.Release, PhotonArches.X86_64, "https://photon.example.internal/photon/5.0/photon_release_5.0_x86_64", true, "1699999999", 1795),
+			new PhotonRepoIndexEntry(version, PhotonRepoVariants.Release, PhotonArches.X8664, "https://photon.example.internal/photon/5.0/photon_release_5.0_x86_64", true, "1699999999", 1795),
 			CancellationToken.None);
 		// Re-discovery of the same triple -- the UPDATE half of the upsert, as the real runner role.
 		await repository.UpsertRepoIndexEntryAsync(
-			new PhotonRepoIndexEntry("5.0", PhotonRepoVariants.Release, PhotonArches.X86_64, "https://photon.example.internal/photon/5.0/photon_release_5.0_x86_64", true, "1700000001", 1796),
+			new PhotonRepoIndexEntry(version, PhotonRepoVariants.Release, PhotonArches.X8664, "https://photon.example.internal/photon/5.0/photon_release_5.0_x86_64", true, "1700000001", 1796),
 			CancellationToken.None);
 
-		IReadOnlyList<PhotonRepoIndexEntry> entries = await repository.ListRepoIndexEntriesAsync(CancellationToken.None);
-		PhotonRepoIndexEntry entry = Assert.Single(entries);
-		Assert.Equal("1700000001", entry.RepomdRevision);
+		PhotonRepoIndexEntry? entry = await repository.GetRepoIndexEntryAsync(
+			version, PhotonRepoVariants.Release, PhotonArches.X8664, CancellationToken.None);
+		Assert.NotNull(entry);
+		Assert.Equal("1700000001", entry!.RepomdRevision);
 		Assert.Equal(1796, entry.PackageCount);
 	}
 

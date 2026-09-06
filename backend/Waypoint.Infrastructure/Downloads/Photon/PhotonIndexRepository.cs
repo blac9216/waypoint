@@ -87,6 +87,24 @@ public sealed class PhotonIndexRepository : IPhotonIndexRepository
 		return items;
 	}
 
+	public async Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(
+		string version, string variant, string arch, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(version);
+		ArgumentException.ThrowIfNullOrWhiteSpace(variant);
+		ArgumentException.ThrowIfNullOrWhiteSpace(arch);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"{ProjectionSql} WHERE version = $1 AND variant = $2 AND arch = $3", connection);
+		command.Parameters.AddWithValue(version);
+		command.Parameters.AddWithValue(variant);
+		command.Parameters.AddWithValue(arch);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
 	private static PhotonRepoIndexEntry Map(NpgsqlDataReader reader) => new(
 		reader.GetString(1),
 		reader.GetString(2),

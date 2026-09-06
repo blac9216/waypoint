@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Downloads.Photon;
 
 /// <summary>
-/// One discovered Photon RPM repo directory (migration 0108's <c>photon_repo_index</c>):
+/// One discovered Photon RPM repo directory (migration 0129's <c>photon_repo_index</c>):
 /// version (branch) x <see cref="PhotonRepoVariants"/> x <see cref="PhotonArches"/>,
 /// identity-keyed on that triple. <see cref="HasRepodata"/> false marks a
 /// <c>photon_snapshots</c>-shaped directory with no <c>repodata/repomd.xml</c> --

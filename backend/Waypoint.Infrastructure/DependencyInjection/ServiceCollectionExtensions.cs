@@ -327,7 +327,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.Downloads.IRetainedContentStateRepository>(new Downloads.RetainedContentStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IRetentionPolicyRepository>(new Downloads.RetentionPolicyRepository(connectionString));
 
-			// Issue #1509 (migration 0108): the Photon lane's discovered-repo index,
+			// Issue #1509 (migration 0129): the Photon lane's discovered-repo index,
 			// written only by PhotonRepoDiscoveryJobHandler (AddWaypointExecution).
 			services.AddSingleton<Waypoint.Core.Downloads.Photon.IPhotonIndexRepository>(
 				new Downloads.Photon.PhotonIndexRepository(connectionString));

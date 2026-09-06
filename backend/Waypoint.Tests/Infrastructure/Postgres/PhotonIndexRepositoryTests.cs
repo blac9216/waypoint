@@ -21,10 +21,16 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Migration 0108's <c>photon_repo_index</c> against a real, disposable Postgres
+/// Migration 0129's <c>photon_repo_index</c> against a real, disposable Postgres
 /// container (issue #1509) -- the acceptance criterion this covers ("re-discovery of
 /// an unchanged upstream yields no duplicate rows") only means something proven
-/// against the real <c>ON CONFLICT ... DO UPDATE</c> engine behavior.
+/// against the real <c>ON CONFLICT ... DO UPDATE</c> engine behavior. This suite
+/// shares its Postgres database with every other test in the <c>"Postgres"</c>
+/// collection (one container per test run, per <c>PostgresFixture</c>), so every test
+/// method here uses its own unique, GUID-suffixed <c>version</c> value and reads back
+/// via the point-lookup <see cref="IPhotonIndexRepository.GetRepoIndexEntryAsync"/> --
+/// never <see cref="IPhotonIndexRepository.ListRepoIndexEntriesAsync"/>, which would
+/// see every other test's and every other test class's rows in the same table.
 /// </summary>
 [Collection("Postgres")]
 public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
@@ -44,12 +50,15 @@ public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
 
 	public Task DisposeAsync() => Task.CompletedTask;
 
+	private static string UniqueVersion(string tag) => $"5.0-test-{tag}-{Guid.NewGuid():N}";
+
 	[Fact]
 	public async Task UpsertRepoIndexEntryAsync_ReDiscoveryOfUnchangedRepo_YieldsNoDuplicateRow()
 	{
 		PhotonIndexRepository repository = new(_fixture.ConnectionString);
+		string version = UniqueVersion("unchanged");
 		PhotonRepoIndexEntry entry = new(
-			"5.0", PhotonRepoVariants.Updates, PhotonArches.X86_64,
+			version, PhotonRepoVariants.Updates, PhotonArches.X8664,
 			"https://photon.example.internal/photon/5.0/photon_updates_5.0_x86_64",
 			HasRepodata: true, RepomdRevision: "1700000000", PackageCount: 2125);
 
@@ -57,11 +66,11 @@ public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
 		await repository.UpsertRepoIndexEntryAsync(entry, CancellationToken.None);
 		await repository.UpsertRepoIndexEntryAsync(entry, CancellationToken.None);
 
-		IReadOnlyList<PhotonRepoIndexEntry> entries = await repository.ListRepoIndexEntriesAsync(CancellationToken.None);
-		PhotonRepoIndexEntry stored = Assert.Single(entries);
-		Assert.Equal("5.0", stored.Version);
+		IReadOnlyList<PhotonRepoIndexEntry> matching = [.. (await repository.ListRepoIndexEntriesAsync(CancellationToken.None))
+			.Where(e => e.Version == version)];
+		PhotonRepoIndexEntry stored = Assert.Single(matching);
 		Assert.Equal(PhotonRepoVariants.Updates, stored.Variant);
-		Assert.Equal(PhotonArches.X86_64, stored.Arch);
+		Assert.Equal(PhotonArches.X8664, stored.Arch);
 		Assert.Equal(2125, stored.PackageCount);
 	}
 
@@ -69,21 +78,25 @@ public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
 	public async Task UpsertRepoIndexEntryAsync_ReDiscoveryWithNewRevision_UpdatesInPlace_PreservingDiscoveredAt()
 	{
 		PhotonIndexRepository repository = new(_fixture.ConnectionString);
+		string version = UniqueVersion("revision");
 		PhotonRepoIndexEntry first = new(
-			"5.0", PhotonRepoVariants.Release, PhotonArches.Aarch64,
+			version, PhotonRepoVariants.Release, PhotonArches.Aarch64,
 			"https://photon.example.internal/photon/5.0/photon_release_5.0_aarch64",
 			HasRepodata: true, RepomdRevision: "1700000000", PackageCount: 100);
 		await repository.UpsertRepoIndexEntryAsync(first, CancellationToken.None);
 
-		IReadOnlyList<PhotonRepoIndexEntry> afterFirst = await repository.ListRepoIndexEntriesAsync(CancellationToken.None);
-		DateTimeOffset originalDiscoveredAt = Assert.Single(afterFirst).DiscoveredAt!.Value;
+		PhotonRepoIndexEntry? afterFirst = await repository.GetRepoIndexEntryAsync(
+			version, PhotonRepoVariants.Release, PhotonArches.Aarch64, CancellationToken.None);
+		Assert.NotNull(afterFirst);
+		DateTimeOffset originalDiscoveredAt = afterFirst!.DiscoveredAt!.Value;
 
 		PhotonRepoIndexEntry updated = first with { RepomdRevision = "1700000042", PackageCount = 101 };
 		await repository.UpsertRepoIndexEntryAsync(updated, CancellationToken.None);
 
-		IReadOnlyList<PhotonRepoIndexEntry> afterSecond = await repository.ListRepoIndexEntriesAsync(CancellationToken.None);
-		PhotonRepoIndexEntry stored = Assert.Single(afterSecond);
-		Assert.Equal("1700000042", stored.RepomdRevision);
+		PhotonRepoIndexEntry? stored = await repository.GetRepoIndexEntryAsync(
+			version, PhotonRepoVariants.Release, PhotonArches.Aarch64, CancellationToken.None);
+		Assert.NotNull(stored);
+		Assert.Equal("1700000042", stored!.RepomdRevision);
 		Assert.Equal(101, stored.PackageCount);
 		Assert.Equal(originalDiscoveredAt, stored.DiscoveredAt);
 	}
@@ -92,15 +105,18 @@ public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
 	public async Task UpsertRepoIndexEntryAsync_NoRepodataRepo_StoresNullRevisionAndPackageCount()
 	{
 		PhotonIndexRepository repository = new(_fixture.ConnectionString);
+		string version = UniqueVersion("norepodata");
 		PhotonRepoIndexEntry entry = new(
-			"5.0", PhotonRepoVariants.Snapshots, PhotonArches.X86_64,
+			version, PhotonRepoVariants.Snapshots, PhotonArches.X8664,
 			"https://photon.example.internal/photon/5.0/photon_snapshots_5.0_x86_64",
 			HasRepodata: false, RepomdRevision: null, PackageCount: null);
 
 		await repository.UpsertRepoIndexEntryAsync(entry, CancellationToken.None);
 
-		PhotonRepoIndexEntry stored = Assert.Single(await repository.ListRepoIndexEntriesAsync(CancellationToken.None));
-		Assert.False(stored.HasRepodata);
+		PhotonRepoIndexEntry? stored = await repository.GetRepoIndexEntryAsync(
+			version, PhotonRepoVariants.Snapshots, PhotonArches.X8664, CancellationToken.None);
+		Assert.NotNull(stored);
+		Assert.False(stored!.HasRepodata);
 		Assert.Null(stored.RepomdRevision);
 		Assert.Null(stored.PackageCount);
 	}
@@ -109,16 +125,17 @@ public sealed class PhotonIndexRepositoryTests : IAsyncLifetime
 	public async Task UpsertRepoIndexEntryAsync_DifferentArchSameVersionAndVariant_IsASeparateRow()
 	{
 		PhotonIndexRepository repository = new(_fixture.ConnectionString);
+		string version = UniqueVersion("botharches");
 		await repository.UpsertRepoIndexEntryAsync(
-			new PhotonRepoIndexEntry("5.0", PhotonRepoVariants.Extras, PhotonArches.X86_64, "https://photon.example.internal/photon/5.0/photon_extras_5.0_x86_64", true, "r1", 14),
+			new PhotonRepoIndexEntry(version, PhotonRepoVariants.Extras, PhotonArches.X8664, "https://photon.example.internal/photon/5.0/photon_extras_5.0_x86_64", true, "r1", 14),
 			CancellationToken.None);
 		await repository.UpsertRepoIndexEntryAsync(
-			new PhotonRepoIndexEntry("5.0", PhotonRepoVariants.Extras, PhotonArches.Aarch64, "https://photon.example.internal/photon/5.0/photon_extras_5.0_aarch64", true, "r1", 14),
+			new PhotonRepoIndexEntry(version, PhotonRepoVariants.Extras, PhotonArches.Aarch64, "https://photon.example.internal/photon/5.0/photon_extras_5.0_aarch64", true, "r1", 14),
 			CancellationToken.None);
 
-		IReadOnlyList<PhotonRepoIndexEntry> entries = await repository.ListRepoIndexEntriesAsync(CancellationToken.None);
-		Assert.Equal(2, entries.Count);
-		Assert.Contains(entries, e => e.Arch == PhotonArches.X86_64);
-		Assert.Contains(entries, e => e.Arch == PhotonArches.Aarch64);
+		PhotonRepoIndexEntry? x8664 = await repository.GetRepoIndexEntryAsync(version, PhotonRepoVariants.Extras, PhotonArches.X8664, CancellationToken.None);
+		PhotonRepoIndexEntry? aarch64 = await repository.GetRepoIndexEntryAsync(version, PhotonRepoVariants.Extras, PhotonArches.Aarch64, CancellationToken.None);
+		Assert.NotNull(x8664);
+		Assert.NotNull(aarch64);
 	}
 }
