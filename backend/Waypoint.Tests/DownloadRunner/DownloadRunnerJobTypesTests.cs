@@ -37,16 +37,17 @@ namespace Waypoint.Tests.DownloadRunner;
 /// change per issue #619's own convention; <c>binaries-download</c> joined in issue
 /// #1482 (the actual VCF artifact acquisition), landing its handler registration and
 /// this allowlist entry in the same change per <c>DownloadRunnerJobTypes</c>'s own
-/// doc comment.
+/// doc comment; <c>photon-repo-discovery</c> joined in issue #1509 (the Photon
+/// RPM-repo metadata discovery job), same convention.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
 	[Fact]
-	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentCatalogPullRetentionSweepAndBinariesDownload()
+	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentCatalogPullRetentionSweepBinariesDownloadAndPhotonRepoDiscovery()
 	{
 		Assert.Equal(
 			new HashSet<string>(StringComparer.Ordinal)
-				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download" },
+				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download", "photon-repo-discovery" },
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}
 

@@ -41,6 +41,13 @@ namespace Waypoint.DownloadRunner;
 /// allowlist lagged; here, the allowlist entry and <c>BinariesDownloadJobHandler</c>'s
 /// registration land together in this one change, so the type is never reserved
 /// without a claimer.
+///
+/// <c>photon-repo-discovery</c> (issue #1509, migration 0108): the Photon RPM-repo
+/// metadata discovery job (repomd-driven, index-only, no package fetch) -- handler
+/// registration and this allowlist entry land together, same convention.
+/// <c>photon-image-discovery</c> (the sibling image-tree discovery job) is
+/// deliberately NOT here yet -- it is issue #1509's documented remainder and reserves
+/// its own job type alongside its own handler when it lands.
 /// </summary>
 public static class DownloadRunnerJobTypes
 {
@@ -52,6 +59,7 @@ public static class DownloadRunnerJobTypes
 		"depot-enrollment",
 		"catalog-pull",
 		"retention-sweep",
-		"binaries-download"
+		"binaries-download",
+		"photon-repo-discovery"
 	};
 }

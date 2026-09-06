@@ -93,7 +93,8 @@ public static class JobCapabilities
 		"depot-enrollment",
 		"catalog-pull",
 		"binaries-download",
-		"retention-sweep"
+		"retention-sweep",
+		"photon-repo-discovery"
 	};
 
 	/// <summary>

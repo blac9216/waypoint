@@ -111,6 +111,9 @@ public sealed class SchemaMigrationTests
 		"content_library_item_folders",
 		"subscriptions",
 		"presets",
+		"photon_repo_index",
+		"photon_image_index",
+		"photon_subscription_config",
 		"schema_migrations"
 	];
 
@@ -580,6 +583,21 @@ public sealed class SchemaMigrationTests
 	/// unenforced (round 1 finding F4). No new runner grants -- no runner-claimed
 	/// job reads or writes either table yet; the first consumer that needs
 	/// runner-side access ships its own GRANT migration (0100/0107 precedent) --
+	/// 0130 (issue #1509, epic #1184, split from #1052; slot pre-assigned 2026-08-30
+	/// as 0108, renumbered to 0130 at rebase time -- see the migration file's own
+	/// header comment for why): adds <c>photon_repo_index</c> (one row per discovered
+	/// Photon RPM repo directory, keyed on (version, variant, arch);
+	/// <c>has_repodata=false</c> marks a <c>photon_snapshots</c>-shaped directory with
+	/// no <c>repodata/repomd.xml</c> -- indexed, never an error, research #1029
+	/// finding 5), <c>photon_image_index</c> (image-tree files per version/channel/kind
+	/// -- schema only, no writer until the image-discovery job, this issue's
+	/// documented remainder, lands), and <c>photon_subscription_config</c> (unpopulated
+	/// preset shape). Grants <c>waypoint_download_runner</c>
+	/// <c>SELECT, INSERT, UPDATE</c> (no DELETE) on <c>photon_repo_index</c> only --
+	/// <c>PhotonRepoDiscoveryJobHandler</c> is the only consumer this migration ships
+	/// alongside; the other two tables get no grant yet (0118's <c>oci_bundles</c>
+	/// precedent for the same shape of gap), proven both directions by
+	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
 	private const int ExpectedMigrationCount = 95;
 
