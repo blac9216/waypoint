@@ -22,7 +22,7 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Migration 0129's runner grants (issue #1509), following the
+/// Migration 0130's runner grants (issue #1509), following the
 /// <see cref="EsxPatchStoreIndexRunnerRoleGrantTests"/>/#556 convention: prove both the
 /// grant that exists (SELECT/INSERT/UPDATE on <c>photon_repo_index</c> for
 /// <c>waypoint_download_runner</c>) and the operations that must still be denied (no

@@ -21,7 +21,7 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 
 /// <summary>
 /// The <c>photon-repo-discovery</c> <see cref="JobShape.Simple"/> job handler (issue
-/// #1509, epic #1184), <c>waypoint_download_runner</c>-claimed (migration 0129).
+/// #1509, epic #1184), <c>waypoint_download_runner</c>-claimed (migration 0130).
 /// Enumerates every Photon version branch <see cref="IPhotonRepoMetadataSource.GetVersionBranchesAsync"/>
 /// reports, x every <see cref="PhotonRepoVariants.All"/> value, x both
 /// <see cref="PhotonArches.All"/> (this issue's AC 2: both arches unconditionally,

@@ -42,7 +42,7 @@ namespace Waypoint.DownloadRunner;
 /// registration land together in this one change, so the type is never reserved
 /// without a claimer.
 ///
-/// <c>photon-repo-discovery</c> (issue #1509, migration 0129): the Photon RPM-repo
+/// <c>photon-repo-discovery</c> (issue #1509, migration 0130): the Photon RPM-repo
 /// metadata discovery job (repomd-driven, index-only, no package fetch) -- handler
 /// registration and this allowlist entry land together, same convention.
 /// <c>photon-image-discovery</c> (the sibling image-tree discovery job) is

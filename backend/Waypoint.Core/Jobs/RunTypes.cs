@@ -26,7 +26,7 @@ namespace Waypoint.Core.Jobs;
 /// history" posture <see cref="JobEventTypes"/>'s <c>kind</c> filter established).
 /// <see cref="Waypoint.Tests.Core.Jobs.RunTypesConstraintDriftTests"/> asserts this list
 /// stays byte-identical to the CHECK constraint the migrations produce. 0127 (issue
-/// #1436) appended <c>retention-sweep</c>; 0129 (issue #1509) appended
+/// #1436) appended <c>retention-sweep</c>; 0130 (issue #1509) appended
 /// <c>photon-repo-discovery</c>.
 /// </summary>
 public static class RunTypes

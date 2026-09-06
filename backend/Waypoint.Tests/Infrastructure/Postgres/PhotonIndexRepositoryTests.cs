@@ -21,7 +21,7 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Migration 0129's <c>photon_repo_index</c> against a real, disposable Postgres
+/// Migration 0130's <c>photon_repo_index</c> against a real, disposable Postgres
 /// container (issue #1509) -- the acceptance criterion this covers ("re-discovery of
 /// an unchanged upstream yields no duplicate rows") only means something proven
 /// against the real <c>ON CONFLICT ... DO UPDATE</c> engine behavior. This suite

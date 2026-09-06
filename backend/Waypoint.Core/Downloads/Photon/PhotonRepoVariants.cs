@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Downloads.Photon;
 
 /// <summary>
-/// The Photon RPM repo axis (research #1029 finding 1), matching migration 0129's
+/// The Photon RPM repo axis (research #1029 finding 1), matching migration 0130's
 /// <c>photon_repo_index_variant_check</c> verbatim -- this is the closed set.
 /// <see cref="Waypoint.Tests.Core.Downloads.Photon.PhotonRepoVariantsConstraintDriftTests"/>
 /// asserts this list stays byte-identical to the CHECK constraint the migration
@@ -41,7 +41,7 @@ public static class PhotonRepoVariants
 
 /// <summary>
 /// The two arches every Photon repo exists in (research #1029 finding 1: "every repo
-/// exists in both x86_64 and aarch64 variants"), matching migration 0129's
+/// exists in both x86_64 and aarch64 variants"), matching migration 0130's
 /// <c>photon_repo_index_arch_check</c> verbatim. Discovery indexes both unconditionally
 /// (this issue's AC 2) -- arch opt-in is a later subscription-time concern
 /// (<c>photon_subscription_config.arches</c>), never a discovery-time filter.

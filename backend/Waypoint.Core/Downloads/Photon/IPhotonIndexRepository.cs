@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Downloads.Photon;
 
 /// <summary>
-/// Persists the Photon lane's discovered index (migration 0129). Only the RPM-repo
+/// Persists the Photon lane's discovered index (migration 0130). Only the RPM-repo
 /// side is exposed here -- <c>photon_image_index</c>/<c>photon_subscription_config</c>
 /// have no reader or writer yet (this issue's documented remainder: the
 /// image-discovery job and the sync/subscription lane, both separate issues) --

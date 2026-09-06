@@ -1,6 +1,7 @@
 -- Issue #1509 (epic #1184, split from #1052's closing comment; migration slot 0108
--- pre-assigned 2026-08-30, RENUMBERED to 0129 at authoring time -- see MIGRATION
--- SLOT note below). Establishes the Photon lane's persisted index schema:
+-- pre-assigned 2026-08-30, RENUMBERED to 0129 at authoring time then to 0130 at
+-- rebase time -- see MIGRATION SLOT note below). Establishes the Photon lane's
+-- persisted index schema:
 -- the RPM-repo index, the image-tree index, and an (unpopulated) subscription-config
 -- table. Layout facts encoded here come from the ratified research on lane #1029
 -- (issue #1026's research epic): version branch x repo variant x arch is the RPM
@@ -22,11 +23,14 @@
 -- migration's new 'photon-repo-discovery' value if this file still ran before it in
 -- filename order. Renumbered to 0129 (the next free slot after the highest migration
 -- present on origin/main at authoring time) so this migration's ALTER TABLE runs
--- LAST and its addition survives. #1389's 0113 and #1392's 0109 had not merged as of
--- this renumbering -- if either lands with a numbering or constraint-redeclaration
--- collision against 0129, whoever merges second renumbers (this file plus
--- SchemaMigrationTests.ExpectedMigrationCount), per the convention migration 0037
--- already documents.
+-- LAST and its addition survives. A pre-push rebase then found origin/main had ALSO
+-- gained 0129 in the meantime (#1705's depot_artifacts_status_check widening,
+-- unrelated column, no conflict with this migration's content) -- renumbered again to
+-- 0130, the next free slot after that rebase. #1389's 0113 and #1392's 0109 had not
+-- merged as of this second renumbering -- if either lands with a numbering or
+-- constraint-redeclaration collision against 0130, whoever merges second renumbers
+-- (this file plus SchemaMigrationTests.ExpectedMigrationCount), per the convention
+-- migration 0037 already documents.
 --
 -- photon_repo_index --------------------------------------------------------------------
 -- One row per (version, variant, arch) RPM repo directory this lane has ever
