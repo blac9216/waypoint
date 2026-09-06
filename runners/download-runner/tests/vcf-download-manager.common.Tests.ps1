@@ -431,6 +431,7 @@ Describe 'Save-WebFile' {
 		Mock Invoke-WebRequest {
 			# Range-resume request: server answers with the remaining bytes.
 			Set-Content -Path $OutFile -Value '890' -NoNewline
+			[pscustomobject]@{ StatusCode = 206; Headers = @{ 'Content-Range' = 'bytes 7-9/10' } }
 		}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/resume.bin' -OutFile $Out -ExpectedSize 10
@@ -463,30 +464,92 @@ Describe 'Save-WebFile' {
 		Set-Content -Path $Out -Value '12345' -NoNewline
 
 		Mock Invoke-WebRequest {
-			# Server honors Range and returns only the remaining bytes.
+			# Server honors Range and returns only the remaining bytes, with a
+			# Content-Range confirming the range start matches the partial size.
 			Set-Content -Path $OutFile -Value '67890' -NoNewline
+			[pscustomobject]@{ StatusCode = 206; Headers = @{ 'Content-Range' = 'bytes 5-9/10' } }
 		}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/partial.bin' -OutFile $Out -ExpectedSize 10
 
 		$Result.Success | Should -BeTrue
-		(Get-Content -LiteralPath $Out -Raw) | Should -Be '1234567890'
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
 	}
 
-	It 'accepts a full-file (200) response to a Range request that the server did not honor' {
-		$Out = Join-Path -Path 'TestDrive:' -ChildPath 'download/full-on-range.bin'
+	It 'restarts from zero on a 200 response to a ranged request (edge cache ignored Range), logging a Warning' {
+		# issue #1169: an edge-cached vendor object can answer a ranged GET
+		# with 200 + the full body instead of 206. The old heuristic compared
+		# body size to the expected remainder; here the 200 body is LARGER
+		# than the remainder (10 - 3 = 7), which the old heuristic also
+		# happened to classify correctly, but the decision must be driven by
+		# the status code, not the size, so this pins that.
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/full-on-range.bin'
 		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
 		Set-Content -Path $Out -Value '123' -NoNewline
 
 		Mock Invoke-WebRequest {
 			# Server ignores Range and returns the whole file in the temp path.
 			Set-Content -Path $OutFile -Value '1234567890' -NoNewline
+			[pscustomobject]@{ StatusCode = 200; Headers = @{} }
 		}
+		Mock Write-Log {}
 
 		$Result = Save-WebFile -Url 'https://example.invalid/full-on-range.bin' -OutFile $Out -ExpectedSize 10
 
 		$Result.Success | Should -BeTrue
-		(Get-Content -LiteralPath $Out -Raw) | Should -Be '1234567890'
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('1234567890'))
+		Should -Invoke Write-Log -ParameterFilter { $Severity -eq 'Warning' -and $Message -like '*answered with 200 instead of 206*' }
+	}
+
+	It 'restarts from zero on a 200 response whose body is SHORTER than the remainder, and the size check then fails honestly' {
+		# The old size-only heuristic's blind spot: a 200 body that happens to
+		# be <= the expected remainder was misread as a legitimate partial
+		# response and appended, corrupting the file. It must still be
+		# recognized as a restart (full body, wrong offset) and the eventual
+		# size mismatch must surface as a real error, not a silently-corrupt
+		# "success".
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/short-on-restart.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '123' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Remainder would be 7 bytes (10 - 3); this 200 body is only 4 bytes,
+			# well under the remainder -- the size heuristic would have appended it.
+			Set-Content -Path $OutFile -Value 'ABCD' -NoNewline
+			[pscustomobject]@{ StatusCode = 200; Headers = @{} }
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/short-on-restart.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*Size mismatch*'
+
+		[System.IO.File]::ReadAllBytes($Out) | Should -Be ([System.Text.Encoding]::ASCII.GetBytes('ABCD'))
+	}
+
+	It 'throws when a 206 response Content-Range start does not match the requested offset' {
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/range-mismatch.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '12345' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Server answers 206 but for a different offset than requested.
+			Set-Content -Path $OutFile -Value 'XYZ' -NoNewline
+			[pscustomobject]@{ StatusCode = 206; Headers = @{ 'Content-Range' = 'bytes 2-4/10' } }
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/range-mismatch.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*Content-Range starting at 2*'
+	}
+
+	It 'throws when a 206 response body length disagrees with its own Content-Range' {
+		$Out = Join-Path -Path $TestDrive -ChildPath 'download/range-body-mismatch.bin'
+		New-Item -Path (Split-Path $Out -Parent) -ItemType Directory -Force | Out-Null
+		Set-Content -Path $Out -Value '12345' -NoNewline
+
+		Mock Invoke-WebRequest {
+			# Content-Range claims 5 bytes (5-9) but the body is only 2 bytes.
+			Set-Content -Path $OutFile -Value 'XY' -NoNewline
+			[pscustomobject]@{ StatusCode = 206; Headers = @{ 'Content-Range' = 'bytes 5-9/10' } }
+		}
+
+		{ Save-WebFile -Url 'https://example.invalid/range-body-mismatch.bin' -OutFile $Out -ExpectedSize 10 -RetryCount 1 } | Should -Throw '*declared 5 bytes*'
 	}
 }
 
