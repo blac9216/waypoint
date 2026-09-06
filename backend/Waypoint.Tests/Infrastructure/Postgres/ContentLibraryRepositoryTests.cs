@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ContentLibraries;
+using Waypoint.Core.Errors;
 using Waypoint.Infrastructure.ContentLibraries;
 using Waypoint.Infrastructure.Data;
 using Xunit;
@@ -197,13 +199,29 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 	/// <summary>
 	/// PR #1649 round 1 (S3a): if the row insert wins but provisioning the directory
 	/// then fails, the compensating delete must remove the row again rather than
-	/// leaving the documented-impossible row-without-a-directory state.
+	/// leaving the documented-impossible row-without-a-directory state. Issue #1706:
+	/// that failure must also surface as the same typed, actionable 503
+	/// (<see cref="ApiException.Unavailable"/>) the controller maps to a clean
+	/// response -- never the raw <see cref="UnauthorizedAccessException"/> reaching a
+	/// caller as an unmapped 500. Skipped when the test process runs as root
+	/// (<c>id -u</c> == 0): root can write through a mode that denies every other
+	/// user, so the unwritable-root precondition this test depends on cannot be
+	/// constructed at all.
 	/// </summary>
 	[Fact]
-	public async Task CreateAsync_WhenDirectoryProvisioningFails_RemovesTheInsertedRowAgain()
+	public async Task CreateAsync_WhenDirectoryProvisioningFails_SurfacesAServiceUnavailableApiExceptionAndRemovesTheInsertedRowAgain()
 	{
 		if (OperatingSystem.IsWindows())
 		{
+			return;
+		}
+
+		if (IsRoot())
+		{
+			// Running as root (e.g. an unsandboxed container test lane) -- an
+			// unwritable directory is not achievable for this process, so this
+			// test cannot construct its precondition. Skipped cleanly rather
+			// than asserting something that would not hold.
 			return;
 		}
 
@@ -211,8 +229,11 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 		File.SetUnixFileMode(_rootPath, UnixFileMode.UserRead | UnixFileMode.UserExecute);
 		try
 		{
-			await Assert.ThrowsAsync<UnauthorizedAccessException>(
+			ApiException exception = await Assert.ThrowsAsync<ApiException>(
 				() => _libraries.CreateAsync("vcsp-unwritable", CancellationToken.None));
+			Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+			Assert.Equal("service_unavailable", exception.Code);
+			Assert.Contains(_rootPath, exception.Detail);
 		}
 		finally
 		{
@@ -221,6 +242,19 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 
 		IReadOnlyList<ContentLibrary> all = await _libraries.ListAsync(CancellationToken.None);
 		Assert.DoesNotContain(all, l => l.Name == "vcsp-unwritable");
+	}
+
+	/// <summary>Shells out to <c>id -u</c> -- the simplest portable check for effective root on Linux/macOS.</summary>
+	private static bool IsRoot()
+	{
+		using Process process = Process.Start(new ProcessStartInfo("id", "-u")
+		{
+			RedirectStandardOutput = true,
+			UseShellExecute = false,
+		})!;
+		string output = process.StandardOutput.ReadToEnd().Trim();
+		process.WaitForExit();
+		return output == "0";
 	}
 
 	/// <summary>

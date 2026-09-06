@@ -14,6 +14,7 @@
 
 using Npgsql;
 using Waypoint.Core.ContentLibraries;
+using Waypoint.Core.Errors;
 
 namespace Waypoint.Infrastructure.ContentLibraries;
 
@@ -90,12 +91,17 @@ public sealed class ContentLibraryRepository : IContentLibraryRepository
 			// promises could not be provisioned. Compensate by removing the row again
 			// (best effort against a further failure here would just re-litigate the
 			// same problem) so a failed create never leaves a row without a
-			// directory -- the interface's documented contract -- then rethrow so the
-			// caller still observes the failure.
+			// directory -- the interface's documented contract -- then surface a
+			// typed, actionable 503 (issue #1706) rather than letting the raw
+			// UnauthorizedAccessException/IOException reach the controller as an
+			// unmapped 500 -- same shape as ManagedToolController.Upload's
+			// staging-directory failure (ApiException.Unavailable, issue #621).
 			await using NpgsqlCommand cleanup = new("DELETE FROM content_libraries WHERE id = $1", connection);
 			cleanup.Parameters.AddWithValue(library.Id);
 			await cleanup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-			throw;
+			throw ApiException.Unavailable(
+				"The content-library storage location is not writable on this appliance.",
+				$"Confirm the content-libraries volume is mounted and writable at '{_rootPath}' (see deploy/compose.yaml and deploy/README.md).");
 		}
 
 		return (ContentLibraryCreateOutcome.Created, library);

@@ -19,6 +19,11 @@ if [ "$(id -u)" = '0' ]; then
 	[ -d /var/lib/waypoint/artifacts ] && chown app:app /var/lib/waypoint/artifacts
 	# Offline depot share -- matches Catalog:DepotPath.
 	[ -d /vcf ] && chown app:app /vcf
+	# Content-library registry: its own volume, nested at /vcf/ContentLibrary
+	# so the runner's existing store-path conventions are unchanged -- a
+	# distinct mount point, so it arrives root-owned independently of /vcf.
+	# why: docs/rationale/deploy.md#content-libraries-own-volume
+	[ -d /vcf/ContentLibrary ] && chown app:app /vcf/ContentLibrary
 	# Operator-installed managed-tool state (ADR-0015 decision 3) -- matches
 	# ManagedTool:ToolStatePath. A future install flow writes the
 	# vcf-download-tool executable here; download jobs only read it, but the
