@@ -32,19 +32,27 @@ the PR's measured number against the committed baseline instead of a
 hardcoded floor. Left as a follow-up; the floor is the pragmatic air-gapped
 interim.
 
-Supports two report formats (stdlib only — no third-party parser deps):
+Supports three report formats (stdlib only — no third-party parser deps):
 
   cobertura        backend: dotnet test's coverage.cobertura.xml
                     (line-rate / branch-rate attributes on <coverage>, 0..1)
   vitest-json-summary
                     frontend: vitest coverage-v8's coverage-summary.json
                     (total.lines.pct / total.branches.pct, 0..100)
+  jacoco           runners: Pester's CodeCoverage output converted to
+                    JaCoCo XML (report-level <counter type="LINE"|"BRANCH"
+                    missed=".." covered=".."/> — the counters that are
+                    direct children of the root <report> element, not the
+                    per-package/class ones; pct = covered / (covered +
+                    missed) * 100)
 
 Usage:
     check-coverage-floor.py --report path/to/coverage.cobertura.xml \
         --format cobertura --floor 89.0 [--metric line|branch]
     check-coverage-floor.py --report coverage/coverage-summary.json \
         --format vitest-json-summary --floor 88.0 [--metric line|branch]
+    check-coverage-floor.py --report path/to/jacoco.xml \
+        --format jacoco --floor 88.0 [--metric line|branch]
 """
 
 from __future__ import annotations
@@ -98,6 +106,49 @@ def measure_vitest_json_summary(report_path: str, metric: str) -> float:
         sys.exit(2)
 
 
+def measure_jacoco(report_path: str, metric: str) -> float:
+    try:
+        tree = ET.parse(report_path)
+    except ET.ParseError as exc:
+        print(f"error: {report_path} is not valid jacoco xml: {exc}", file=sys.stderr)
+        sys.exit(2)
+    root = tree.getroot()
+    counter_type = "LINE" if metric == "line" else "BRANCH"
+    # Only the counters that are direct children of the root <report>
+    # element are the report-level totals; per-package/class counters share
+    # the same tag name and must not be summed in here.
+    counter = None
+    for child in root:
+        if child.tag == "counter" and child.get("type") == counter_type:
+            counter = child
+            break
+    if counter is None:
+        print(
+            f"error: {report_path} has no report-level {counter_type} counter",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        missed = int(counter.get("missed"))
+        covered = int(counter.get("covered"))
+    except (TypeError, ValueError) as exc:
+        print(
+            f"error: {report_path}'s {counter_type} counter has non-numeric "
+            f"missed/covered: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    total = missed + covered
+    if total == 0:
+        print(
+            f"error: {report_path}'s {counter_type} counter covers zero lines "
+            "(missed=0, covered=0)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return (covered / total) * 100.0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -108,7 +159,7 @@ def main() -> int:
     parser.add_argument(
         "--format",
         required=True,
-        choices=["cobertura", "vitest-json-summary"],
+        choices=["cobertura", "vitest-json-summary", "jacoco"],
         help="Coverage report format to parse",
     )
     parser.add_argument(
@@ -128,6 +179,8 @@ def main() -> int:
     report_path = find_report(args.report)
     if args.format == "cobertura":
         measured = measure_cobertura(report_path, args.metric)
+    elif args.format == "jacoco":
+        measured = measure_jacoco(report_path, args.metric)
     else:
         measured = measure_vitest_json_summary(report_path, args.metric)
 

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<report name="invented-runner">
+  <counter type="LINE" missed="12" covered="88"/>
+</report_typo>
