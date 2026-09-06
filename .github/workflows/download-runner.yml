@@ -53,6 +53,7 @@ jobs:
             download-runner:
               - "runners/download-runner/**"
               - ".github/workflows/download-runner.yml"
+              - "scripts/check-coverage-floor.py"
 
   pester:
     name: "pester, coverage (job)"
