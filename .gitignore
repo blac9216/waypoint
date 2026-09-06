@@ -92,6 +92,10 @@ frontend/build/
 __pycache__/
 *.pyc
 
+# Pester JaCoCo coverage report generated locally/by CI's compliance-runner
+# workflow (issue #1355) -- read by scripts/check-coverage-floor.py, never committed.
+runners/compliance-runner/coverage.xml
+
 # Editor/OS noise
 .vscode/
 .instructions/

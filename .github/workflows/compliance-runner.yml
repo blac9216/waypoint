@@ -1,0 +1,205 @@
+name: compliance-runner
+
+# Always-report pattern (issue #232, mirrored from PR #1715's backend.yml/
+# deploy.yml/frontend.yml treatment, and PR #1716's download-runner.yml
+# sibling): this workflow runs on every PR/push to main, but the real work is
+# skipped unless compliance-runner-relevant paths changed. A `changes` job
+# (dorny/paths-filter) decides that once; the two real jobs below are each
+# gated on its output (`if: needs.changes.outputs.compliance-runner ==
+# 'true'`), and a final `compliance-runner-gate` job — the one that owns the
+# required check-run name `compliance-runner: pester, coverage, shellcheck`
+# — always runs (`if: always()`) and reports success when both real jobs
+# succeeded or were skipped, failure otherwise. This is what makes the
+# context eligible to be a required check later (a required check that a
+# path filter can make "never runs" would otherwise deadlock every PR that
+# doesn't touch the path — see #232).
+#
+# Epic #1361: runners/compliance-runner/ gets its own Pester suite, own
+# path-filtered CI workflow and its own validated coverage floor, tested
+# directly (dot-sourced from the runner tree) rather than only indirectly
+# through backend/. The shellcheck step folds in #1237's compliance-runner
+# half — refs #1237, does not close it (backend/docker-entrypoint.sh is
+# still open there).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: compliance-runner-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    name: "changes: compliance-runner"
+    runs-on: ubuntu-latest
+    outputs:
+      compliance-runner: ${{ steps.filter.outputs.compliance-runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            compliance-runner:
+              - "runners/compliance-runner/**"
+              - ".github/workflows/compliance-runner.yml"
+              - "scripts/check-coverage-floor.py"
+
+  pester:
+    name: "pester, coverage (job)"
+    needs: changes
+    if: needs.changes.outputs.compliance-runner == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      # pwsh is preinstalled on ubuntu-latest, but Pester is not shipped with
+      # PowerShell on Linux. Pinned to the same major/minor backend.yml's
+      # `pester` job uses, so a gallery release cannot change the gate's
+      # meaning without a deliberate bump here.
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 6.0.1
+          "Pester $((Get-Module Pester).Version)"
+
+      # CodeCoverage -> JaCoCo, read by scripts/check-coverage-floor.py
+      # --format jacoco (issue #1354). The config-object form, single-quoted
+      # for this POSIX shell, is the recipe proven end-to-end in that PR and
+      # copied verbatim in docs/process/testing.md's coverage row.
+      - name: Pester (with coverage)
+        shell: pwsh
+        run: |
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'runners/compliance-runner/tests'
+          $c.Run.PassThru = $true
+          $c.Output.Verbosity = 'Detailed'
+          $c.CodeCoverage.Enabled = $true
+          $c.CodeCoverage.Path = 'runners/compliance-runner/powershell/*.ps1'
+          $c.CodeCoverage.OutputFormat = 'JaCoCo'
+          $c.CodeCoverage.OutputPath = 'runners/compliance-runner/coverage.xml'
+          $result = Invoke-Pester -Configuration $c
+          "Pester: $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped"
+          if ($result.FailedCount -gt 0) {
+            throw "compliance-runner Pester suite failed: $($result.FailedCount) failed test(s)."
+          }
+          if ($result.PassedCount -eq 0) {
+            throw "Pester discovered no tests -- the guard is not actually running."
+          }
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: compliance-runner-coverage
+          path: runners/compliance-runner/coverage.xml
+          retention-days: 14
+
+      # Coverage FLOOR gate. 88.0% line, uniform with backend/frontend/
+      # download-runner per epic #1361 ("unless the owner sets otherwise") --
+      # measured 93.12% line coverage on the suite landed with this workflow
+      # (issue #1355), comfortably above the epic's target, so the floor is
+      # set at the epic's target rather than a lower honest baseline. To
+      # ratchet up further: re-measure with a fresh run, confirm the new
+      # number holds, then raise --floor here.
+      - name: Coverage gate (floor)
+        shell: bash
+        run: |
+          # GitHub runs an explicit `shell: bash` step as
+          # `bash --noprofile --norc -eo pipefail {0}`, so -e is already
+          # active and a bare non-zero command would abort the step on the
+          # spot -- taking the summary write and the log echo with it. The
+          # `if` wrapper is what keeps a below-floor result on a path that
+          # still reports: -e does not fire on a command tested by `if`, so
+          # rc is captured, the gate output is echoed to the job log, the
+          # step summary is written on both paths, and the final `exit "$rc"`
+          # still fails the step with the script's own status.
+          if python3 scripts/check-coverage-floor.py \
+            --report runners/compliance-runner/coverage.xml \
+            --format jacoco \
+            --floor 88.0 \
+            --metric line > coverage-gate.txt 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          cat coverage-gate.txt
+          {
+            echo "### compliance-runner coverage"
+            echo '```'
+            cat coverage-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  shellcheck:
+    name: "shellcheck (job)"
+    needs: changes
+    if: needs.changes.outputs.compliance-runner == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: shellcheck
+        run: |
+          set -eu
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          entrypoint="runners/compliance-runner/docker-entrypoint.sh"
+          if [ ! -f "$entrypoint" ]; then
+            echo "::error::expected $entrypoint to exist" >&2
+            exit 1
+          fi
+          shellcheck "$entrypoint"
+
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter (`if: always()`), and treats
+  # skipped `pester`/`shellcheck` jobs (off-path PR) the same as successful
+  # ones, so a PR that doesn't touch runners/compliance-runner/** shows this
+  # context green instead of forever pending.
+  compliance-runner-gate:
+    name: "compliance-runner: pester, coverage, shellcheck"
+    needs: [changes, pester, shellcheck]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success or skip
+        run: |
+          changes_result="${{ needs.changes.result }}"
+          pester_result="${{ needs.pester.result }}"
+          shellcheck_result="${{ needs.shellcheck.result }}"
+          echo "changes job result: $changes_result"
+          echo "pester job result: $pester_result"
+          echo "shellcheck job result: $shellcheck_result"
+          status=0
+          case "$changes_result" in
+            success) ;;
+            *) status=1 ;;
+          esac
+          case "$pester_result" in
+            success|skipped) ;;
+            *) status=1 ;;
+          esac
+          case "$shellcheck_result" in
+            success|skipped) ;;
+            *) status=1 ;;
+          esac
+          exit "$status"

@@ -38,6 +38,7 @@ if [ "$(id -u)" = '0' ]; then
 	mkdir -p /var/lib/waypoint/compliance-content
 	chown -R waypoint:waypoint /var/lib/waypoint/compliance-content
 
+	# shellcheck disable=SC2016 # $0/$@ are the inner sh's positional args, deliberately unexpanded here
 	exec su -s /bin/sh waypoint -c 'exec "$0" "$@"' -- "$@"
 fi
 
