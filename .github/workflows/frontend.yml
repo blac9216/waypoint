@@ -1,22 +1,18 @@
 name: frontend
 
-# Path-filtered: only frontend/** changes (or this workflow file) trigger a
-# build. A docs-only or backend-only PR never runs this job (see #79).
+# Always-report pattern (issue #232): see backend.yml's header for the full
+# rationale. A `changes` job decides whether frontend-relevant paths
+# changed; the real `frontend` job is gated on that output, and
+# `frontend-gate` — the job that owns the required check-run name
+# `build, test, lint` — always runs and reports success when the real job
+# succeeded or was skipped, failure otherwise.
 #
 # scripts/check-coverage-floor.py is a shared input that controls the
 # coverage gate below — issue #412.
 on:
   pull_request:
-    paths:
-      - "frontend/**"
-      - "scripts/check-coverage-floor.py"
-      - ".github/workflows/frontend.yml"
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - "scripts/check-coverage-floor.py"
-      - ".github/workflows/frontend.yml"
 
 concurrency:
   group: frontend-${{ github.workflow }}-${{ github.ref }}
@@ -24,10 +20,34 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: "changes: frontend"
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            frontend:
+              - "frontend/**"
+              - "scripts/check-coverage-floor.py"
+              - ".github/workflows/frontend.yml"
+
   frontend:
-    name: build, test, lint
+    name: "build, test, lint (job)"
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -107,3 +127,23 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter, and treats a skipped
+  # `frontend` job (off-path PR) the same as a successful one, so a
+  # backend-only or docs-only PR shows this context green instead of
+  # forever pending.
+  frontend-gate:
+    name: "build, test, lint"
+    needs: [changes, frontend]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success or skip
+        run: |
+          result="${{ needs.frontend.result }}"
+          echo "frontend job result: $result"
+          case "$result" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac

@@ -1,20 +1,18 @@
 name: skills-shellcheck
 
-# Path-filtered: only .claude/skills/**/*.sh changes (or this workflow file)
-# trigger the job. deploy.yml's own shellcheck step only searches
-# deploy/ and scripts/, so scripts under .claude/skills/ (agent-facing
-# automation, not deploy tooling) were never linted anywhere in CI — see
-# issue #1231.
+# Always-report pattern (issue #232): see backend.yml's header for the full
+# rationale. A `changes` job decides whether .claude/skills/**/*.sh changed;
+# the two real jobs below are each gated on that output, and a matching
+# always-run gate job owns each required check-run name (`shellcheck
+# .claude/skills`, `test .claude/skills`) so both report on every PR.
+#
+# deploy.yml's own shellcheck step only searches deploy/ and scripts/, so
+# scripts under .claude/skills/ (agent-facing automation, not deploy
+# tooling) were never linted anywhere in CI — see issue #1231.
 on:
   pull_request:
-    paths:
-      - ".claude/skills/**/*.sh"
-      - ".github/workflows/skills-shellcheck.yml"
   push:
     branches: [main]
-    paths:
-      - ".claude/skills/**/*.sh"
-      - ".github/workflows/skills-shellcheck.yml"
 
 concurrency:
   group: skills-shellcheck-${{ github.workflow }}-${{ github.ref }}
@@ -22,10 +20,33 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: "changes: .claude/skills"
+    runs-on: ubuntu-latest
+    outputs:
+      skills: ${{ steps.filter.outputs.skills }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            skills:
+              - ".claude/skills/**/*.sh"
+              - ".github/workflows/skills-shellcheck.yml"
+
   shellcheck:
-    name: shellcheck .claude/skills
+    name: "shellcheck .claude/skills (job)"
+    needs: changes
+    if: needs.changes.outputs.skills == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -54,8 +75,30 @@ jobs:
           find .claude/skills -type f -name "*.sh" -print0 | \
             xargs -0 --no-run-if-empty shellcheck -S warning
 
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter, and treats a skipped
+  # `shellcheck` job (off-path PR) the same as a successful one, so a
+  # docs-only or backend-only PR shows this context green instead of
+  # forever pending.
+  shellcheck-gate:
+    name: "shellcheck .claude/skills"
+    needs: [changes, shellcheck]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success or skip
+        run: |
+          result="${{ needs.shellcheck.result }}"
+          echo "shellcheck job result: $result"
+          case "$result" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac
+
   skills-tests:
-    name: test .claude/skills
+    name: "test .claude/skills (job)"
+    needs: changes
+    if: needs.changes.outputs.skills == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -113,3 +156,23 @@ jobs:
             done < <(find "$scripts_dir" -maxdepth 1 -type f -name "*.sh" -print0)
           done < <(find .claude/skills -type d -name tests -print0)
           exit "$fail"
+
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter, and treats a skipped
+  # `skills-tests` job (off-path PR) the same as a successful one, so a
+  # docs-only or backend-only PR shows this context green instead of
+  # forever pending.
+  skills-tests-gate:
+    name: "test .claude/skills"
+    needs: [changes, skills-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success or skip
+        run: |
+          result="${{ needs.skills-tests.result }}"
+          echo "skills-tests job result: $result"
+          case "$result" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac

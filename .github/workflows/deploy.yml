@@ -1,7 +1,11 @@
 name: deploy
 
-# Path-filtered: only deploy/** changes (or this workflow file) trigger
-# validation. A docs-only or backend-only PR never runs this job (see #79).
+# Always-report pattern (issue #232): see backend.yml's header for the full
+# rationale. A `changes` job decides whether deploy-relevant paths changed;
+# the real `deploy` job is gated on that output, and `deploy-gate` — the job
+# that owns the required check-run name `compose config, nginx -t,
+# shellcheck` — always runs and reports success when the real job succeeded
+# or was skipped, failure otherwise.
 #
 # This validates the shipped compose/nginx configuration statically — it
 # does NOT bring the stack up (no depot token, no dev/local/ material is
@@ -9,16 +13,8 @@ name: deploy
 # PR per the issue's "stack" job — see docs/testing.md).
 on:
   pull_request:
-    paths:
-      - "deploy/**"
-      - "scripts/**"
-      - ".github/workflows/deploy.yml"
   push:
     branches: [main]
-    paths:
-      - "deploy/**"
-      - "scripts/**"
-      - ".github/workflows/deploy.yml"
 
 concurrency:
   group: deploy-${{ github.workflow }}-${{ github.ref }}
@@ -26,10 +22,34 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    name: "changes: deploy"
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.filter.outputs.deploy }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            deploy:
+              - "deploy/**"
+              - "scripts/**"
+              - ".github/workflows/deploy.yml"
+
   deploy:
-    name: compose config, nginx -t, shellcheck
+    name: "compose config, nginx -t, shellcheck (job)"
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -63,3 +83,23 @@ jobs:
           fi
           shellcheck --version
           find deploy scripts -type f -name "*.sh" -print0 | xargs -0 --no-run-if-empty shellcheck
+
+  # Always-report gate (#232): owns the required check-run name. Runs on
+  # every PR/push regardless of the path filter, and treats a skipped
+  # `deploy` job (off-path PR) the same as a successful one, so a
+  # backend-only or docs-only PR shows this context green instead of
+  # forever pending.
+  deploy-gate:
+    name: "compose config, nginx -t, shellcheck"
+    needs: [changes, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success or skip
+        run: |
+          result="${{ needs.deploy.result }}"
+          echo "deploy job result: $result"
+          case "$result" in
+            success|skipped) exit 0 ;;
+            *) exit 1 ;;
+          esac

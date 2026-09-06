@@ -8,4 +8,4 @@ General ones live in the github-workflow skill. These have bitten here:
 - **Migration number collisions** between parallel agents: pre-assign slots; verify at branch time against the tree and open PRs.
 - **Docker cannot see `/tmp`**: bind mounts under `/tmp` mount empty; use `/workspaces`.
 - **Frontend dist bind-mounts** go stale after UI merges on a live stack; rebuild `frontend/dist` and hard-refresh the PWA.
-- **Path-filtered CI** means a docs-only PR reports only the sanitize job — required checks must be always-report (#232).
+- **Path-filtered CI** means a docs-only PR reports only the sanitize job — required checks must be always-report; the always-report pattern (changes job + always-run gate job) landed with #232.
