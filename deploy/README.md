@@ -190,6 +190,17 @@ works in one shot. The symlink lives on the container filesystem and is
 lost on devcontainer rebuild — add the same command to `postCreateCommand`
 to keep it.
 
+**`download-runner` fails at container create with a "make mountpoint
+.../vcf/ContentLibrary" error when the depot is bind-mounted read-only.**
+Compose nests the `content-libraries` volume at `/vcf/ContentLibrary`,
+inside the depot mount (`docs/rationale/deploy.md#content-libraries-own-
+volume`); Docker must create that nested mountpoint inside the depot
+filesystem at container-create time, which it cannot do on a read-only
+parent unless the depot tree already contains a `ContentLibrary/`
+directory. Create an empty `ContentLibrary/` directory in the depot share
+before bind-mounting it read-only. See
+`docs/rationale/deploy.md#content-libraries-nested-mount-readonly-depot-precondition`.
+
 **Changing `WAYPOINT_PUBLIC_URL` requires `down -v`.** The realm's
 `rootUrl`/`redirectUris`/`webOrigins` placeholders substitute only once, at
 Keycloak's import time — a persisted realm in an existing `pgdata` volume is

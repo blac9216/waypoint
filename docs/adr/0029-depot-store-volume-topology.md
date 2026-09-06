@@ -104,3 +104,12 @@ retired alongside it (ADR-0030) — it is not repurposed as either of these.
 - Decision 4's "each sidecar store gets its own volume" is not implemented as written;
   this ADR is the record of why, and is the one future readers should cite instead of
   the frozen design-record body on #16.
+- The `download-runner` nesting has a precondition its Decision text did not spell
+  out: Docker must create the nested `/vcf/ContentLibrary` mountpoint inside the
+  parent depot filesystem at container-create time, so a read-only depot mount whose
+  tree lacks a `ContentLibrary/` directory fails the container before it starts --
+  before the entrypoint, or any check it could run, ever executes. Discovered on
+  #1753 against issue #614's read-only-depot scenario; the fix there documents the
+  precondition (`docs/rationale/deploy.md#content-libraries-nested-mount-readonly-depot-precondition`)
+  rather than de-nesting the mount, since de-nesting would reverse this ADR's Decision
+  and was already ruled out without re-posing the question on #1706.
