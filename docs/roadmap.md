@@ -41,9 +41,12 @@ streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
 encryption + write-only API, holding the Broadcom depot token); **depot catalog
 indexing (`catalog-index`) + catalog browser + download jobs (`download`) with live
 progress, checksum verification, and disk usage**, wired end to end against the
-vcf-docker-download modules as the execution layer. The download-tool binary is
-still hand-provisioned in dev — the in-UI install flow (local repo / depot fetch /
-manual upload) remains scoped to *Download & depot parity*, not duplicated here. Test depot tokens/config
+vcf-docker-download modules as the execution layer. The in-UI download-tool install
+flow (local repo / depot fetch / manual upload, issue #39) **delivered** via
+epic [#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
+readiness* story below (PR [#610](https://github.com/blac9216/waypoint/pull/610)) —
+this section's original "hand-provisioned in dev" framing is stale and is corrected
+here rather than left standing. Test depot tokens/config
 still come from the private sibling repo at runtime — gitignored mounts, never
 committed.
 
@@ -181,15 +184,39 @@ and *Remediation* does not block or gate on its waves.
 
 Waypoint-native parity with `vcf-docker-download` and beyond it: the appliance manages
 the entire vendor catalog as a true VCF depot (vendor catalog as single artifact
-identity; disk walk as presence sweep), with subscription-driven stores for ESX patches
-(UMDS), Photon, VMware Tools, VKS and local VCSP content libraries. Research-first
-(epic #1026, closed 2026-08-29), then Wave 0 doc reconciliation, then the lanes. The
-owner's 2026-08-28 decision record lives on #16. Split 2026-08-29 into seven lane
-epics: catalog & depot core (#1180), vendor acquisition (#1181), subscriptions,
-retention & scheduling (#1182), ESX patch store (#1183), mirror lanes (#1184), content
-libraries (#1185), docs, research & conformance gate (#1186; #1037 is the close gate).
-The public project never distributes the vendor tool; operator-installed tooling is
-managed appliance state and transfers with the functions that require it (ADR-0015).
+identity; disk walk as presence sweep), with subscription-driven stores for **ESX
+patches** (the sibling's UMDS-binary lane is **retired** — research proved UMDS is EOL
+in `vcf-download-tool` 9.1; acquisition is VCFDT-only, generation-agnostic reconciliation,
+[ADR-0032](adr/0032-esx-patch-store-vcfdt-acquisition.md)), Photon, VMware Tools, VKS
+and local VCSP content libraries. Research-first (epic #1026, closed 2026-08-29, findings
+ratified by the owner 2026-08-29), then Wave 0 doc reconciliation, then the lanes. The
+owner's 2026-08-28 decision record and 2026-08-29 ratification live on #16 (closed as the
+design record). Split 2026-08-29 into seven lane epics: catalog & depot core (#1180),
+vendor acquisition (#1181), subscriptions, retention & scheduling (#1182), ESX patch
+store (#1183), mirror lanes (#1184), content libraries (#1185), docs, research &
+conformance gate (#1186; #1037 is the close gate). The public project never distributes
+the vendor tool; operator-installed tooling is managed appliance state and transfers
+with the functions that require it (ADR-0015).
+
+**Wave 0 — architectural truth (hard gate, blocks all implementation).**
+[#1033](https://github.com/blac9216/waypoint/issues/1033) reconciled architecture/
+domain/ADRs — merged via PR [#1738](https://github.com/blac9216/waypoint/pull/1738)
+([ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)–[ADR-0034](adr/0034-grace-period-retention.md),
+plus `architecture.md`/`domain-model.md` depot sections) → #1034 reconciled the
+API/security/RBAC contracts (in review, PR #1747) → **this document plus
+[`ui/download-domain-ia.md`](ui/download-domain-ia.md)** is #1035, reconciling roadmap
+sequencing and proposing the download-domain screen IA for owner approval (R2-11).
+
+**Implementation status (as of 2026-09-06).** 21+ issues merged across the seven lane
+epics since 2026-08-30 — catalog identity rekeyed to the vendor catalog (#1488),
+Download Catalog UI grouping (#796), repo serving path-space (#1502), retention domain
+model/sweep/dial/review-list (#1406/#1436/#1440), ESX subscription presets (#1470),
+binaries-download selection/enqueue/handler/verification (#1479/#1482/#1486), ESX
+patch-store metadata parser + DB index (#1446/#1447), content-library registry + VCSP
+writer (#1391/#1393) — see each epic's `### landed` comments for the full list and
+drift notes. Validation run 1 (epic #1704, open) found #1503/#1393 live-failing;
+fix wave #1705 (critical) → #1707 → #1706 is next, then a re-run and the remaining
+subscriptions/serving chains.
 Air-gapped `content-import` lands with the transfer story's bundle format.
 
 ## Transfer & enclave modes 📋 (backlog — [milestone](https://github.com/blac9216/waypoint/milestone/13), epic [#17](https://github.com/blac9216/waypoint/issues/17))
