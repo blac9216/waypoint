@@ -161,7 +161,12 @@ jobs:
   # every PR/push regardless of the path filter (`if: always()`), and treats
   # skipped `pester`/`shellcheck` jobs (off-path PR) the same as successful
   # ones, so a PR that doesn't touch runners/download-runner/** shows this
-  # context green instead of forever pending.
+  # context green instead of forever pending. It also inspects
+  # `needs.changes.result` itself (#1721): a failed or cancelled `changes`
+  # job leaves `pester`/`shellcheck` skipped (their `if:` never evaluates
+  # true), which would otherwise read as "off-path, all clear" and report
+  # green on a run that never actually decided whether the path was
+  # relevant.
   download-runner-gate:
     name: "download-runner: pester, coverage, shellcheck"
     needs: [changes, pester, shellcheck]
@@ -170,11 +175,17 @@ jobs:
     steps:
       - name: Require success or skip
         run: |
+          changes_result="${{ needs.changes.result }}"
           pester_result="${{ needs.pester.result }}"
           shellcheck_result="${{ needs.shellcheck.result }}"
+          echo "changes job result: $changes_result"
           echo "pester job result: $pester_result"
           echo "shellcheck job result: $shellcheck_result"
           status=0
+          case "$changes_result" in
+            success) ;;
+            *) status=1 ;;
+          esac
           case "$pester_result" in
             success|skipped) ;;
             *) status=1 ;;
