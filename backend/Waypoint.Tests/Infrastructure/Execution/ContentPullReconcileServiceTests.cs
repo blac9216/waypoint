@@ -695,4 +695,56 @@ public sealed class ContentPullReconcileServiceTests
 
 		await hostedService.StopAsync(CancellationToken.None);
 	}
+
+	/// <summary>
+	/// PR #1745 round 1: the AuthorizationDenied handling above is 42501-specific --
+	/// prove the negative too, or a future change that widened the catch clause to any
+	/// <see cref="PostgresException"/> would silently stop the sweep on every transient
+	/// database hiccup with nothing here to catch it. <c>57P01</c> (admin_shutdown) is a
+	/// real transient code a rolling Postgres restart raises; it must round-trip as
+	/// <see cref="SweepOutcome.TransientFailure"/>, not <see cref="SweepOutcome.AuthorizationDenied"/>.
+	/// </summary>
+	[Fact]
+	public async Task SweepOnceAsync_NonAuthorizationPostgresException_ReturnsTransientFailure()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), logger);
+
+		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
+
+		Assert.Equal(SweepOutcome.TransientFailure, outcome);
+		Assert.DoesNotContain(logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("42501", StringComparison.Ordinal));
+	}
+
+	/// <summary>
+	/// The loop-level half of the negative test above: unlike the 42501 case, a
+	/// transient error must NOT stop the sweep -- the next tick still runs, exactly the
+	/// self-healing behavior this class's own doc comment promises ("a transient fault
+	/// self-heals on the following tick").
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_NonAuthorizationPostgresException_KeepsSweepingInsteadOfStopping()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), logger);
+
+		await hostedService.StartAsync(CancellationToken.None);
+
+		// Give the loop several intervals' worth of time to keep ticking; a bugged
+		// implementation that stopped on any PostgresException (not just 42501) would
+		// have exactly one call here, same as the AuthorizationDenied test above.
+		await Task.Delay(TimeSpan.FromMilliseconds(300));
+		await hostedService.StopAsync(CancellationToken.None);
+
+		Assert.True(checkFanOut.ListPendingCallCount > 1, $"expected multiple sweep ticks, got {checkFanOut.ListPendingCallCount}");
+		Assert.DoesNotContain(logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("42501", StringComparison.Ordinal));
+	}
 }

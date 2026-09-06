@@ -25,8 +25,10 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// fanned-out <c>content-check</c> jobs have all reported. Structurally mirrors
 /// <c>Waypoint.Infrastructure.Runs.RunPurgeFinalizeHostedService</c> ("nobody else can
 /// resolve who-else's-job-finished, so a periodic sweep does"), but registered in
-/// <c>compliance-runner</c> (via <c>AddWaypointExecution</c>), not the API: reconcile's
-/// atomic staging step (<see cref="ContentPullReconcileService"/> -&gt;
+/// <c>compliance-runner</c> only, via
+/// <c>ExecutionServiceCollectionExtensions.AddContentPullReconcileSweep</c> (issue
+/// #1707) -- not <c>AddWaypointExecution</c>, which both runner hosts call, and not the
+/// API: reconcile's atomic staging step (<see cref="ContentPullReconcileService"/> -&gt;
 /// <c>IContentRevisionStager</c>) touches the content working tree on disk, which only
 /// the compliance-runner process mounts (ADR-0017's same placement reasoning that
 /// already put <c>content-pull</c>/<c>content-import</c> execution here instead of the
@@ -34,6 +36,14 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// and does not block the others, and the row stays selectable for the next pass
 /// (<c>ContentPullReconcileService.TryReconcileAsync</c> only marks rows reconciled on
 /// success), so a transient fault self-heals on the following tick.
+///
+/// Known trade-off (PR #1745 round 1, deferred to issue #1762): when
+/// <see cref="ExecuteAsync"/> stops the sweep loop after an
+/// <see cref="SweepOutcome.AuthorizationDenied"/> outcome, nothing downstream of that
+/// stop changes -- <c>RunnerHealthReportingHostedService</c>'s health/readiness report
+/// has no channel for "the sweep stopped" and keeps reporting healthy. Wiring that
+/// visibility through is a design change (a new degraded-state channel into the
+/// readiness report) beyond the scope of this fix; issue #1762 tracks doing it.
 /// </summary>
 public sealed partial class ContentPullReconcileHostedService : BackgroundService
 {

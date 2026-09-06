@@ -77,8 +77,7 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.ComplianceContent.ComplianceContentOptions.SectionName));
 
-		string? connectionString = configuration.GetConnectionString(
-			Waypoint.Infrastructure.DependencyInjection.ServiceCollectionExtensions.ConnectionStringName);
+		string? connectionString = GetWaypointConnectionString(configuration);
 		if (string.IsNullOrWhiteSpace(connectionString))
 		{
 			return services;
@@ -269,10 +268,40 @@ public static class ServiceCollectionExtensions
 	/// process, and <see cref="ComplianceContent.ContentCheckJobHandler"/> (a real
 	/// compliance-runner job type) already depends on the surrounding
 	/// <c>ComplianceContent</c> wiring being present there regardless of this method.
+	///
+	/// Round 1 (same PR, same issue #1707): this method used to take no
+	/// <see cref="IConfiguration"/> and register the hosted service unconditionally,
+	/// which broke the same "no connection string, no wiring" invariant
+	/// <see cref="AddWaypointExecution"/> documents on its own summary -- a
+	/// compliance-runner started with no <c>ConnectionStrings:Waypoint</c> configured
+	/// registers nothing job-shaped from that method (including the
+	/// <see cref="ComplianceContent.ContentPullReconcileService"/> singleton this hosted
+	/// service depends on), so registering the hosted service anyway threw
+	/// <c>Unable to resolve service for type 'ContentPullReconcileService'</c> at
+	/// startup instead of also no-opping. This now takes the same
+	/// <paramref name="configuration"/> and reuses <see cref="GetWaypointConnectionString"/>
+	/// -- the exact predicate <see cref="AddWaypointExecution"/> guards on -- so the two
+	/// methods cannot drift apart on what "no connection string" means.
 	/// </summary>
-	public static IServiceCollection AddContentPullReconcileSweep(this IServiceCollection services)
+	public static IServiceCollection AddContentPullReconcileSweep(this IServiceCollection services, IConfiguration configuration)
 	{
+		if (string.IsNullOrWhiteSpace(GetWaypointConnectionString(configuration)))
+		{
+			return services;
+		}
+
 		services.AddHostedService<ComplianceContent.ContentPullReconcileHostedService>();
 		return services;
 	}
+
+	/// <summary>
+	/// The single read of <c>ConnectionStrings:Waypoint</c> both
+	/// <see cref="AddWaypointExecution"/> and <see cref="AddContentPullReconcileSweep"/>
+	/// guard on -- issue #1707 round 1 extracted this so the two "no connection string,
+	/// no wiring" checks share one predicate instead of two copies that can silently
+	/// drift apart.
+	/// </summary>
+	private static string? GetWaypointConnectionString(IConfiguration configuration) =>
+		configuration.GetConnectionString(
+			Waypoint.Infrastructure.DependencyInjection.ServiceCollectionExtensions.ConnectionStringName);
 }

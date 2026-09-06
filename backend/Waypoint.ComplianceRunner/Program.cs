@@ -75,7 +75,7 @@ ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, buil
 // AddContentPullReconcileSweep's doc comment for why this is its own call here rather
 // than folded into AddWaypointExecution above, which Waypoint.DownloadRunner also
 // calls.
-ExecutionServiceCollectionExtensions.AddContentPullReconcileSweep(builder.Services);
+ExecutionServiceCollectionExtensions.AddContentPullReconcileSweep(builder.Services, builder.Configuration);
 
 builder.Services.AddOptions<RunnerHealthOptions>()
 	.Bind(builder.Configuration.GetSection(RunnerHealthOptions.SectionName));
