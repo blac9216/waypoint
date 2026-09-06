@@ -95,6 +95,9 @@ __pycache__/
 # Pester JaCoCo coverage report generated locally/by CI's compliance-runner
 # workflow (issue #1355) -- read by scripts/check-coverage-floor.py, never committed.
 runners/compliance-runner/coverage.xml
+# Same, for the download-runner's own Pester suite (issue #1356/#1722) --
+# read by scripts/check-coverage-floor.py, never committed.
+runners/download-runner/coverage.xml
 
 # Editor/OS noise
 .vscode/

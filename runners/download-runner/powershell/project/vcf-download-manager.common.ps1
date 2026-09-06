@@ -726,12 +726,25 @@ function Save-WebFile {
 					$TempSize = (Get-Item -LiteralPath $TempPath).Length
 
 					if ($RangeStatus -eq 206) {
-						$ContentRange = $RangeResponse.Headers['Content-Range']
+						# A real PS7 -PassThru response's Headers is a
+						# Dictionary<string, IEnumerable<string>>, so this
+						# indexer yields a String[], not a String (issue
+						# #1743 review round 1, finding 1). -match against a
+						# collection filters the collection instead of
+						# matching a pattern, leaving $Matches unset while
+						# the `if` reads as truthy -- coerce to a scalar and
+						# use [regex]::Match() instead of the scope-fragile
+						# $Matches automatic variable.
+						$ContentRangeRaw = $RangeResponse.Headers['Content-Range']
+						$ContentRange = if ($null -eq $ContentRangeRaw) { $null } else { @($ContentRangeRaw) -join '' }
 						$RangeStart = $null
 						$RangeEnd = $null
-						if ($ContentRange -and ($ContentRange -match '^bytes\s+(\d+)-(\d+)/(\d+|\*)$')) {
-							$RangeStart = [long]$Matches[1]
-							$RangeEnd = [long]$Matches[2]
+						if ($ContentRange) {
+							$RangeMatch = [regex]::Match($ContentRange, '^bytes\s+(\d+)-(\d+)/(\d+|\*)$')
+							if ($RangeMatch.Success) {
+								$RangeStart = [long]$RangeMatch.Groups[1].Value
+								$RangeEnd = [long]$RangeMatch.Groups[2].Value
+							}
 						}
 						if ($null -eq $RangeStart) {
 							Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
