@@ -488,6 +488,21 @@ public sealed class SchemaMigrationTests
 	/// filesystem access to a mounted patch store, ADR-0013/0014) -- proven both
 	/// directions by <c>EsxPatchStoreIndexRunnerRoleGrantTests</c> (this repo's
 	/// #556 convention) --
+	/// 0109 (issue #1392, epic #1184, split from #1053; slot pre-assigned
+	/// 2026-08-30): adds <c>vmtools_artifact_index</c> (one row per real artifact
+	/// found by a recursive crawl of the public VMware Tools mirror, upsert-keyed
+	/// on <c>(relative_path, etag)</c> so an unchanged re-crawl never duplicates a
+	/// row; <c>is_latest_alias</c> marks rows under a <c>latest/</c>/<c>&lt;major&gt;latest/</c>
+	/// subtree without ever treating them as "current" -- research #1030 finding 1)
+	/// and <c>vmtools_esx_version_mapping</c> (the upstream <c>versions</c> file's
+	/// join key, one row per parsed data line, <c>sequence_in_file</c> preserving
+	/// the file's own newest-first-by-ESXi-build order so an unparseable Tools
+	/// version can still fall back to release-recency ordering; malformed rows are
+	/// never persisted, only surfaced as parser warnings, the #1446 lesson).
+	/// Metadata-only migration: <c>self_hash_sha256</c>/<c>signature_available</c>
+	/// are nullable placeholders for a later child. Grants
+	/// <c>waypoint_download_runner</c> <c>SELECT, INSERT, UPDATE</c> (no DELETE) on
+	/// both tables -- the crawler and versions-file parser both run runner-side --
 	/// 0129 (issue #1705, part of validation epic #1704; slot 0129 -- the next free
 	/// slot after #1440's 0128, verified against both the migrations directory and
 	/// open PRs at authoring time): widens <c>depot_artifacts_status_check</c> to
@@ -499,7 +514,7 @@ public sealed class SchemaMigrationTests
 	/// against this constraint's parsed SQL by
 	/// <c>DepotArtifactStatusesConstraintDriftTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 91;
+	private const int ExpectedMigrationCount = 92;
 
 	private readonly PostgresFixture _fixture;
 
