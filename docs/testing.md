@@ -569,14 +569,14 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## What CI covers — and does not
 
-GitHub Actions runs six workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
+GitHub Actions runs seven workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
 [`backend.yml`](../.github/workflows/backend.yml),
 [`frontend.yml`](../.github/workflows/frontend.yml),
 [`deploy.yml`](../.github/workflows/deploy.yml) (all four added in issue
-[#79](https://github.com/blac9216/waypoint/issues/79)), and
+[#79](https://github.com/blac9216/waypoint/issues/79)),
 [`skills-shellcheck.yml`](../.github/workflows/skills-shellcheck.yml) (issue #1231),
-plus [`download-runner.yml`](../.github/workflows/download-runner.yml) (PR #1716),
-which is still plain path-filtered and is therefore not in the table below:
+[`download-runner.yml`](../.github/workflows/download-runner.yml) (PR #1716) and
+[`compliance-runner.yml`](../.github/workflows/compliance-runner.yml) (PR #1717):
 
 | Workflow | Real work gated on | What it runs | Check-run context(s) |
 | --- | --- | --- | --- |
@@ -585,10 +585,12 @@ which is still plain path-filtered and is therefore not in the table below:
 | `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` | `changes: frontend`, `build, test, lint` |
 | `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` | `changes: deploy`, `compose config, nginx -t, shellcheck` |
 | `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 — and the skill script regression suite | `changes: .claude/skills`, `shellcheck .claude/skills`, `test .claude/skills` |
+| `download-runner` | `runners/download-runner/**` (and the workflow itself) | the download-runner Pester suite with JaCoCo coverage and a coverage **floor** gate, plus `shellcheck` over that runner's scripts | `changes: download-runner`, `download-runner: pester, coverage, shellcheck` |
+| `compliance-runner` | `runners/compliance-runner/**` (and the workflow itself) | the compliance-runner Pester suite with JaCoCo coverage and a coverage **floor** gate, plus `shellcheck` over that runner's scripts | `changes: compliance-runner`, `compliance-runner: pester, coverage, shellcheck` |
 
 `sanitize` is a hard gate on everything — a docs-only change still gets scanned,
 because a leaked hostname or token is just as real in a markdown file as in code. The
-other four workflows in the table are **always-report** (issue #232): each runs on every PR/push
+other six workflows in the table are **always-report** (issue #232 for the first four; PRs #1716/#1717 built the two runner workflows on the same pattern): each runs on every PR/push
 regardless of path, but the real work above only executes when its own `changes` job
 (dorny/paths-filter) says the relevant paths changed. A final always-run gate job in
 each workflow owns the check-run context listed above, and reports success when the
