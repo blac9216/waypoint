@@ -17,8 +17,20 @@ if [ "$(id -u)" = '0' ]; then
 	# Download artifact store (ADR-0014 §7 "managed tool/depot/content write
 	# access") -- matches Downloads:ArtifactStorePath.
 	[ -d /var/lib/waypoint/artifacts ] && chown app:app /var/lib/waypoint/artifacts
-	# Offline depot share -- matches Catalog:DepotPath.
-	[ -d /vcf ] && chown app:app /vcf
+	# Offline depot share -- matches Catalog:DepotPath. A real depot is
+	# frequently bind-mounted read-only (an NFS/SMB vendor export); catalog-
+	# index only ever reads it, so chown it only when a write actually
+	# succeeds -- `-w` is unreliable for root/read-only bind mounts, so probe
+	# with a real write instead.
+	# why: docs/rationale/deploy.md#depot-chown-write-probe
+	if [ -d /vcf ]; then
+		if touch /vcf/.waypoint-write-probe 2>/dev/null; then
+			rm -f /vcf/.waypoint-write-probe
+			chown app:app /vcf
+		else
+			echo 'docker-entrypoint: /vcf (depot) is read-only; skipping chown' >&2
+		fi
+	fi
 	# Content-library registry: its own volume, nested at /vcf/ContentLibrary
 	# so the runner's existing store-path conventions are unchanged -- a
 	# distinct mount point, so it arrives root-owned independently of /vcf.

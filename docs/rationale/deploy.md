@@ -217,7 +217,9 @@ store (see nginx-repo-store-subtree-aliases). Three reasons: design record
 backend never mounts `depot` at all today, and folding the registry into
 it would be the first crack in that boundary; and a deployment may
 legitimately mount `depot` read-only from a shared/vendor tree (issue
-#614's scenario), while a content library must stay writable regardless.
+#614's scenario), while a content library must stay writable regardless --
+true of the backend and nginx arms; the runner arm carries a precondition
+on that same scenario (next entry) that #614 uncovered.
 Same permission pattern the `tool-upload-staging` volume already
 establishes for the backend.
 
@@ -228,7 +230,10 @@ depot-fed content-library sync (#1057) keep writing/reading
 `ContentLibrary/` under `/vcf` unmodified; only the volume backing that
 one path changed. `/repo/depot/` still 404s the `ContentLibrary` subtree
 name (nginx-repo-store-subtree-aliases' denylist) so a stray depot-side
-`ContentLibrary/` directory is never a second route to it.
+`ContentLibrary/` directory is never a second route to it. This nesting
+does add a precondition to a read-only depot mount -- see
+`content-libraries-nested-mount-readonly-depot-precondition` under
+`runners/download-runner/docker-entrypoint.sh` below.
 
 Refs: #1706, #1647, #1502, design record #16 §1
 
@@ -1035,5 +1040,37 @@ to the OLD username would collide with the still-present old user instead
 of provisioning the renamed one.
 
 Refs: #846, #890
+
+## runners/download-runner/docker-entrypoint.sh
+
+### depot-chown-write-probe
+
+The depot mount (`/vcf`) is only ever read by catalog-index; a real depot is
+frequently bind-mounted read-only (an NFS/SMB vendor export is a common,
+safe choice), and the entrypoint's own `set -eu` used to abort the whole
+container on the unconditional `chown` that case hits, crash-looping it
+forever. The chown now runs only after a real write succeeds — a
+`touch`+`rm` probe, not `-w`, which is unreliable for root and for
+read-only bind mounts alike — and logs one line either way so an operator
+can see the depot was detected read-only from the container's own log
+without guessing why no chown ran.
+
+Refs: #614
+
+### content-libraries-nested-mount-readonly-depot-precondition
+
+`content-libraries-own-volume` (above) nests the `content-libraries` volume
+at `/vcf/ContentLibrary`, INSIDE the depot mount. Docker must create that
+nested mountpoint inside the parent filesystem at container-create time; on
+a read-only depot mount whose tree does not already contain a
+`ContentLibrary/` directory, the daemon cannot create it and the container
+fails to start — before this entrypoint, or any check it could run, ever
+executes. A read-only depot export used with this stack must therefore
+carry a pre-existing (even if empty) `ContentLibrary/` directory. This is a
+precondition of the nested-mount design (ADR-0029), not a defect this
+entrypoint can guard against; see ADR-0029's consequences for the
+alternative considered and rejected.
+
+Refs: #1753, ADR-0029
 
 ## dev-bootstrap/
