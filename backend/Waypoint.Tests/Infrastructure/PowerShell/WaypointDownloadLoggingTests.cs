@@ -36,10 +36,14 @@ namespace Waypoint.Tests.Infrastructure.PowerShell;
 /// Write-Log shape (see that file's own header) so these tests pin the real fix (the
 /// shims re-defining Write-Log after the dot-source, delegating to the shared
 /// WaypointLogging adapter, issue #579) rather than a hand-picked one. Covers: every
-/// severity -- Info, Success, Warning, Error, Verbose, and Debug -- from a call
-/// reached through the real, unmodified <c>Invoke-WaypointDownload</c> and
+/// severity -- Info, Success, Warning, Error, Critical, Verbose, and Debug -- from a
+/// call reached through the real, unmodified <c>Invoke-WaypointDownload</c> and
 /// <c>Invoke-WaypointCatalogIndex</c> commands lands as an ordered, redacted job.log
-/// event.
+/// event. Issue #1623: Error and Critical were named in this comment before they had
+/// any actual case below -- <see cref="InvokeWaypointDownload_EverySeverity_LandsInJobLog_OnTheExpectedNativeStream"/>
+/// now asserts both, pinning the non-terminating contract (<c>Write-Error -ErrorAction
+/// Continue</c>) <c>WaypointLogging.psm1</c> documents for both severities: the job
+/// still succeeds even though an Error/Critical-severity line was logged.
 /// </summary>
 public sealed class WaypointDownloadLoggingTests : IDisposable
 {
@@ -107,6 +111,8 @@ public sealed class WaypointDownloadLoggingTests : IDisposable
 	[InlineData("fake info: starting download", "information")]
 	[InlineData("fake success: download complete", "information")]
 	[InlineData("fake warning: retrying after transient error", "warning")]
+	[InlineData("fake error: non-fatal error encountered", "error")]
+	[InlineData("fake critical: non-fatal critical condition encountered", "error")]
 	public async Task InvokeWaypointDownload_EverySeverity_LandsInJobLog_OnTheExpectedNativeStream(
 		string expectedMessageFragment, string expectedNativeSeverity)
 	{
@@ -122,6 +128,10 @@ public sealed class WaypointDownloadLoggingTests : IDisposable
 				}),
 			CancellationToken.None);
 
+		// Issue #1623: the point of the Error/Critical cases is exactly this
+		// assertion -- WaypointLogging.psm1's Write-Error -ErrorAction Continue
+		// mapping is non-terminating, so the job still succeeds despite an
+		// Error/Critical-severity line being logged.
 		Assert.True(result.Succeeded, result.FailureReason);
 
 		(string, Guid?, Guid?, string) match = Assert.Single(

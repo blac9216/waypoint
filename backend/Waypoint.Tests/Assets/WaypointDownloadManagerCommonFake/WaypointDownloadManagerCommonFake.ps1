@@ -77,6 +77,12 @@ function Save-WebFile {
 	Write-Log 'fake verbose: downloading attempt 1/3' -Severity 'Verbose'
 	Write-Log 'fake info: starting download' -Severity 'Info'
 	Write-Log 'fake warning: retrying after transient error' -Severity 'Warning'
+	# Issue #719/#1623: Error and Critical are the two severities the class's own doc
+	# comment claims coverage for but never exercised. WaypointLogging.psm1 maps both
+	# to Write-Error -ErrorAction Continue (non-terminating), so emitting them here
+	# must not fail this fake's own "download succeeded" result below.
+	Write-Log 'fake error: non-fatal error encountered' -Severity 'Error'
+	Write-Log 'fake critical: non-fatal critical condition encountered' -Severity 'Critical'
 	Write-Log 'fake success: download complete' -Severity 'Success'
 
 	[pscustomobject]@{
