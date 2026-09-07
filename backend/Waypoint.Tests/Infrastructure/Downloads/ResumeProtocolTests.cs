@@ -590,21 +590,18 @@ public sealed class ResumeProtocolTests
 	/// RP-05 (matrix): a 401/403 response is documented (docs/testing/download-parity-matrix.md,
 	/// <c>vcf-download-manager.common.ps1</c>'s own "Auth errors - don't retry" comment)
 	/// as non-retryable. Driven with a REAL listener rather than the Pester suite's
-	/// <c>WebException</c> mock, this fails: PowerShell 7's <c>Invoke-WebRequest</c>
-	/// throws <c>Microsoft.PowerShell.Commands.HttpResponseException</c> for a non-2xx
-	/// response, never <c>System.Net.WebException</c> -- the exact type the auth-error
-	/// branch pattern-matches on (<c>$_.Exception -is [System.Net.WebException]</c>).
-	/// That branch is therefore dead code against any real HTTP failure: a 401/403 is
-	/// silently reclassified into the generic "transient - retry with backoff" bucket
-	/// and retried with sleeps, exactly the mock-vs-real-shape trap PR #1629/#1638's
-	/// review called out. Filed as deferred bug #1799 rather than fixed here -- #1411 is
-	/// a test-only issue; this test pins the CURRENT (defective) behavior so a future
-	/// fix has a red-then-green target.
+	/// mocks, this now passes: issue #1799 taught <c>Save-WebFile</c>'s auth-error
+	/// branch to also recognize <c>Microsoft.PowerShell.Commands.HttpResponseException</c>
+	/// -- the type pwsh7's <c>Invoke-WebRequest</c> actually throws for a non-2xx
+	/// response, never the Windows PowerShell 5.1 <c>System.Net.WebException</c> shape
+	/// the branch matched exclusively before. A real 401/403 now fails on the first
+	/// attempt, with "Authentication error" in the failure reason, instead of falling
+	/// into the generic "transient - retry with backoff" bucket.
 	/// </summary>
 	[Theory]
 	[InlineData(401)]
 	[InlineData(403)]
-	public async Task AuthFailureStatusCode_IsNotSpecialCased_UnderRealHttpResponseException(int statusCode)
+	public async Task AuthFailureStatusCode_FailsImmediately_UnderRealHttpResponseException(int statusCode)
 	{
 		RecordingLogBuffer logBuffer = new();
 		(PowerShellExecutor executor, WaypointRunspacePool pool) = await CreateExecutorAsync(logBuffer);
@@ -621,19 +618,11 @@ public sealed class ResumeProtocolTests
 		string storeDir = Directory.CreateTempSubdirectory("wp-resume-protocol-auth").FullName;
 		string destinationPath = Path.Combine(storeDir, "artifact.bin");
 
-		System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
 		PowerShellExecutionResult result = await InvokeDownloadAsync(executor, server.ArtifactUrl, destinationPath, expectedSize: 10, retryCount: 2);
-		stopwatch.Stop();
 
 		Assert.False(result.Succeeded);
-		// The documented/intended contract: an immediate, single-request failure. The
-		// ACTUAL behavior this real listener observes: two GET attempts (RetryCount=2)
-		// with a real backoff sleep between them, because the auth-error branch never
-		// matches a real HttpResponseException. Both facts are asserted so a future fix
-		// (making the real behavior match the doc) turns this red, not silently green.
-		Assert.DoesNotContain("Authentication error", result.FailureReason, StringComparison.Ordinal);
-		Assert.Equal(2, server.Requests.Count(r => r.Method == "GET"));
-		Assert.True(stopwatch.ElapsedMilliseconds >= 900, "expected a real backoff sleep between the two retried attempts (evidence the auth branch never fired)");
+		Assert.Contains("Authentication error", result.FailureReason, StringComparison.Ordinal);
+		Assert.Equal(1, server.Requests.Count(r => r.Method == "GET"));
 
 		Directory.Delete(storeDir, recursive: true);
 	}
