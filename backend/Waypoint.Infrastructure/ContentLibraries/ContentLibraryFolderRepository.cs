@@ -107,6 +107,15 @@ public sealed class ContentLibraryFolderRepository : IContentLibraryFolderReposi
 		}
 	}
 
+	public async Task<bool> LibraryExistsAsync(Guid libraryId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT 1 FROM content_libraries WHERE id = $1", connection);
+		command.Parameters.AddWithValue(libraryId);
+		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+	}
+
 	public async Task<IReadOnlyList<ContentLibraryFolderWithItems>> ListWithItemsAsync(Guid libraryId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
@@ -296,8 +305,15 @@ public sealed class ContentLibraryFolderRepository : IContentLibraryFolderReposi
 			return ContentLibraryItemAssignmentOutcome.Unassigned;
 		}
 
+		// FOR UPDATE: without this lock, a concurrent DeleteAsync on this same folder
+		// can commit between this check and the INSERT below, and the INSERT's FK
+		// re-check then raises SQLSTATE 23503 uncaught, surfacing as an unhandled 500
+		// instead of FolderNotFound. Locking here makes the two paths race safely: this
+		// call either wins the lock (the delete then sees the assignment and returns
+		// 409 folder_not_empty) or loses it and finds the row gone (clean
+		// FolderNotFound).
 		await using (NpgsqlCommand folderCheck = new(
-			"SELECT 1 FROM content_library_folders WHERE id = $1 AND library_id = $2", connection, transaction))
+			"SELECT 1 FROM content_library_folders WHERE id = $1 AND library_id = $2 FOR UPDATE", connection, transaction))
 		{
 			folderCheck.Parameters.AddWithValue(folderId.Value);
 			folderCheck.Parameters.AddWithValue(libraryId);

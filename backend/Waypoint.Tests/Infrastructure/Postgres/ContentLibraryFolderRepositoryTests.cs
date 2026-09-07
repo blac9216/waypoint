@@ -253,6 +253,54 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// N1: <c>AssignItemAsync</c>'s folder-existence check takes <c>FOR UPDATE</c>
+	/// (matching <c>DeleteAsync</c>'s own lock), so a concurrent delete of the exact
+	/// folder being assigned into cannot race the assign's INSERT into an unhandled
+	/// SQLSTATE 23503 (a 500). This test holds the folder row locked in a second
+	/// connection/transaction -- exactly the lock <c>DeleteAsync</c> takes -- proves
+	/// <c>AssignItemAsync</c> blocks behind it rather than proceeding, then deletes the
+	/// folder and commits, mirroring the interleaving from the review's finding: the
+	/// assign must resolve cleanly to <c>FolderNotFound</c>, never throw.
+	/// </summary>
+	[Fact]
+	public async Task AssignItemAsync_ConcurrentWithDeleteOfTheSameFolder_ResolvesToFolderNotFoundWithoutThrowing()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-item-race");
+		(_, ContentLibraryFolder? folder) = await _folders.CreateAsync(libraryId, null, "Race", CancellationToken.None);
+
+		await using NpgsqlConnection lockConnection = new(_fixture.ConnectionString);
+		await lockConnection.OpenAsync();
+		await using NpgsqlTransaction lockTransaction = await lockConnection.BeginTransactionAsync();
+		await using (NpgsqlCommand lockCommand = new(
+			"SELECT 1 FROM content_library_folders WHERE id = $1 FOR UPDATE", lockConnection, lockTransaction))
+		{
+			lockCommand.Parameters.AddWithValue(folder!.Id);
+			await lockCommand.ExecuteScalarAsync();
+		}
+
+		Task<ContentLibraryItemAssignmentOutcome> assignTask =
+			_folders.AssignItemAsync(libraryId, Guid.NewGuid(), folder.Id, CancellationToken.None);
+
+		// AssignItemAsync must be blocked behind the held row lock, not racing ahead.
+		Task firstToComplete = await Task.WhenAny(assignTask, Task.Delay(TimeSpan.FromMilliseconds(500)));
+		Assert.NotSame(assignTask, firstToComplete);
+
+		// Now delete the folder under the lock and commit, mirroring DeleteAsync's own
+		// sequence (lock, check empty, delete, commit).
+		await using (NpgsqlCommand deleteCommand = new(
+			"DELETE FROM content_library_folders WHERE id = $1", lockConnection, lockTransaction))
+		{
+			deleteCommand.Parameters.AddWithValue(folder.Id);
+			await deleteCommand.ExecuteNonQueryAsync();
+		}
+
+		await lockTransaction.CommitAsync();
+
+		ContentLibraryItemAssignmentOutcome outcome = await assignTask;
+		Assert.Equal(ContentLibraryItemAssignmentOutcome.FolderNotFound, outcome);
+	}
+
+	/// <summary>
 	/// Issue #1389 AC (delivered as a schema property since #1398's repair/rebuild
 	/// pass does not exist yet): folder rows and item assignments carry no reference
 	/// to any on-disk path, so deleting and recreating a library's directory
