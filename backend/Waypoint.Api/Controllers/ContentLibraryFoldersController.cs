@@ -159,8 +159,11 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 		return await _folders.AssignItemAsync(libraryId, itemId, request.FolderId, cancellationToken).ConfigureAwait(false) switch
 		{
 			ContentLibraryItemAssignmentOutcome.LibraryNotFound => throw LibraryNotFoundError(libraryId),
-			ContentLibraryItemAssignmentOutcome.FolderNotFound => throw ApiException.Validation(
-				"'folder_id' does not name a folder in this library."),
+			// F3 (round 2): matches Update's own NotFound arm above -- the target folder
+			// itself not existing is a 404, not a 400 validation error, and this outcome
+			// is only ever returned when request.FolderId is non-null (AssignItemAsync
+			// short-circuits to Unassigned before checking existence when it is null).
+			ContentLibraryItemAssignmentOutcome.FolderNotFound => throw FolderNotFoundError(request.FolderId!.Value),
 			_ => NoContent(),
 		};
 	}

@@ -194,6 +194,19 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		Assert.Equal(itemId, itemIds[0].GetGuid());
 	}
 
+	/// <summary>F3 (round 2): an unknown folder_id is a 404 not_found, matching Update's own NotFound arm -- not the 400 validation shape ParentNotFound uses on Create/Update.</summary>
+	[Fact]
+	public async Task AssignItem_UnknownFolderId_Is404()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-api-assign-badfolder");
+		Guid itemId = Guid.NewGuid();
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{itemId}/folder", "Admin", new { folder_id = Guid.NewGuid() });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
 	/// <summary>Issue #1389/#1746 AC: Viewer is read-only -- every mutating endpoint (organize AND delete) is 403 for Viewer, GET is 200.</summary>
 	[Fact]
 	public async Task EveryMutatingEndpoint_AsViewer_Returns403()
