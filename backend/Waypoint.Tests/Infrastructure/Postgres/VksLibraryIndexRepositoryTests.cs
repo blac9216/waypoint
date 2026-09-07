@@ -76,6 +76,73 @@ public sealed class VksLibraryIndexRepositoryTests : IAsyncLifetime
 		Assert.True((matching[0].DiscoveredAt - firstIndex).Duration() < TimeSpan.FromMilliseconds(1));
 	}
 
+	/// <summary>
+	/// #1796: the 17-assignment <c>ON CONFLICT (source, name) DO UPDATE SET</c> clause
+	/// in <see cref="VksLibraryIndexRepository"/> is exercised with values that
+	/// genuinely change on every updatable column -- <c>item_uuid</c>, every
+	/// <see cref="VksItemDimensions"/> member, <c>naming_era</c>, <c>parse_status</c>,
+	/// <c>etag</c>, <c>sha256</c>, and <c>size_bytes</c> -- proving a single row
+	/// survives with the new values, the original <c>id</c>, an advanced
+	/// <c>last_seen_at</c>, and an <c>discovered_at</c> that the update clause never
+	/// touches.
+	/// </summary>
+	[Fact]
+	public async Task UpsertItemsAsync_ChangedDimensionsOnSeenName_UpdatesTheSameRow()
+	{
+		string name = $"ob-99990009-photon-5-amd64-v1.30.2---vmware.1-vkr.1-{Guid.NewGuid():N}";
+		VksItemDimensions originalDimensions = new("photon", "5", "amd64", "1.30.2", "1", false, VksReleaseLines.Vkr, "1", "99990009");
+		DateTimeOffset firstIndex = DateTimeOffset.UtcNow.AddMinutes(-10);
+		VksLibraryItem firstObservation = VksLibraryItem.FromIndexObservation(
+			name, VksItemSources.Public, itemUuid: Guid.NewGuid().ToString(), originalDimensions, VksNamingEras.Current,
+			VksParseStatuses.Parsed, new VksChangeToken("etag-fixture-original"), sha256: null, sizeBytes: 1000,
+			createdUpstream: DateTimeOffset.UtcNow.AddDays(-30), observedAt: firstIndex);
+
+		await _repository.UpsertItemsAsync([firstObservation], CancellationToken.None);
+
+		VksItemDimensions changedDimensions = new("ubuntu", "24.04", "arm64", "1.31.1", "2", true, VksReleaseLines.Tkg, "9", "99990010");
+		DateTimeOffset secondIndex = DateTimeOffset.UtcNow;
+		DateTimeOffset changedCreatedUpstream = DateTimeOffset.UtcNow.AddDays(-1);
+		VksLibraryItem changedObservation = firstObservation with
+		{
+			Id = Guid.NewGuid(),
+			ItemUuid = Guid.NewGuid().ToString(),
+			Dimensions = changedDimensions,
+			NamingEra = VksNamingEras.TkgsOva,
+			ParseStatus = VksParseStatuses.Unparsed,
+			Etag = new VksChangeToken("etag-fixture-changed"),
+			Sha256 = "deadbeefcafe",
+			SizeBytes = 2_000_000,
+			CreatedUpstream = changedCreatedUpstream,
+			DiscoveredAt = secondIndex,
+			LastSeenAt = secondIndex,
+		};
+
+		await _repository.UpsertItemsAsync([changedObservation], CancellationToken.None);
+
+		IReadOnlyList<VksLibraryItem> items = await _repository.GetItemsAsync(CancellationToken.None);
+		VksLibraryItem[] matching = [.. items.Where(i => i.Name == name)];
+		Assert.Single(matching);
+		VksLibraryItem stored = matching[0];
+
+		// id is a stable database identity that a conflicting upsert must never
+		// overwrite -- Postgres keeps the original row's id even though this test's
+		// own new observation carries a fresh one.
+		Assert.Equal(firstObservation.Id, stored.Id);
+		Assert.Equal(changedObservation.ItemUuid, stored.ItemUuid);
+		Assert.Equal(changedDimensions, stored.Dimensions);
+		Assert.Equal(VksNamingEras.TkgsOva, stored.NamingEra);
+		Assert.Equal(VksParseStatuses.Unparsed, stored.ParseStatus);
+		Assert.Equal("etag-fixture-changed", stored.Etag?.Value);
+		Assert.Equal("deadbeefcafe", stored.Sha256);
+		Assert.Equal(2_000_000, stored.SizeBytes);
+		Assert.True((stored.CreatedUpstream!.Value - changedCreatedUpstream).Duration() < TimeSpan.FromMilliseconds(1));
+		Assert.True(stored.LastSeenAt >= secondIndex.AddSeconds(-1));
+		// discovered_at is excluded from DO UPDATE SET on purpose (see the type's own
+		// doc comment) -- it must stay pinned to the first observation even though
+		// this test's changed observation carries a different DiscoveredAt.
+		Assert.True((stored.DiscoveredAt - firstIndex).Duration() < TimeSpan.FromMilliseconds(1));
+	}
+
 	[Fact]
 	public async Task UpsertItemsAsync_SameNameDifferentSource_IsTwoIndependentRows()
 	{
