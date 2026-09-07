@@ -96,7 +96,7 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	/// created the TO row BEFORE this pull started -- that case correctly no-ops here,
 	/// verified in <see cref="DepotArtifactRepositoryTests"/>). The narrower
 	/// concurrent-commit race is timing-dependent, unobserved in production, and left
-	/// undocumented as a fix (a <c>FOR UPDATE</c>/advisory-lock closes it but adds
+	/// unfixed (a <c>FOR UPDATE</c>/advisory-lock closes it but adds
 	/// contention to every rekey for a window that has never been hit) -- recorded here
 	/// so a future unhandled-exception report from this call site is not a surprise.
 	/// </summary>
