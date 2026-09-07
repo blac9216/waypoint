@@ -295,6 +295,88 @@ Describe 'Invoke-WaypointCatalogIndex zip-expand tree verification standard (iss
 	}
 }
 
+Describe 'Invoke-WaypointCatalogIndex zip-expand truth table A-D (review F3 on issue #1640)' {
+
+	# Review F3: Test-ZipExpandTreeComplete was reachable only when the expand prefix
+	# already matched at least one manifest key -- a zip-expand entry whose tree was
+	# NEVER expanded (case A) fell through to the ordinary zip-binary-only lookup and
+	# reported 'present' with no tree check at all, while case B (one stray tree
+	# file -- MORE on disk than case A) correctly reported 'missing'. The fix hoists
+	# the completeness check so it applies to every zip-expand-shaped entry, whether
+	# or not the prefix matched anything yet. One shared catalog entry
+	# (`vcsa-truth-table-updaterepo.zip`, expand prefix
+	# `PROD/COMP/VCENTER/vmw/9999zzzz/9.1.0.5210/`) driven against four manifests:
+	#
+	#   A: zip binary correct on disk, tree NEVER expanded        -> missing (was: present -- the bug)
+	#   B: zip binary correct + ONE stray file in the tree        -> missing
+	#   C: zip binary correct + complete tree (manifest/+package-pool/) -> present
+	#   D: NO zip binary on disk, tree never expanded              -> missing
+	BeforeAll {
+		$script:TruthTableCatalogJson = @'
+{
+  "patches": {
+    "VCENTER": [
+      {
+        "productVersion": "9.1.0.5210.25573614",
+        "artifacts": { "bundles": [ { "id": "b1", "binaries": [
+          { "fileName": "vcsa-truth-table-updaterepo.zip", "checksum": "TTTT", "size": 7000,
+            "metadata": [ { "tag": "zip-expand",
+              "configuration": { "key": "relative", "value": "vmw/9999zzzz/9.1.0.5210" } } ] }
+        ] } ] }
+      }
+    ]
+  }
+}
+'@
+
+		$script:TruthTableZipEntry = @{ Size = 7000; Hash = 'TTTT' }
+		$script:TruthTableCatalogPath = 'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'
+
+		$script:TruthTableManifests = @{
+			A = [ordered]@{
+				'PROD/COMP/VCENTER/vcsa-truth-table-updaterepo.zip' = $script:TruthTableZipEntry
+				$script:TruthTableCatalogPath                       = @{ Size = 1; Hash = 'CAT' }
+			}
+			B = [ordered]@{
+				'PROD/COMP/VCENTER/vcsa-truth-table-updaterepo.zip'                  = $script:TruthTableZipEntry
+				'PROD/COMP/VCENTER/vmw/9999zzzz/9.1.0.5210/stray-truncated-file.dat' = @{ Size = 1; Hash = 'S' }
+				$script:TruthTableCatalogPath                                        = @{ Size = 1; Hash = 'CAT' }
+			}
+			C = [ordered]@{
+				'PROD/COMP/VCENTER/vcsa-truth-table-updaterepo.zip'                  = $script:TruthTableZipEntry
+				'PROD/COMP/VCENTER/vmw/9999zzzz/9.1.0.5210/manifest/tree.json'       = @{ Size = 5; Hash = 'M' }
+				'PROD/COMP/VCENTER/vmw/9999zzzz/9.1.0.5210/package-pool/pkg-1.rpm'   = @{ Size = 5; Hash = 'P' }
+				$script:TruthTableCatalogPath                                        = @{ Size = 1; Hash = 'CAT' }
+			}
+			D = [ordered]@{
+				$script:TruthTableCatalogPath = @{ Size = 1; Hash = 'CAT' }
+			}
+		}
+
+		$script:TruthTableResults = @{}
+		foreach ($Case in $script:TruthTableManifests.Keys) {
+			$script:TruthTableResults[$Case] = script:Invoke-Sweep -CatalogJson $script:TruthTableCatalogJson -Manifest $script:TruthTableManifests[$Case]
+		}
+	}
+
+	It 'reports <Case>: <Expected> (truth table)' -ForEach @(
+		@{ Case = 'A'; Expected = 'missing'; Because = 'zip binary correct but the tree was NEVER expanded -- the exact false-present case #1640 was written to close' }
+		@{ Case = 'B'; Expected = 'missing'; Because = 'zip binary correct but the tree has only one stray/truncated file' }
+		@{ Case = 'C'; Expected = 'present'; Because = 'zip binary correct and the tree carries both manifest/ and package-pool/' }
+		@{ Case = 'D'; Expected = 'missing'; Because = 'no zip binary on disk at all, tree never expanded' }
+	) {
+		$Row = $script:TruthTableResults[$Case] | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-truth-table-updaterepo.zip' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be $Expected -Because $Because
+	}
+
+	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record, for every truth-table case' {
+		foreach ($Case in $script:TruthTableResults.Keys) {
+			script:Assert-NoPresenceUnknownOverlap -Results $script:TruthTableResults[$Case]
+		}
+	}
+}
+
 Describe 'Invoke-WaypointCatalogIndex mismatch-reason classification (issue #1635)' {
 
 	# Distinguishes "downloaded and corrupt" (a file exists on disk but disagrees

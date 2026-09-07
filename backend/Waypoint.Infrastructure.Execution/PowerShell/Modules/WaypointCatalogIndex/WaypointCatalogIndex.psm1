@@ -109,6 +109,19 @@
 # prefix but missing either subdirectory is reported 'missing', not 'present' --  a
 # single stray or truncated file left under the prefix is no longer enough to clear a
 # multi-GB tree as complete. See Test-ZipExpandTreeComplete.
+#
+# Review finding F3 (on #1640): the completeness check above is evaluated for EVERY
+# zip-expand-shaped catalog entry, never only when the expand prefix already matched
+# some on-disk file. A zip-expand entry whose tree was never expanded at all -- the
+# vendor tool fetched the zip but expansion never ran, or produced nothing -- reports
+# 'missing', the same as an incomplete tree, rather than falling through to a
+# zip-binary-only lookup that would report 'present' with no tree check whatsoever
+# (the exact false-'present' failure mode #1640 exists to close). Truth table, one
+# shared zip-expand entry, four on-disk shapes (pinned by the module's Pester suite):
+#   A: zip binary correct, tree NEVER expanded              -> missing
+#   B: zip binary correct, ONE stray file in the tree       -> missing
+#   C: zip binary correct, complete tree (both subdirs)     -> present
+#   D: no zip binary on disk at all, tree never expanded    -> missing
 
 $Script:VcfDownloadManagerCommonPath = $env:WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH
 
@@ -280,21 +293,26 @@ function Invoke-WaypointCatalogIndex {
 		# emitting a bare filename there duplicates rows instead of updating them.
 		$DepotRelativePath = Get-CatalogEntryDepotRelativePath -Product $CatalogEntry.Product -FileName $CatalogEntry.RelativePath
 
-		$ExpandedRelativePaths = $null
+		$ExpandPrefix = $null
 		if (-not [string]::IsNullOrWhiteSpace($CatalogEntry.ZipExpandRelativePath)) {
 			$ExpandPrefix = Get-ZipExpandDepotPrefix -Product $CatalogEntry.Product -RelativePath $CatalogEntry.ZipExpandRelativePath
-			$ExpandedRelativePaths = @($Manifest.Keys | Where-Object { $_.StartsWith($ExpandPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
 		}
 
-		if ($ExpandedRelativePaths -and $ExpandedRelativePaths.Count -gt 0) {
+		if ($ExpandPrefix) {
+			# Review F3 on issue #1640: Test-ZipExpandTreeComplete used to be reachable
+			# only when the expand prefix already matched at least one manifest key --
+			# a zip-expand entry whose tree was NEVER expanded fell through to the
+			# ordinary zip-binary-only lookup below and reported 'present' with no
+			# tree check at all, the exact false-'present' failure mode #1640 was
+			# written to close (case A of the review's own A-D truth table). The
+			# completeness check now applies to every zip-expand-shaped entry --
+			# whether or not the prefix matched anything yet -- so an unexpanded (or
+			# never-attempted) tree reports 'missing' the same as an incomplete one.
+			$ExpandedRelativePaths = @($Manifest.Keys | Where-Object { $_.StartsWith($ExpandPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
 			foreach ($ExpandedRelativePath in $ExpandedRelativePaths) {
 				[void]$ConsumedRelativePaths.Add($ExpandedRelativePath)
 			}
 
-			# Issue #1640: prefix-presence alone (any file under the expand prefix)
-			# used to be enough to report the whole expanded tree 'present' -- a single
-			# stray or truncated file was enough to clear a multi-GB tree. Require the
-			# documented minimum shape instead (Test-ZipExpandTreeComplete).
 			$ExpandTreeStatus = if (Test-ZipExpandTreeComplete -Manifest $Manifest -ExpandPrefix $ExpandPrefix) { 'present' } else { 'missing' }
 
 			# Round-3 review finding 1: the expanded tree is consumed above, but the zip
