@@ -43,23 +43,32 @@ public interface IPhotonRepoMetadataSource
 
 	/// <summary>
 	/// Probes <c>&lt;repoBaseUrl&gt;/repodata/repomd.xml</c> for one (version, variant,
-	/// arch) repo. A repo with no <c>repodata/</c> at all (a <c>photon_snapshots</c>-shaped
-	/// directory, research #1029 finding 5) is a normal, expected outcome -- returned as
-	/// <see cref="PhotonRepomdProbeResult.NotFound"/>, never thrown as an exception.
+	/// arch) repo. A repo with no <c>repodata/</c> at all but whose directory does exist
+	/// upstream (a <c>photon_snapshots</c>-shaped directory, research #1029 finding 5) is
+	/// a normal, expected outcome -- returned as <see cref="PhotonRepomdProbeResult.NotFound"/>,
+	/// never thrown as an exception. A directory that does not exist upstream at all (a
+	/// combination this repo's cartesian enumeration guessed but the vendor never
+	/// published) is a distinct outcome, <see cref="PhotonRepomdProbeResult.Absent"/> --
+	/// a plain 404 on <c>repodata/repomd.xml</c> cannot tell the two apart on its own, so
+	/// implementations probe the repo directory itself before classifying either way.
 	/// </summary>
 	Task<PhotonRepomdProbeResult> TryGetRepomdRevisionAndPackageCountAsync(string repoBaseUrl, CancellationToken cancellationToken);
 }
 
 /// <summary>
 /// The outcome of probing one repo's <c>repodata/repomd.xml</c>.
-/// <see cref="Kind"/> distinguishes "no repodata here" (a normal, indexable
-/// <c>photon_snapshots</c>-shaped classification) from "repodata exists and parsed" and
-/// from "something unexpected happened" (network/parse failure -- logged and skipped,
-/// never failing the whole discovery job for one bad repo).
+/// <see cref="Kind"/> distinguishes "no repodata here, but the directory exists" (a
+/// normal, indexable <c>photon_snapshots</c>-shaped classification) from "the directory
+/// itself does not exist upstream" (nothing to index -- no row) from "repodata exists
+/// and parsed" and from "something unexpected happened" (network/parse/validation
+/// failure -- logged and skipped, never failing the whole discovery job for one bad
+/// repo).
 /// </summary>
 public sealed record PhotonRepomdProbeResult(PhotonRepomdProbeKind Kind, string? Revision, int? PackageCount, string? Error)
 {
 	public static readonly PhotonRepomdProbeResult NotFound = new(PhotonRepomdProbeKind.NoRepodata, null, null, null);
+
+	public static readonly PhotonRepomdProbeResult Absent = new(PhotonRepomdProbeKind.Absent, null, null, null);
 
 	public static PhotonRepomdProbeResult Found(string revision, int packageCount) =>
 		new(PhotonRepomdProbeKind.Found, revision, packageCount, null);
@@ -72,5 +81,6 @@ public enum PhotonRepomdProbeKind
 {
 	Found,
 	NoRepodata,
+	Absent,
 	Error,
 }

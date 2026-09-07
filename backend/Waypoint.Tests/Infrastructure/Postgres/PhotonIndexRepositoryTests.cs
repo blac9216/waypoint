@@ -27,10 +27,12 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// against the real <c>ON CONFLICT ... DO UPDATE</c> engine behavior. This suite
 /// shares its Postgres database with every other test in the <c>"Postgres"</c>
 /// collection (one container per test run, per <c>PostgresFixture</c>), so every test
-/// method here uses its own unique, GUID-suffixed <c>version</c> value and reads back
-/// via the point-lookup <see cref="IPhotonIndexRepository.GetRepoIndexEntryAsync"/> --
-/// never <see cref="IPhotonIndexRepository.ListRepoIndexEntriesAsync"/>, which would
-/// see every other test's and every other test class's rows in the same table.
+/// method here uses its own unique, GUID-suffixed <c>version</c> value and filters
+/// down to it before asserting -- whether it reads back via the point-lookup
+/// <see cref="IPhotonIndexRepository.GetRepoIndexEntryAsync"/> or via
+/// <see cref="IPhotonIndexRepository.ListRepoIndexEntriesAsync"/> filtered to that
+/// unique version, either is collection-safe the same way: no assertion ever counts
+/// the whole table, only rows matching this test's own GUID-suffixed version.
 /// </summary>
 [Collection("Postgres")]
 public sealed class PhotonIndexRepositoryTests : IAsyncLifetime

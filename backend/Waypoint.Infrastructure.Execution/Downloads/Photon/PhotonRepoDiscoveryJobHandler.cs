@@ -28,11 +28,19 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 /// never filtered by a subscription preset), probes each repo's
 /// <c>repodata/repomd.xml</c>, and upserts one <c>photon_repo_index</c> row per repo
 /// via <see cref="IPhotonIndexRepository.UpsertRepoIndexEntryAsync"/>. A repo with no
-/// repodata (<see cref="PhotonRepomdProbeKind.NoRepodata"/>, the <c>photon_snapshots</c>
+/// repodata but a directory that exists upstream
+/// (<see cref="PhotonRepomdProbeKind.NoRepodata"/>, the <c>photon_snapshots</c>
 /// classification) is indexed with <c>HasRepodata = false</c> -- never an error (AC 3).
-/// A repo whose probe fails outright (<see cref="PhotonRepomdProbeKind.Error"/>) is
-/// skipped and its error collected -- one bad repo never fails the whole job, matching
-/// this repo's tolerant-parse convention elsewhere (e.g. <c>EsxPatchStoreMetadataParser</c>).
+/// A repo directory that does not exist upstream at all
+/// (<see cref="PhotonRepomdProbeKind.Absent"/>) produces no row at all and only a
+/// debug-level note -- indexing it as <c>HasRepodata = false</c> would make a claim the
+/// probe cannot support (a cartesian-product guess, not an observed repo). A repo whose
+/// probe fails outright (<see cref="PhotonRepomdProbeKind.Error"/>) is skipped and its
+/// error collected -- one bad repo never fails the whole job, matching this repo's
+/// tolerant-parse convention elsewhere (e.g. <c>EsxPatchStoreMetadataParser</c>) -- but
+/// when EVERY probe in the sweep fails, the job itself fails rather than reporting a
+/// misleading "Indexed 0" success (a wholly unreachable mirror must not look identical
+/// to a real, empty discovery run).
 /// Payload: <c>{"base_url": "https://packages.broadcom.com/photon"}</c> -- required, no
 /// hardcoded production default, so a test can point this handler at a fixture host
 /// (<c>https://photon.example.internal/photon</c> in this repo's own tests) with zero
@@ -91,7 +99,9 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 
 		int indexed = 0;
 		int noRepodata = 0;
+		int absent = 0;
 		List<string> errors = [];
+		int totalProbes = versions.Count * PhotonRepoVariants.All.Count * PhotonArches.All.Count;
 
 		foreach (string version in versions)
 		{
@@ -108,6 +118,10 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 					{
 						case PhotonRepomdProbeKind.Error:
 							errors.Add($"{version}/{variant}/{arch}: {probe.Error}");
+							continue;
+						case PhotonRepomdProbeKind.Absent:
+							absent++;
+							LogRepoAbsent(_logger, version, variant, arch, repoBaseUrl);
 							continue;
 						case PhotonRepomdProbeKind.NoRepodata:
 							noRepodata++;
@@ -128,7 +142,16 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 			}
 		}
 
-		string summary = $"Indexed {indexed} Photon repo(s) across {versions.Count} version(s) ({noRepodata} without repodata).";
+		if (errors.Count == totalProbes)
+		{
+			LogRepoErrors(_logger, errors.Count);
+			return JobExecutionOutcome.Failed(
+				$"photon-repo-discovery: all {totalProbes} repo probe(s) failed across {versions.Count} version(s); " +
+				$"nothing indexed. Failed probes: {string.Join("; ", errors)}");
+		}
+
+		string summary = $"Indexed {indexed} Photon repo(s) across {versions.Count} version(s) " +
+			$"({noRepodata} without repodata, {absent} absent upstream).";
 		if (errors.Count > 0)
 		{
 			LogRepoErrors(_logger, errors.Count);
@@ -150,6 +173,9 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "photon-repo-discovery: {Count} repo probe(s) failed and were skipped")]
 	private static partial void LogRepoErrors(ILogger logger, int count);
+
+	[LoggerMessage(Level = LogLevel.Debug, Message = "photon-repo-discovery: {Version}/{Variant}/{Arch} directory absent upstream ({RepoBaseUrl}), no row indexed")]
+	private static partial void LogRepoAbsent(ILogger logger, string version, string variant, string arch, string repoBaseUrl);
 
 	private sealed record PhotonRepoDiscoveryPayload(string? BaseUrl);
 }

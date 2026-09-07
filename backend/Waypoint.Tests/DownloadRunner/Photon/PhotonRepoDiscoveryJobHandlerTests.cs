@@ -46,6 +46,9 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 
 		public IReadOnlyList<string>? Versions { get; set; } = ["5.0"];
 
+		/// <summary>Returned for any repo base URL not overridden in <see cref="ProbesByRepoBaseUrl"/>.</summary>
+		public PhotonRepomdProbeResult DefaultProbeResult { get; set; } = PhotonRepomdProbeResult.Found("1700000000", 1);
+
 		/// <summary>Keyed by repo base URL (the exact string the handler built).</summary>
 		public Dictionary<string, PhotonRepomdProbeResult> ProbesByRepoBaseUrl { get; } = [];
 
@@ -61,7 +64,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 			return Task.FromResult(
 				ProbesByRepoBaseUrl.TryGetValue(repoBaseUrl, out PhotonRepomdProbeResult? result)
 					? result
-					: PhotonRepomdProbeResult.Found("1700000000", 1));
+					: DefaultProbeResult);
 		}
 	}
 
@@ -179,11 +182,68 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 		Assert.Equal(PhotonRepoVariants.All.Count * PhotonArches.All.Count - 1, repository.Upserted.Count);
 	}
 
+	/// <summary>Round-0 review finding #3: an all-probes-failed sweep must fail the job, not report "Indexed 0" as success.</summary>
+	[Fact]
+	public async Task ExecuteAsync_AllProbesFail_FailsTheJob()
+	{
+		FakeMetadataSource source = new() { DefaultProbeResult = PhotonRepomdProbeResult.Failed("connection reset") };
+		FakeIndexRepository repository = new();
+		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains((PhotonRepoVariants.All.Count * PhotonArches.All.Count).ToString(System.Globalization.CultureInfo.InvariantCulture), outcome.Note);
+		Assert.Empty(repository.Upserted);
+	}
+
 	/// <summary>
-	/// AC 5: every request this handler issued through the fake source is shaped like
-	/// a versions-manifest or repomd probe -- never anything resembling a package or
-	/// image file fetch. <see cref="IPhotonRepoMetadataSource"/> has no method that
-	/// could even be asked for one, so this also documents that structural guarantee.
+	/// Round-0 review finding #3: a sweep with SOME successes and SOME failures stays a
+	/// success-with-warnings -- only an all-failed sweep fails the job.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_SomeProbesFailButAtLeastOneIndexed_StaysSucceeded()
+	{
+		FakeMetadataSource source = new();
+		string releaseRepoUrl = $"{BaseUrl}/5.0/{PhotonRepoDiscoveryJobHandler.RepoDirectoryName("5.0", PhotonRepoVariants.Release, PhotonArches.Aarch64)}";
+		source.ProbesByRepoBaseUrl[releaseRepoUrl] = PhotonRepomdProbeResult.Failed("connection reset");
+		FakeIndexRepository repository = new();
+		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.NotEmpty(repository.Upserted);
+	}
+
+	/// <summary>Round-0 review finding #4: a repo directory absent upstream produces no row, only a debug-level note.</summary>
+	[Fact]
+	public async Task ExecuteAsync_AbsentRepoDirectory_ProducesNoRowAndIsNotAnError()
+	{
+		FakeMetadataSource source = new();
+		string debuginfoRepoUrl = $"{BaseUrl}/5.0/{PhotonRepoDiscoveryJobHandler.RepoDirectoryName("5.0", PhotonRepoVariants.Debuginfo, PhotonArches.Aarch64)}";
+		source.ProbesByRepoBaseUrl[debuginfoRepoUrl] = PhotonRepomdProbeResult.Absent;
+		FakeIndexRepository repository = new();
+		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.DoesNotContain(repository.Upserted, e => e.Variant == PhotonRepoVariants.Debuginfo && e.Arch == PhotonArches.Aarch64);
+		// Every other repo in the sweep still got indexed; only the absent one is missing.
+		Assert.Equal(PhotonRepoVariants.All.Count * PhotonArches.All.Count - 1, repository.Upserted.Count);
+	}
+
+	/// <summary>
+	/// Proves only what this handler can observe through the fake source: every call it
+	/// makes is shaped like a versions-manifest or repomd probe, never anything
+	/// resembling a package or image file fetch. This is an interface-level guarantee
+	/// (<see cref="IPhotonRepoMetadataSource"/> has no method that could even be asked
+	/// for a package/image file) -- it does NOT prove that the real HTTP implementation
+	/// honors it end-to-end; that proof (rejecting a traversing <c>repomd.xml</c>
+	/// <c>&lt;location href&gt;</c> before any fetch) lives in
+	/// <c>HttpPhotonRepoMetadataSourceTests</c>, the only suite that can observe the
+	/// layer that actually issues requests.
 	/// </summary>
 	[Fact]
 	public async Task ExecuteAsync_NeverRequestsAnythingOtherThanVersionsOrRepomd()

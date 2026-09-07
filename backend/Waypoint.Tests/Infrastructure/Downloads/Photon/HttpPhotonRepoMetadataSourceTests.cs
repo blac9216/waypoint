@@ -28,9 +28,16 @@ namespace Waypoint.Tests.Infrastructure.Downloads.Photon;
 /// fabricated <c>repomd.xml</c>/<c>primary.xml.gz</c>/<c>photon_versions.json</c> with
 /// neutral names, served from <c>https://photon.example.internal/photon</c>, never a
 /// real vendor mirror capture. Covers version-branch enumeration, a found repo
-/// (revision + package count parsed from the gzipped primary document), and the
-/// <c>photon_snapshots</c>-shaped no-repodata classification (a plain 404 on
-/// <c>repodata/repomd.xml</c>, never an exception).
+/// (revision + package count parsed from the gzipped primary document), the
+/// <c>photon_snapshots</c>-shaped no-repodata classification (a 404 on
+/// <c>repodata/repomd.xml</c> whose repo directory nonetheless exists, never an
+/// exception), the "directory absent upstream" classification (a 404 on both
+/// <c>repodata/repomd.xml</c> AND the repo directory itself, round-0 review finding
+/// #4), and PR #1791 round-0 review finding #2's guard: a <c>repomd.xml</c> primary
+/// <c>&lt;location href&gt;</c> that traverses out of the repo directory (or otherwise
+/// fails <see cref="HttpPhotonRepoMetadataSource.IsValidPrimaryHref"/>) is refused
+/// before any fetch is attempted, including a permanent regression fixture for the
+/// exact <c>.rpm</c>-escaping href the review's mutation proved was followed verbatim.
 /// </summary>
 public sealed class HttpPhotonRepoMetadataSourceTests
 {
@@ -126,11 +133,17 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 		Assert.Contains(handler.RequestedUrls, url => url.EndsWith("repodata/primary.xml.gz", StringComparison.Ordinal));
 	}
 
-	/// <summary>The photon_snapshots-shaped classification: a plain 404 on repomd.xml, never an exception.</summary>
+	/// <summary>
+	/// The photon_snapshots-shaped classification: a 404 on repomd.xml, but the repo
+	/// directory itself exists (a 200 on the directory-existence probe) -- never an
+	/// exception.
+	/// </summary>
 	[Fact]
-	public async Task TryGetRepomdRevisionAndPackageCountAsync_NoRepodata_ReturnsNotFoundClassification()
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_NoRepodata_DirectoryExists_ReturnsNotFoundClassification()
 	{
-		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+		ScriptedHandler handler = new(request => request.RequestUri!.ToString().EndsWith("repomd.xml", StringComparison.Ordinal)
+			? new HttpResponseMessage(HttpStatusCode.NotFound)
+			: new HttpResponseMessage(HttpStatusCode.OK));
 		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
 
 		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
@@ -139,8 +152,28 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 		Assert.Equal(PhotonRepomdProbeKind.NoRepodata, result.Kind);
 		Assert.Null(result.Revision);
 		Assert.Null(result.PackageCount);
-		// Never fetched primary.xml.gz for a repo with no repodata at all.
-		Assert.Single(handler.RequestedUrls);
+		// repomd.xml (404) then the directory-existence probe (200) -- never primary.xml.gz.
+		Assert.Equal(2, handler.RequestedUrls.Count);
+	}
+
+	/// <summary>
+	/// Round-0 review finding #4: a repo directory that does not exist upstream at all
+	/// (404 on both repomd.xml AND the directory-existence probe) is a distinct outcome
+	/// from "photon_snapshots-shaped, no repodata" -- the caller must not index it.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_DirectoryAbsentUpstream_ReturnsAbsentClassification()
+	{
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_debuginfo_5.0_aarch64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Absent, result.Kind);
+		Assert.Null(result.Revision);
+		Assert.Null(result.PackageCount);
+		Assert.Null(result.Error);
 	}
 
 	[Fact]
@@ -154,5 +187,91 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 
 		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
 		Assert.NotNull(result.Error);
+	}
+
+	private static string RepomdXmlWithHref(string href) => $"""
+		<?xml version="1.0" encoding="UTF-8"?>
+		<repomd xmlns="http://linux.duke.edu/metadata/repo">
+		  <revision>1700000000</revision>
+		  <data type="primary">
+		    <checksum type="sha256">deadbeef</checksum>
+		    <location href="{href}"/>
+		  </data>
+		</repomd>
+		""";
+
+	/// <summary>
+	/// Permanent regression fixture for round-0 review finding #2's mutation: a
+	/// <c>repomd.xml</c> primary <c>&lt;location href&gt;</c> that escapes the probed
+	/// repo directory into a real package file must be refused -- a
+	/// <see cref="PhotonRepomdProbeKind.Error"/> result, never a fetch of that URL.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_TraversingHref_RefusesAndNeverFetches()
+	{
+		const string traversingHref = "../../../photon_release_5.0_x86_64/RPMS/x86_64/fake-package-1.0-1.x86_64.rpm";
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
+		{
+			Content = new StringContent(RepomdXmlWithHref(traversingHref)),
+		});
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+		Assert.DoesNotContain(handler.RequestedUrls, url => url.EndsWith(".rpm", StringComparison.Ordinal));
+		Assert.Single(handler.RequestedUrls, url => url.EndsWith("repomd.xml", StringComparison.Ordinal));
+	}
+
+	[Theory]
+	[InlineData("http://evil.example.internal/repodata/primary.xml.gz")]
+	[InlineData("//evil.example.internal/repodata/primary.xml.gz")]
+	[InlineData("/repodata/primary.xml.gz")]
+	[InlineData("repodata/../../../etc/passwd")]
+	[InlineData("repodata/primary.rpm")]
+	[InlineData("repodata/../primary.xml.gz")]
+	[InlineData("other/primary.xml.gz")]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_RejectedHref_RefusesAndNeverFetches(string rejectedHref)
+	{
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
+		{
+			Content = new StringContent(RepomdXmlWithHref(rejectedHref)),
+		});
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.Single(handler.RequestedUrls, url => url.EndsWith("repomd.xml", StringComparison.Ordinal));
+	}
+
+	[Theory]
+	[InlineData("repodata/primary.xml.gz")]
+	[InlineData("repodata/filelists.xml.gz")]
+	[InlineData("repodata/other.xml.zst")]
+	[InlineData("repodata/primary.sqlite.bz2")]
+	public void IsValidPrimaryHref_AcceptsRepodataMetadataKinds(string href) =>
+		Assert.True(HttpPhotonRepoMetadataSource.IsValidPrimaryHref(href));
+
+	/// <summary>Round-0 review finding #3, note 3: a size-cap hit must be reported distinctly from "unreachable".</summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_PrimaryXmlGzOverSizeCap_ReportsSizeCapRejection()
+	{
+		byte[] oversizedContent = new byte[HttpPhotonRepoMetadataSource.MaxPrimaryXmlBytes + 1];
+		ScriptedHandler handler = new(request => request.RequestUri!.ToString().EndsWith("repomd.xml", StringComparison.Ordinal)
+			? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(RepomdXml) }
+			: new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(oversizedContent) });
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+		Assert.Contains("size cap", result.Error, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("unreachable", result.Error, StringComparison.OrdinalIgnoreCase);
 	}
 }

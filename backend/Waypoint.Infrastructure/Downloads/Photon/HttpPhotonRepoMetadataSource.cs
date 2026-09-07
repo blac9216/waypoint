@@ -15,6 +15,7 @@
 using System.IO.Compression;
 using System.Net;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Xml;
 using Waypoint.Core.Downloads.Photon;
 
@@ -22,17 +23,25 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 
 /// <inheritdoc cref="IPhotonRepoMetadataSource"/>
 /// <remarks>
-/// Real network implementation. Every request this type issues is one of exactly two
-/// shapes: <c>GET &lt;base&gt;/photon_cve_metadata/photon_versions.json</c> (small JSON) or
+/// Real network implementation. Every request this type issues is one of exactly three
+/// shapes: <c>GET &lt;base&gt;/photon_cve_metadata/photon_versions.json</c> (small JSON),
 /// <c>GET &lt;repoBase&gt;/repodata/repomd.xml</c> followed by, only when that document
-/// resolves a <c>primary</c> data entry, <c>GET &lt;repoBase&gt;/&lt;that entry's location&gt;</c>
-/// (the compressed <c>primary.xml.gz</c> HEADER document) -- never an actual RPM, ISO,
-/// OVA, or any other package/image file (this issue's AC 5). <c>repomd.xml</c> is
-/// unsigned upstream (research #1029 finding 2: "Metadata signing: none... repomd.xml
-/// lists no signature data entry") so this type derives no trust decision from its
-/// content -- it only reads the &lt;revision&gt; and the primary entry's location/size,
-/// same untrusted-input discipline <c>EsxPatchStoreMetadataParser</c> applies to its own
-/// XML: DTD processing prohibited, no resolver, and every read is bounded.
+/// resolves a <c>primary</c> data entry AND that entry's <c>href</c> passes
+/// <see cref="IsValidPrimaryHref"/>, <c>GET &lt;repoBase&gt;/&lt;that entry's location&gt;</c>
+/// (the compressed <c>primary.xml.gz</c> HEADER document), or a directory-existence probe
+/// of <c>&lt;repoBase&gt;</c> itself when <c>repomd.xml</c> 404s (to distinguish "directory
+/// absent upstream" from "present, no repodata" -- see <see cref="ProbeDirectoryExistsAsync"/>)
+/// -- never an actual RPM, ISO, OVA, or any other package/image file (this issue's AC 5).
+/// <c>repomd.xml</c> is unsigned upstream (research #1029 finding 2: "Metadata signing:
+/// none... repomd.xml lists no signature data entry") so this type derives no trust
+/// decision from its content -- it only reads the &lt;revision&gt; and the primary
+/// entry's location/size, same untrusted-input discipline
+/// <c>EsxPatchStoreMetadataParser</c> applies to its own XML: DTD processing prohibited,
+/// no resolver, and every read is bounded. Because <c>repomd.xml</c> is unsigned, its
+/// <c>&lt;location href&gt;</c> is treated as hostile input: <see cref="IsValidPrimaryHref"/>
+/// rejects anything with a scheme/authority, a rooted path, a <c>..</c> segment, or a
+/// filename that is not one of the repomd metadata kinds -- a rejection is a
+/// <see cref="PhotonRepomdProbeResult.Failed(string)"/> for that repo, never a fetch.
 /// </remarks>
 public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 {
@@ -41,6 +50,15 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 
 	/// <summary>Bound on the decompressed primary.xml document -- header-only content for tens of thousands of packages, still finite.</summary>
 	public const int MaxPrimaryXmlBytes = 64 * 1024 * 1024;
+
+	/// <summary>
+	/// The closed set of repomd metadata document kinds (<c>primary</c>/<c>filelists</c>/
+	/// <c>other</c>) crossed with their allowed compression suffixes -- the only shapes a
+	/// <c>&lt;location href&gt;</c> filename may take for this type to fetch it.
+	/// </summary>
+	private static readonly Regex RepomdMetadataFilenamePattern = new(
+		@"^(primary|filelists|other)\.(xml|sqlite)(\.(gz|bz2|xz|zst))?$",
+		RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
 	private static readonly XmlReaderSettings SafeXmlSettings = new()
 	{
@@ -61,7 +79,7 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		ArgumentException.ThrowIfNullOrWhiteSpace(baseUrl);
 
 		string url = $"{baseUrl.TrimEnd('/')}/photon_cve_metadata/photon_versions.json";
-		byte[]? bytes = await GetBoundedAsync(url, MaxSmallDocumentBytes, cancellationToken).ConfigureAwait(false);
+		(byte[]? bytes, bool _) = await GetBoundedAsync(url, MaxSmallDocumentBytes, cancellationToken).ConfigureAwait(false);
 		if (bytes is null)
 		{
 			return null;
@@ -91,12 +109,15 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		ArgumentException.ThrowIfNullOrWhiteSpace(repoBaseUrl);
 
 		string repomdUrl = $"{repoBaseUrl.TrimEnd('/')}/repodata/repomd.xml";
-		(byte[]? bytes, HttpStatusCode? notFoundStatus) = await GetBoundedOrNotFoundAsync(
+		(byte[]? bytes, HttpStatusCode? notFoundStatus, bool _) = await GetBoundedOrNotFoundAsync(
 			repomdUrl, MaxSmallDocumentBytes, cancellationToken).ConfigureAwait(false);
 
 		if (notFoundStatus is HttpStatusCode.NotFound)
 		{
-			return PhotonRepomdProbeResult.NotFound;
+			// A 404 on repomd.xml alone cannot tell "directory absent upstream" apart from
+			// "directory present, no repodata" -- probe the directory itself to decide.
+			bool directoryExists = await ProbeDirectoryExistsAsync(repoBaseUrl, cancellationToken).ConfigureAwait(false);
+			return directoryExists ? PhotonRepomdProbeResult.NotFound : PhotonRepomdProbeResult.Absent;
 		}
 
 		if (bytes is null)
@@ -120,8 +141,20 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 			return PhotonRepomdProbeResult.Failed($"repomd.xml at '{repomdUrl}' has no usable <revision>/primary <location>.");
 		}
 
+		if (!IsValidPrimaryHref(primaryLocation))
+		{
+			return PhotonRepomdProbeResult.Failed(
+				$"repomd.xml at '{repomdUrl}' declared a rejected primary <location href='{primaryLocation}'> " +
+				"(must be a relative repodata/<kind> path with no scheme, no rooted path, and no '..' segment) -- never fetched.");
+		}
+
 		string primaryUrl = $"{repoBaseUrl.TrimEnd('/')}/{primaryLocation.TrimStart('/')}";
-		byte[]? primaryGzBytes = await GetBoundedAsync(primaryUrl, MaxPrimaryXmlBytes, cancellationToken).ConfigureAwait(false);
+		(byte[]? primaryGzBytes, bool sizeCapExceeded) = await GetBoundedAsync(primaryUrl, MaxPrimaryXmlBytes, cancellationToken).ConfigureAwait(false);
+		if (sizeCapExceeded)
+		{
+			return PhotonRepomdProbeResult.Failed($"primary.xml.gz at '{primaryUrl}' exceeded the {MaxPrimaryXmlBytes}-byte size cap.");
+		}
+
 		if (primaryGzBytes is null)
 		{
 			return PhotonRepomdProbeResult.Failed($"primary.xml.gz unreachable at '{primaryUrl}'.");
@@ -138,6 +171,64 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		}
 
 		return PhotonRepomdProbeResult.Found(revision, packageCount);
+	}
+
+	/// <summary>
+	/// Rejects a <c>repomd.xml</c> primary <c>&lt;location href&gt;</c> unless it is a
+	/// plain relative path under <c>repodata/</c> with no scheme/authority, no rooted
+	/// path, no <c>..</c> segment, and a filename matching one of the repomd metadata
+	/// kinds (<see cref="RepomdMetadataFilenamePattern"/>). <c>repomd.xml</c> is unsigned
+	/// upstream, so this href is hostile input by default -- a value shaped like
+	/// <c>../../../other_repo/RPMS/x86_64/some-package.rpm</c> must be refused before any
+	/// fetch is attempted, never normalized-and-followed (this issue's AC 5).
+	/// </summary>
+	internal static bool IsValidPrimaryHref(string href)
+	{
+		if (string.IsNullOrWhiteSpace(href))
+		{
+			return false;
+		}
+
+		if (href.Contains("..", StringComparison.Ordinal)
+			|| href.StartsWith('/')
+			|| href.StartsWith('\\')
+			|| href.Contains("://", StringComparison.Ordinal)
+			|| href.StartsWith("//", StringComparison.Ordinal)
+			|| !href.StartsWith("repodata/", StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		string filename = href[(href.LastIndexOf('/') + 1)..];
+		return RepomdMetadataFilenamePattern.IsMatch(filename);
+	}
+
+	/// <summary>
+	/// Distinguishes "the repo directory does not exist upstream" from "the directory
+	/// exists but has no <c>repodata/</c>" -- both look identical from a bare 404 on
+	/// <c>repodata/repomd.xml</c>. A <c>HEAD</c> on the repo base itself: any response
+	/// other than a 404 (200, a directory-listing 403, a method-not-allowed 405, ...) is
+	/// treated as "exists" -- only an explicit 404 or unreachable transport counts as
+	/// absent, erring toward the existing <c>NoRepodata</c> classification when unsure.
+	/// </summary>
+	private async Task<bool> ProbeDirectoryExistsAsync(string repoBaseUrl, CancellationToken cancellationToken)
+	{
+		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpPhotonRepoMetadataSource));
+		try
+		{
+			using HttpRequestMessage request = new(HttpMethod.Head, repoBaseUrl.TrimEnd('/') + "/");
+			using HttpResponseMessage response = await client
+				.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+			return response.StatusCode != HttpStatusCode.NotFound;
+		}
+		catch (HttpRequestException)
+		{
+			return false;
+		}
+		catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+		{
+			return false;
+		}
 	}
 
 	private static (string? Revision, string? PrimaryLocation) ParseRepomd(byte[] xmlBytes)
@@ -205,13 +296,13 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		return count;
 	}
 
-	private async Task<byte[]?> GetBoundedAsync(string url, int maxBytes, CancellationToken cancellationToken)
+	private async Task<(byte[]? Bytes, bool SizeCapExceeded)> GetBoundedAsync(string url, int maxBytes, CancellationToken cancellationToken)
 	{
-		(byte[]? bytes, HttpStatusCode? _) = await GetBoundedOrNotFoundAsync(url, maxBytes, cancellationToken).ConfigureAwait(false);
-		return bytes;
+		(byte[]? bytes, HttpStatusCode? _, bool sizeCapExceeded) = await GetBoundedOrNotFoundAsync(url, maxBytes, cancellationToken).ConfigureAwait(false);
+		return (bytes, sizeCapExceeded);
 	}
 
-	private async Task<(byte[]? Bytes, HttpStatusCode? NotFoundStatus)> GetBoundedOrNotFoundAsync(
+	private async Task<(byte[]? Bytes, HttpStatusCode? NotFoundStatus, bool SizeCapExceeded)> GetBoundedOrNotFoundAsync(
 		string url, int maxBytes, CancellationToken cancellationToken)
 	{
 		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpPhotonRepoMetadataSource));
@@ -222,12 +313,12 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 
 			if (response.StatusCode == HttpStatusCode.NotFound)
 			{
-				return (null, HttpStatusCode.NotFound);
+				return (null, HttpStatusCode.NotFound, false);
 			}
 
 			if (!response.IsSuccessStatusCode)
 			{
-				return (null, response.StatusCode);
+				return (null, response.StatusCode, false);
 			}
 
 			await using Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -240,19 +331,19 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 				total += read;
 				if (total > maxBytes)
 				{
-					return (null, null);
+					return (null, null, true);
 				}
 				buffer.Write(chunk, 0, read);
 			}
-			return (buffer.ToArray(), null);
+			return (buffer.ToArray(), null, false);
 		}
 		catch (HttpRequestException)
 		{
-			return (null, null);
+			return (null, null, false);
 		}
 		catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
 		{
-			return (null, null);
+			return (null, null, false);
 		}
 	}
 }
