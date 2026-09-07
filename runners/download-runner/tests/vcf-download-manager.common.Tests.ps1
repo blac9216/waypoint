@@ -490,6 +490,69 @@ Describe 'Save-WebFile' {
 		}
 	}
 
+	It 'resolves ExpectedSize from a real HEAD response and enforces it (issue #1800)' {
+		# Issue #1800 root cause: a real Invoke-WebRequest response types its Headers
+		# indexer as Dictionary<string, string[]> -- Headers['Content-Length'] is a
+		# System.String[] even for a single-valued header -- and PowerShell's [long]
+		# cast never auto-unwraps a single-element array, so the naive
+		# [long]$HeadResponse.Headers['Content-Length'] this function used to run
+		# threw EVERY time against a real listener, silently swallowed by this
+		# function's own catch, leaving ExpectedSize at 0. The mocked cases below
+		# (a plain hashtable Headers) cannot catch this by construction -- exactly
+		# the mock-vs-real-shape trap PR #1629/#1638's review called out for a
+		# different case -- so this drives a real HttpListener with no mock at all.
+		$Listener = [System.Net.HttpListener]::new()
+		$Port = $null
+		$Bound = $false
+		foreach ($Candidate in (Get-Random -Minimum 20000 -Maximum 40000 -Count 5)) {
+			try {
+				$Listener.Prefixes.Clear()
+				$Listener.Prefixes.Add("http://127.0.0.1:$Candidate/")
+				$Listener.Start()
+				$Port = $Candidate
+				$Bound = $true
+				break
+			} catch {
+				continue
+			}
+		}
+		if (-not $Bound) {
+			Set-ItResult -Skipped -Because 'could not bind a local HttpListener port in this sandbox'
+			return
+		}
+
+		try {
+			$Job = Start-ThreadJob -ScriptBlock {
+				param($Listener)
+				# HEAD declares 999 bytes; the GET body is only 12 -- proves
+				# ExpectedSize was actually parsed from the HEAD response (not left
+				# at 0, which would skip the size-gated check entirely) by asserting
+				# the resulting size-mismatch failure.
+				for ($i = 0; $i -lt 2; $i++) {
+					try { $Context = $Listener.GetContext() } catch { break }
+					$Response = $Context.Response
+					if ($Context.Request.HttpMethod -eq 'HEAD') {
+						$Response.ContentLength64 = 999
+						$Response.OutputStream.Write([byte[]]::new(0), 0, 0)
+					} else {
+						$Bytes = [System.Text.Encoding]::ASCII.GetBytes('ABCDEFGHIJKL')
+						$Response.ContentLength64 = $Bytes.Length
+						$Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+					}
+					$Response.OutputStream.Close()
+				}
+			} -ArgumentList $Listener
+
+			$Out = Join-Path -Path $TestDrive -ChildPath 'download/head-size.bin'
+			{ Save-WebFile -Url "http://127.0.0.1:$Port/live" -OutFile $Out -RetryCount 1 } |
+				Should -Throw '*Size mismatch: expected 999, got 12*'
+		} finally {
+			$Listener.Stop()
+			$Listener.Close()
+			Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+		}
+	}
+
 	It 'downloads successfully on the first attempt' {
 		Mock Invoke-WebRequest {
 			if ($Method -eq 'Head') {

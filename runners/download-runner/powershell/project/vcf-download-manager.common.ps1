@@ -660,10 +660,26 @@ function Save-WebFile {
 	}
 
 	# Get expected size from HEAD request if not provided
+	#
+	# Issue #1800 root cause: PowerShell 7's Invoke-WebRequest (with or without
+	# -UseBasicParsing) types a WebResponseObject's .Headers indexer as
+	# Dictionary<string, string[]> -- $HeadResponse.Headers['Content-Length'] returns
+	# a System.String[] even for a header with exactly one value, and PowerShell's
+	# [long] cast never auto-unwraps a single-element array: it throws "Cannot
+	# convert the 'System.String[]' value ... to type 'System.Int64'" every time,
+	# silently swallowed below by this function's own catch. This is deterministic
+	# and reproduces with the real, unmodified script directly (no SDK-hosted
+	# runspace, no C# executor involved) -- NOT test-harness-specific, confirmed
+	# production-relevant. Coerce to a scalar first, the same pattern the 206-resume
+	# branch below already uses for Content-Range (issue #1743 review round 1).
 	if ($ExpectedSize -le 0) {
 		try {
 			$HeadResponse = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-			$ExpectedSize = [long]$HeadResponse.Headers['Content-Length']
+			$ContentLengthRaw = $HeadResponse.Headers['Content-Length']
+			$ContentLengthValue = if ($null -eq $ContentLengthRaw) { $null } else { @($ContentLengthRaw) -join '' }
+			if (-not [string]::IsNullOrWhiteSpace($ContentLengthValue)) {
+				$ExpectedSize = [long]$ContentLengthValue
+			}
 		} catch {
 			Write-Log "Could not get Content-Length for $Url" -Severity 'Debug' @WriteLogParams
 		}
