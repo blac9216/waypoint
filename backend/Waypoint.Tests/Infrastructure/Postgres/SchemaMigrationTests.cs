@@ -599,7 +599,7 @@ public sealed class SchemaMigrationTests
 	/// precedent for the same shape of gap), proven both directions by
 	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 95;
+	private const int ExpectedMigrationCount = 96;
 
 	private readonly PostgresFixture _fixture;
 
