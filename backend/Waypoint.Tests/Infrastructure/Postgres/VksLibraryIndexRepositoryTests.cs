@@ -85,16 +85,25 @@ public sealed class VksLibraryIndexRepositoryTests : IAsyncLifetime
 	/// survives with the new values, the original <c>id</c>, an advanced
 	/// <c>last_seen_at</c>, and an <c>discovered_at</c> that the update clause never
 	/// touches.
+	/// <para>
+	/// Both observations are coherent states of the model, in the one direction that
+	/// keeps them so: the row is first seen quarantined (<c>parse_status='unparsed'</c>,
+	/// <c>naming_era='unparsed'</c>, every dimension NULL -- 0111's and
+	/// <see cref="VksItemDimensions"/>' documented unparsed shape), then re-seen parsed
+	/// once the grammar covers its era, which is exactly #1031's quarantine-then-parse
+	/// story. The reverse (populated dimensions carried alongside
+	/// <c>parse_status='unparsed'</c>) is a state both docs call impossible, so it is
+	/// never pinned here (round-2 review note N3).
+	/// </para>
 	/// </summary>
 	[Fact]
 	public async Task UpsertItemsAsync_ChangedDimensionsOnSeenName_UpdatesTheSameRow()
 	{
 		string name = $"ob-99990009-photon-5-amd64-v1.30.2---vmware.1-vkr.1-{Guid.NewGuid():N}";
-		VksItemDimensions originalDimensions = new("photon", "5", "amd64", "1.30.2", "1", false, VksReleaseLines.Vkr, "1", "99990009");
 		DateTimeOffset firstIndex = DateTimeOffset.UtcNow.AddMinutes(-10);
 		VksLibraryItem firstObservation = VksLibraryItem.FromIndexObservation(
-			name, VksItemSources.Public, itemUuid: Guid.NewGuid().ToString(), originalDimensions, VksNamingEras.Current,
-			VksParseStatuses.Parsed, new VksChangeToken("etag-fixture-original"), sha256: null, sizeBytes: 1000,
+			name, VksItemSources.Public, itemUuid: Guid.NewGuid().ToString(), VksItemDimensions.Empty, VksNamingEras.Unparsed,
+			VksParseStatuses.Unparsed, new VksChangeToken("etag-fixture-original"), sha256: null, sizeBytes: 1000,
 			createdUpstream: DateTimeOffset.UtcNow.AddDays(-30), observedAt: firstIndex);
 
 		await _repository.UpsertItemsAsync([firstObservation], CancellationToken.None);
@@ -107,8 +116,8 @@ public sealed class VksLibraryIndexRepositoryTests : IAsyncLifetime
 			Id = Guid.NewGuid(),
 			ItemUuid = Guid.NewGuid().ToString(),
 			Dimensions = changedDimensions,
-			NamingEra = VksNamingEras.TkgsOva,
-			ParseStatus = VksParseStatuses.Unparsed,
+			NamingEra = VksNamingEras.Current,
+			ParseStatus = VksParseStatuses.Parsed,
 			Etag = new VksChangeToken("etag-fixture-changed"),
 			Sha256 = "deadbeefcafe",
 			SizeBytes = 2_000_000,
@@ -130,8 +139,8 @@ public sealed class VksLibraryIndexRepositoryTests : IAsyncLifetime
 		Assert.Equal(firstObservation.Id, stored.Id);
 		Assert.Equal(changedObservation.ItemUuid, stored.ItemUuid);
 		Assert.Equal(changedDimensions, stored.Dimensions);
-		Assert.Equal(VksNamingEras.TkgsOva, stored.NamingEra);
-		Assert.Equal(VksParseStatuses.Unparsed, stored.ParseStatus);
+		Assert.Equal(VksNamingEras.Current, stored.NamingEra);
+		Assert.Equal(VksParseStatuses.Parsed, stored.ParseStatus);
 		Assert.Equal("etag-fixture-changed", stored.Etag?.Value);
 		Assert.Equal("deadbeefcafe", stored.Sha256);
 		Assert.Equal(2_000_000, stored.SizeBytes);

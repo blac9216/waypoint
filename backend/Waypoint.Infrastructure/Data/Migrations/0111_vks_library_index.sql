@@ -1,8 +1,8 @@
 -- Issue #1480 (epic #1184, split from #1054 (closed as design record 2026-08-30));
 -- research: lane #1031 (VKS library lane, ratified). Slot 0111 pre-assigned
 -- 2026-08-30; verified free against both the migrations directory and open PRs at
--- authoring time (main's ledger was at 91, 0129 last merged; #1509/#1389 hold
--- 0108/0113 respectively and are still in flight; #1765's 0109 has since
+-- authoring time and re-verified in round 2 (#1509's PR #1791 holds 0130 and
+-- #1389's PR #1770 holds 0113; both still in flight; #1765's 0109 has since
 -- landed on main, reconciled by this branch's round-1 rebase -- per this repo's
 -- standing merge-verification convention for concurrent migration slots).
 --

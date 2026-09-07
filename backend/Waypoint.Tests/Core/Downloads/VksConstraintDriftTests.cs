@@ -26,111 +26,204 @@ namespace Waypoint.Tests.Core.Downloads;
 /// 0111's four named CHECK constraints on <c>vks_library_items</c>
 /// (<c>vks_library_items_source_check</c>, <c>_release_line_check</c>,
 /// <c>_naming_era_check</c>, <c>_parse_status_check</c>), following this repo's
-/// <c>DepotArtifactStatusesConstraintDriftTests</c> convention: a test parsing the SQL
-/// itself, scoped by the named constraint rather than by column name alone, so an
-/// unrelated CHECK on the same column name in another table (0036/0037/0052/0054 all
-/// declare an unnamed <c>source IN (...)</c> CHECK) can never be picked up in its
-/// place (#1795).
+/// <c>DepotArtifactStatusesConstraintDriftTests</c>/<c>VmToolsConstraintDriftTests</c>
+/// convention of parsing the migration SQL itself rather than a live database.
+/// Resolution is scoped by BOTH the owning table and the constraint name (#1795 AC1):
+/// a CHECK is only read when it is declared inside <c>vks_library_items</c>' own
+/// <c>CREATE TABLE</c> body or added to that table by a later
+/// <c>ALTER TABLE ... ADD CONSTRAINT</c>, so neither a differently-named nor an
+/// identically-named <c>source IN (...)</c> CHECK on some other table can be picked up
+/// in its place. Column name alone would not do: four other migrations already declare
+/// a <c>source IN (...)</c> CHECK on unrelated tables -- 0036 line 61 unnamed, and
+/// 0037 line 32 (<c>managed_tool_installs_source_check</c>), 0052 line 51
+/// (<c>benchmark_revisions_source_check</c>) and 0054 line 128
+/// (<c>component_observations_source_check</c>) named after their own tables -- and a
+/// column-only scan would silently repoint itself at whichever of those sorts last.
 /// </summary>
 public sealed class VksConstraintDriftTests
 {
+	private const string Table = "vks_library_items";
+
 	[Fact]
 	public void VksItemSourcesAll_IsInLockstepWithSourceCheckConstraintValueSet()
 	{
-		Assert.Equal(VksItemSources.All, ParseCheckConstraintValues("vks_library_items_source_check", "source"));
+		Assert.Equal(
+			VksItemSources.All,
+			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_source_check", "source"));
 	}
 
 	[Fact]
 	public void VksReleaseLinesAll_IsInLockstepWithReleaseLineCheckConstraintValueSet()
 	{
-		Assert.Equal(VksReleaseLines.All, ParseCheckConstraintValues("vks_library_items_release_line_check", "release_line"));
+		Assert.Equal(
+			VksReleaseLines.All,
+			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_release_line_check", "release_line"));
 	}
 
 	[Fact]
 	public void VksNamingErasAll_IsInLockstepWithNamingEraCheckConstraintValueSet()
 	{
-		Assert.Equal(VksNamingEras.All, ParseCheckConstraintValues("vks_library_items_naming_era_check", "naming_era"));
+		Assert.Equal(
+			VksNamingEras.All,
+			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_naming_era_check", "naming_era"));
 	}
 
 	[Fact]
 	public void VksParseStatusesAll_IsInLockstepWithParseStatusCheckConstraintValueSet()
 	{
-		Assert.Equal(VksParseStatuses.All, ParseCheckConstraintValues("vks_library_items_parse_status_check", "parse_status"));
+		Assert.Equal(
+			VksParseStatuses.All,
+			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_parse_status_check", "parse_status"));
 	}
 
 	/// <summary>
-	/// A decoy <c>source IN (...)</c> CHECK on an unrelated table, appearing after
-	/// <c>vks_library_items_source_check</c> in ordinal migration order, must never
-	/// change what this guard reads -- the exact drift #1795 found: four migrations
-	/// (0036, 0037, 0052, 0054) already declare <c>CHECK (source IN (...))</c> on
-	/// other tables, and the guard passed only because 0111 happened to sort last
-	/// ordinally among them. This proves the fix is scoped by constraint name, not
-	/// by scan order.
+	/// #1795 AC2: a <c>source IN (...)</c> CHECK on another table, in a HIGHER-numbered
+	/// migration than 0111, must never change what this guard reads -- here in its
+	/// hardest form, the decoy carrying the REAL constraint's own name
+	/// (<c>vks_library_items_source_check</c>) on <c>reviewer_probe_table</c>. That is
+	/// the round-2 reviewer's own probe, which turned a name-only guard red with
+	/// <c>Actual: ["bogus"]</c>; table scoping is what makes the real
+	/// <c>['depot','public']</c> still resolve.
 	/// </summary>
 	[Fact]
-	public void ParseCheckConstraintValues_IgnoresADecoyCheckOnAnUnrelatedTableNamedIdenticallyToTheRealOne()
+	public void ParseLatestCheckAcrossMigrations_IgnoresAnIdenticallyNamedCheckOnADifferentTable()
 	{
-		const string sql = """
-			CREATE TABLE decoy_table (
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS vks_library_items (
+			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public'))
+			);
+			""",
+			"""
+			CREATE TABLE reviewer_probe_table (
 			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('bogus'))
 			);
-			""";
+			""",
+		];
 
-		List<string> values = ParseCheckConstraintValuesFromSql(sql, "vks_library_items_source_check", "source");
+		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
 
-		Assert.Equal(["bogus"], values);
+		Assert.Equal(["depot", "public"], values);
+	}
+
+	/// <summary>
+	/// #1795 AC2, the everyday form: a DIFFERENTLY-named <c>source IN (...)</c> CHECK on
+	/// another table in a higher-numbered migration -- the shape 0037/0052/0054 actually
+	/// ship -- must likewise leave the real value set untouched.
+	/// </summary>
+	[Fact]
+	public void ParseLatestCheckAcrossMigrations_IgnoresADifferentlyNamedSourceCheckOnADifferentTable()
+	{
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS vks_library_items (
+			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public'))
+			);
+			""",
+			"""
+			CREATE TABLE managed_tool_installs (
+			    source TEXT NOT NULL,
+			    CONSTRAINT managed_tool_installs_source_check CHECK (source IN ('local-repository', 'depot', 'upload'))
+			);
+			""",
+		];
+
+		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+
+		Assert.Equal(["depot", "public"], values);
 	}
 
 	/// <summary>
 	/// A widened real <c>vks_library_items_source_check</c> constraint value set must
 	/// be picked up (i.e. no longer equal <see cref="VksItemSources.All"/>) -- the
-	/// mutation-test half of #1795's acceptance criteria, proving the guard actually
-	/// fails when the vocabulary genuinely diverges.
+	/// mutation-test half of #1795's acceptance criteria, proving this guard actually
+	/// fails when the vocabulary genuinely diverges rather than passing vacuously.
 	/// </summary>
 	[Fact]
-	public void ParseCheckConstraintValues_DetectsAGenuinelyWidenedRealConstraint()
+	public void ParseLatestCheckAcrossMigrations_DetectsAGenuinelyWidenedRealConstraint()
 	{
-		const string sql = """
-			CREATE TABLE vks_library_items (
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS vks_library_items (
 			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public', 'widened'))
 			);
-			""";
+			""",
+		];
 
-		List<string> values = ParseCheckConstraintValuesFromSql(sql, "vks_library_items_source_check", "source");
+		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
 
 		Assert.NotEqual(VksItemSources.All, values);
 	}
 
 	/// <summary>
-	/// Reads every embedded <c>Data/Migrations/*.sql</c> resource in migration order
-	/// (ordinal on the zero-padded filename prefix, matching
-	/// <see cref="NpgsqlSchemaMigrator"/>) and returns the value list of the LAST
-	/// <paramref name="constraintName"/> CHECK constraint declared across them -- i.e.
-	/// the constraint the fully-migrated database actually enforces. Scoped by the
-	/// named constraint (this repo's <c>DepotArtifactStatusesConstraintDriftTests</c>
-	/// convention), never by column name alone: several other migrations
-	/// (0036/0037/0052/0054) declare an unrelated, unnamed <c>source IN (...)</c>
-	/// CHECK on other tables, and a column-only scan would silently repoint itself at
-	/// whichever of those sorts last (#1795).
+	/// Table scoping must not cost ALTER visibility (the hole
+	/// <c>VmToolsConstraintDriftTests</c> was corrected for on PR #1765): a later
+	/// migration re-declaring the constraint via this repo's
+	/// <c>DROP CONSTRAINT</c>/<c>ADD CONSTRAINT</c> idiom (migration 0129's own shape)
+	/// sits outside any <c>CREATE TABLE</c> parens and MUST still be read as the latest
+	/// declaration -- the one a fully-migrated database actually enforces.
 	/// </summary>
-	private static List<string> ParseCheckConstraintValues(string constraintName, string column)
+	[Fact]
+	public void ParseLatestCheckAcrossMigrations_PicksUpALaterAlterTableDropAddConstraint()
+	{
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS vks_library_items (
+			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public'))
+			);
+			""",
+			"""
+			ALTER TABLE vks_library_items DROP CONSTRAINT IF EXISTS vks_library_items_source_check;
+			ALTER TABLE vks_library_items ADD CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot'));
+			""",
+		];
+
+		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+
+		Assert.Equal(["depot"], values);
+	}
+
+	private static List<string> ReadEmbeddedMigrations()
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
 		string[] resourceNames = [.. assembly.GetManifestResourceNames()
 			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
 			.OrderBy(name => name, StringComparer.Ordinal)];
 
-		List<string>? latest = null;
+		List<string> sqlTexts = [];
 		foreach (string resourceName in resourceNames)
 		{
 			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
 			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
+			sqlTexts.Add(reader.ReadToEnd());
+		}
 
-			List<string>? found = TryParseCheckConstraintValues(sql, constraintName, column);
-			if (found is not null)
+		return sqlTexts;
+	}
+
+	/// <summary>
+	/// Reads every migration text, in migration order (ordinal on the zero-padded
+	/// filename prefix, matching <see cref="NpgsqlSchemaMigrator"/>), and returns the
+	/// value list of the LAST <paramref name="constraintName"/> CHECK constraint
+	/// declared ON <paramref name="table"/> across them -- i.e. the constraint the
+	/// fully-migrated database actually enforces. Both scopes are load-bearing: the
+	/// TABLE scope is what #1795 AC1 requires (a same-named CHECK on another table is
+	/// invisible here), and the NAME scope is what keeps sibling CHECKs on the same
+	/// column of the same table apart.
+	/// </summary>
+	private static List<string> ParseLatestCheckAcrossMigrations(
+		IEnumerable<string> migrationSqlTexts, string table, string constraintName, string columnName)
+	{
+		List<string>? latest = null;
+		foreach (string sql in migrationSqlTexts)
+		{
+			foreach (List<string> values in FindTableScopedChecks(sql, table, constraintName, columnName))
 			{
-				latest = found;
+				latest = values;
 			}
 		}
 
@@ -139,26 +232,84 @@ public sealed class VksConstraintDriftTests
 		return latest!;
 	}
 
-	private static List<string> ParseCheckConstraintValuesFromSql(string sql, string constraintName, string column)
-	{
-		List<string>? found = TryParseCheckConstraintValues(sql, constraintName, column);
-		Assert.NotNull(found);
-		return found!;
-	}
-
-	private static List<string>? TryParseCheckConstraintValues(string sql, string constraintName, string column)
+	/// <summary>
+	/// Every declaration of <paramref name="constraintName"/> on
+	/// <paramref name="table"/> within one migration text, in the order it appears.
+	/// Two shapes count, and only these two: a <c>CONSTRAINT &lt;name&gt; CHECK (...)</c>
+	/// inside that table's own <c>CREATE TABLE</c> body (inline on a column or as a
+	/// table-level constraint), and an <c>ALTER TABLE &lt;table&gt; ADD CONSTRAINT
+	/// &lt;name&gt; CHECK (...)</c> re-declaration. Anything declared inside another
+	/// table's body -- however it is named -- is not a declaration on this table and is
+	/// skipped.
+	/// </summary>
+	private static List<List<string>> FindTableScopedChecks(string sql, string table, string constraintName, string columnName)
 	{
 		Regex checkPattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(column)}\s+IN\s*\((?<values>[^)]*)\)",
+			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
 			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
+		Regex alterPattern = new(
+			$@"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{Regex.Escape(table)}\s+ADD\s+CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
-		List<string>? latest = null;
-		foreach (Match match in checkPattern.Matches(sql))
+		List<(int Position, List<string> Values)> found = [];
+
+		foreach ((int bodyStart, int bodyEnd) in CreateTableBodies(sql, table))
 		{
-			latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
+			foreach (Match match in checkPattern.Matches(sql[bodyStart..bodyEnd]))
+			{
+				found.Add((bodyStart + match.Index, ParseValues(match)));
+			}
 		}
 
-		return latest;
+		foreach (Match match in alterPattern.Matches(sql))
+		{
+			found.Add((match.Index, ParseValues(match)));
+		}
+
+		return [.. found.OrderBy(entry => entry.Position).Select(entry => entry.Values)];
+	}
+
+	/// <summary>
+	/// The (start, end) character bounds of the body of every
+	/// <c>CREATE TABLE [IF NOT EXISTS] &lt;table&gt; (...)</c> in one migration text,
+	/// found by walking parentheses from the opening one to its match so that nested
+	/// parens (a <c>CHECK (...)</c>, a <c>NUMERIC(10, 2)</c>) do not end the body early.
+	/// </summary>
+	private static List<(int Start, int End)> CreateTableBodies(string sql, string table)
+	{
+		Regex headerPattern = new(
+			$@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{Regex.Escape(table)}\s*\(",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+		List<(int Start, int End)> bodies = [];
+		foreach (Match header in headerPattern.Matches(sql))
+		{
+			int start = header.Index + header.Length;
+			int depth = 1;
+			int index = start;
+			while (index < sql.Length && depth > 0)
+			{
+				if (sql[index] == '(')
+				{
+					depth++;
+				}
+				else if (sql[index] == ')')
+				{
+					depth--;
+				}
+
+				index++;
+			}
+
+			bodies.Add((start, depth == 0 ? index - 1 : sql.Length));
+		}
+
+		return bodies;
+	}
+
+	private static List<string> ParseValues(Match match)
+	{
+		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
+		return [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
 	}
 }
