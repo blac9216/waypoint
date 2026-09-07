@@ -82,9 +82,16 @@ describe("ArtifactStatus (backend DepotArtifactStatuses.All parity, parsed from 
 		expect(values).toEqual(backendAll);
 	});
 
-	it("displayStatus maps every backend status to a rendering label without throwing", () => {
+	it("displayStatus maps every backend status to a non-null rendering label", () => {
+		// Review round 2 finding G1: a `not.toThrow()` assertion here could
+		// never fail — `displayStatus` is a pure switch ending in
+		// `default: return null` and throws for nothing. Asserting the
+		// returned label is not `null` is what actually pins "every backend
+		// status has a rendering label": splicing a case out of
+		// `displayStatus`'s switch (so that status falls through to the
+		// `default: return null` fallback) turns this red.
 		for (const status of backendAll) {
-			expect(() => displayStatus(status as ArtifactStatus)).not.toThrow();
+			expect(displayStatus(status as ArtifactStatus)).not.toBeNull();
 		}
 	});
 
