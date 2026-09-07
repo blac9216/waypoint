@@ -26,44 +26,86 @@ namespace Waypoint.Tests.Core.Catalog;
 /// <c>"present"</c>, or a future caller inventing a fifth status string) compiles
 /// cleanly and fails silently at an ordinal-comparison call site otherwise.
 ///
-/// Deliberately scoped to the known call sites named on the issue (and
-/// <see cref="Waypoint.Infrastructure.Catalog.CatalogIndexJobHandler"/>, the #1512
-/// rework this test lands alongside) rather than a repo-wide grep for the five
-/// vocabulary words: several OTHER closed-vocabulary constants classes in this
-/// codebase legitimately reuse the same words for unrelated columns
+/// Scoped to a directory glob of the four namespaces the known call sites live in
+/// (<see cref="ScannedDirectories"/>), not a repo-wide grep for the five vocabulary
+/// words: several OTHER closed-vocabulary constants classes in this codebase
+/// legitimately reuse the same words for unrelated columns
 /// (<c>Waypoint.Core.Downloads.Download.DownloadStates</c>'s own
 /// <c>"downloading"</c>/<c>"failed"</c>, <c>Waypoint.Core.Catalog.LibraryItem</c>'s own
-/// <c>"present"</c>/<c>"missing"</c>, <c>Waypoint.Core.Jobs.JobStates</c>'s own
-/// <c>"failed"</c>, and more) -- a repo-wide word grep would flag every one of those as
-/// a false positive. A future <c>depot_artifacts.status</c> call site added to a file
-/// not in this list would not be caught here; the drift guard
+/// <c>"present"</c>/<c>"missing"</c>, <c>Waypoint.Core.Catalog.CatalogPullOutcomes</c>'s
+/// own <c>"failed"</c>, <c>Waypoint.Core.Jobs.JobStates</c>'s own <c>"failed"</c>, and
+/// more) -- a repo-wide word grep would flag every one of those as a false positive,
+/// which is why this test does not scan the whole repository. Within the four scanned
+/// directories, <see cref="ExcludedFiles"/> names the small, closed set of files that
+/// legitimately declare or reuse the vocabulary for something other than
+/// <c>depot_artifacts.status</c> (each with its own reason at the exclusion site) --
+/// PR #1805 round-1 review finding note 7: unlike the prior hardcoded
+/// call-site allowlist, a NEW file added to any of these four directories is
+/// automatically picked up by the glob and scanned, so it cannot silently escape this
+/// test the way a file omitted from a fixed list could. The drift guard
 /// <see cref="Waypoint.Tests.Infrastructure.Postgres.DepotArtifactStatusesConstraintDriftTests"/>
-/// is the backstop for the vocabulary itself, not for every call site's literal-vs-
-/// constant hygiene.
+/// remains the backstop for the vocabulary itself, not for every call site's literal-
+/// vs-constant hygiene.
 /// </summary>
 public sealed class DepotArtifactStatusesNoBareLiteralTests
 {
 	private static readonly string[] Vocabulary = ["indexed", "downloading", "present", "failed", "missing"];
 
-	private static readonly string[] KnownCallSiteFiles =
+	/// <summary>Every production namespace a <c>depot_artifacts.status</c> call site lives in today (issue #1675's own list, plus #1512's <c>CatalogIndexJobHandler</c>).</summary>
+	private static readonly string[] ScannedDirectories =
 	[
-		"backend/Waypoint.Core/Catalog/VendorProductVersionCatalogParser.cs",
-		"backend/Waypoint.Core/Catalog/LibraryPresenceEvaluator.cs",
-		"backend/Waypoint.Infrastructure.Execution/Downloads/DownloadJobHandler.cs",
-		"backend/Waypoint.Infrastructure.Execution/Downloads/BinariesDownloadJobHandler.cs",
-		"backend/Waypoint.Infrastructure.Execution/Catalog/CatalogIndexJobHandler.cs",
+		"backend/Waypoint.Core/Catalog",
+		"backend/Waypoint.Infrastructure/Catalog",
+		"backend/Waypoint.Infrastructure.Execution/Catalog",
+		"backend/Waypoint.Infrastructure.Execution/Downloads",
+	];
+
+	/// <summary>Files within <see cref="ScannedDirectories"/> that legitimately use the vocabulary for something other than <c>depot_artifacts.status</c>, each with its own reason.</summary>
+	private static readonly string[] ExcludedFiles =
+	[
+		// Declares DepotArtifactStatuses itself -- the constants' own literal values.
+		"backend/Waypoint.Core/Catalog/DepotArtifact.cs",
+		// LibraryItem's own present/missing vocabulary -- a different column (library_items.status), not depot_artifacts.status.
+		"backend/Waypoint.Core/Catalog/LibraryItem.cs",
+		// CatalogPullOutcomes' own "failed" -- catalog_pull_state.last_outcome, not depot_artifacts.status.
+		"backend/Waypoint.Core/Catalog/CatalogPullState.cs",
 	];
 
 	[Fact]
-	public void NoKnownCallSiteFile_ContainsABareDepotArtifactStatusLiteral()
+	public void NoScannedFile_ContainsABareDepotArtifactStatusLiteral()
 	{
 		string repoRoot = FindRepoRoot();
+		HashSet<string> excluded = new(
+			ExcludedFiles.Select(path => path.Replace('/', Path.DirectorySeparatorChar)), StringComparer.Ordinal);
+
+		List<string> scannedFiles = [];
+		foreach (string relativeDirectory in ScannedDirectories)
+		{
+			string fullDirectory = Path.Combine(repoRoot, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
+			Assert.True(Directory.Exists(fullDirectory), $"expected '{relativeDirectory}' to exist");
+
+			foreach (string fullPath in Directory.GetFiles(fullDirectory, "*.cs", SearchOption.TopDirectoryOnly))
+			{
+				string relativePath = Path.GetRelativePath(repoRoot, fullPath).Replace(Path.DirectorySeparatorChar, '/');
+				if (excluded.Contains(relativePath.Replace('/', Path.DirectorySeparatorChar)))
+				{
+					continue;
+				}
+
+				scannedFiles.Add(relativePath);
+			}
+		}
+
+		// Sanity check that the glob is actually finding the known call sites, not
+		// silently scanning an empty set (e.g. a directory rename that broke
+		// ScannedDirectories without breaking the build).
+		Assert.Contains(scannedFiles, path => path.EndsWith("VendorProductVersionCatalogParser.cs", StringComparison.Ordinal));
+		Assert.Contains(scannedFiles, path => path.EndsWith("CatalogIndexJobHandler.cs", StringComparison.Ordinal));
 
 		List<string> offenders = [];
-		foreach (string relativePath in KnownCallSiteFiles)
+		foreach (string relativePath in scannedFiles)
 		{
 			string fullPath = Path.Combine(repoRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-			Assert.True(File.Exists(fullPath), $"expected '{relativePath}' to exist");
 
 			// Only actual code lines -- doc comments (///) and line comments (//)
 			// legitimately quote the raw vocabulary word in prose (e.g. "upserts

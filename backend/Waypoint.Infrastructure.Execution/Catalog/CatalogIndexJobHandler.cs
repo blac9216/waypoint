@@ -167,6 +167,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		{
 			if (item is not System.Management.Automation.PSObject psObject)
 			{
+				processed++;
 				continue;
 			}
 
@@ -177,11 +178,38 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 				string? unknownRelativePath = GetProperty<string>(psObject, "RelativePath");
 				if (string.IsNullOrWhiteSpace(unknownRelativePath))
 				{
+					processed++;
 					continue;
 				}
 
 				object? unknownSizeBytes = PowerShellValueUnwrap.Unwrap(psObject.Properties["SizeBytes"]?.Value);
-				await _unknownFiles.RecordSeenAsync(unknownRelativePath, TryToInt64(unknownSizeBytes), cancellationToken).ConfigureAwait(false);
+
+				try
+				{
+					await _unknownFiles.RecordSeenAsync(unknownRelativePath, TryToInt64(unknownSizeBytes), cancellationToken).ConfigureAwait(false);
+				}
+				catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation)
+				{
+					// Symmetric with the ArtifactPresence branch below: a row a future
+					// constraint revision rejects is counted and skipped, not allowed to
+					// abort the rest of the sweep. No CHECK constraint exists on
+					// unknown_catalog_files as of migration 0100 (the only concrete abort
+					// this could hit today is the NOT NULL already guarded by the
+					// blank-path check above), so this branch is unreachable under the
+					// current schema -- kept for consistency as the vocabulary grows.
+					rejected++;
+					processed++;
+					string warningPayload = JsonSerializer.Serialize(new
+					{
+						severity = "warning",
+						line = $"catalog-index: rejected unknown file '{unknownRelativePath}' -- constraint {exception.ConstraintName}. Skipped, not aborted.",
+					});
+					await context.Events
+						.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, warningPayload, cancellationToken)
+						.ConfigureAwait(false);
+					continue;
+				}
+
 				unknownSeen++;
 				processed++;
 				await MaybeEmitProgressAsync(context, processed, cancellationToken).ConfigureAwait(false);
@@ -193,6 +221,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 				// Unrecognized or missing RecordType -- malformed entry, skipped rather
 				// than failing the whole job (this handler's long-standing "skip, don't
 				// halt" posture, unchanged by #1512).
+				processed++;
 				continue;
 			}
 
