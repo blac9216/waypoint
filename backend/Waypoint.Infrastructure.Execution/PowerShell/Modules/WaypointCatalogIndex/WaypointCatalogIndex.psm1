@@ -82,7 +82,7 @@
 #     prefix rather than named individually, since their exact filenames are not
 #     part of any documented contract this module can pin;
 #   - its relative path starts with one of the sibling store roots ADR-0029 documents
-#     alongside the depot's PROD tree (see Get-CatalogInfrastructureStoreRoots below)
+#     alongside the depot's PROD tree (see $Script:CatalogAdjacentStoreRoots below)
 #     -- separate stores this sweep does not index at all;
 #   - its relative path has no directory component (a bare filename directly at
 #     DepotPath root) -- covers the depot activation-code file and any other
