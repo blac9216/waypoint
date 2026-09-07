@@ -45,9 +45,9 @@ namespace Waypoint.DownloadRunner;
 /// <c>photon-repo-discovery</c> (issue #1509, migration 0130): the Photon RPM-repo
 /// metadata discovery job (repomd-driven, index-only, no package fetch) -- handler
 /// registration and this allowlist entry land together, same convention.
-/// <c>photon-image-discovery</c> (the sibling image-tree discovery job) is
-/// deliberately NOT here yet -- it is issue #1509's documented remainder and reserves
-/// its own job type alongside its own handler when it lands.
+/// <c>photon-image-discovery</c> (issue #1790, migration 0135): the sibling
+/// image-tree discovery job, same convention -- handler registration and this
+/// allowlist entry land together in this change.
 /// </summary>
 public static class DownloadRunnerJobTypes
 {
@@ -60,6 +60,7 @@ public static class DownloadRunnerJobTypes
 		"catalog-pull",
 		"retention-sweep",
 		"binaries-download",
-		"photon-repo-discovery"
+		"photon-repo-discovery",
+		"photon-image-discovery"
 	};
 }

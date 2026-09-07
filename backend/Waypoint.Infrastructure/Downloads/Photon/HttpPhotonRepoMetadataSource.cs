@@ -109,7 +109,7 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		ArgumentException.ThrowIfNullOrWhiteSpace(repoBaseUrl);
 
 		string repomdUrl = $"{repoBaseUrl.TrimEnd('/')}/repodata/repomd.xml";
-		(byte[]? bytes, HttpStatusCode? notFoundStatus, bool _) = await GetBoundedOrNotFoundAsync(
+		(byte[]? bytes, HttpStatusCode? notFoundStatus, bool sizeCapExceeded) = await GetBoundedOrNotFoundAsync(
 			repomdUrl, MaxSmallDocumentBytes, cancellationToken).ConfigureAwait(false);
 
 		if (notFoundStatus is HttpStatusCode.NotFound)
@@ -130,7 +130,13 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 
 		if (bytes is null)
 		{
-			return PhotonRepomdProbeResult.Failed($"repomd.xml unreachable at '{repomdUrl}'.");
+			// Issue #1834: an oversized repomd.xml (sizeCapExceeded) is a size-cap
+			// rejection, not a generic "unreachable" -- the document was served and
+			// read, and rejected on this type's own byte bound, the same distinction
+			// the primary.xml.gz path below already makes.
+			return sizeCapExceeded
+				? PhotonRepomdProbeResult.Failed($"repomd.xml at '{repomdUrl}' exceeded the {MaxSmallDocumentBytes}-byte size cap.")
+				: PhotonRepomdProbeResult.Failed($"repomd.xml unreachable at '{repomdUrl}'.");
 		}
 
 		string? revision;
@@ -158,8 +164,8 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		}
 
 		string primaryUrl = $"{repoBaseUrl.TrimEnd('/')}/{primaryLocation.TrimStart('/')}";
-		(byte[]? primaryGzBytes, bool sizeCapExceeded) = await GetBoundedAsync(primaryUrl, MaxPrimaryXmlBytes, cancellationToken).ConfigureAwait(false);
-		if (sizeCapExceeded)
+		(byte[]? primaryGzBytes, bool primarySizeCapExceeded) = await GetBoundedAsync(primaryUrl, MaxPrimaryXmlBytes, cancellationToken).ConfigureAwait(false);
+		if (primarySizeCapExceeded)
 		{
 			return PhotonRepomdProbeResult.Failed($"primary.xml.gz at '{primaryUrl}' exceeded the {MaxPrimaryXmlBytes}-byte size cap.");
 		}
@@ -235,14 +241,19 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 	/// <summary>
 	/// Distinguishes "the repo directory does not exist upstream" from "the directory
 	/// exists but has no <c>repodata/</c>" -- both look identical from a bare 404 on
-	/// <c>repodata/repomd.xml</c>. A <c>HEAD</c> on the repo base itself: any response
-	/// other than a 404 (200, a directory-listing 403, a method-not-allowed 405, ...) is
-	/// <see cref="DirectoryProbe.Exists"/>, an explicit 404 is
-	/// <see cref="DirectoryProbe.Absent"/>, and a transport failure or timeout is
-	/// <see cref="DirectoryProbe.TransportError"/> -- NOT absent (round-2 review note 3:
-	/// a transient blip on a repo that genuinely exists would otherwise silently drop
-	/// its row for the sweep and, with the <c>indexed == 0</c> gate, be counted as
-	/// "absent" rather than as the error it is).
+	/// <c>repodata/repomd.xml</c>. A <c>HEAD</c> on the repo base itself: an explicit
+	/// 404 is <see cref="DirectoryProbe.Absent"/>; a 2xx or 3xx response (200, a
+	/// redirect, ...) is <see cref="DirectoryProbe.Exists"/>; every other status --
+	/// a 5xx, or any other non-404 4xx (403, 405, ...) -- and a transport failure or
+	/// timeout are ALL <see cref="DirectoryProbe.TransportError"/> (issue #1835: a 5xx
+	/// or non-404 error status is server-fault evidence, not existence evidence, and
+	/// upserting a <c>NoRepodata</c> row on it would silently downgrade a
+	/// previously-healthy row on nothing more than a transient blip -- round-2 review
+	/// note 3 already made the same call for an outright transport failure; this
+	/// widens it to cover a server-fault status too). Because this classification maps
+	/// to <see cref="PhotonRepomdProbeResult.Failed(string)"/> in the caller's switch,
+	/// which the job handler skips (never upserted), the previously-indexed row for a
+	/// genuinely healthy repo is left untouched by a transient fault.
 	/// </summary>
 	private async Task<DirectoryProbe> ProbeDirectoryExistsAsync(string repoBaseUrl, CancellationToken cancellationToken)
 	{
@@ -252,7 +263,15 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 			using HttpRequestMessage request = new(HttpMethod.Head, repoBaseUrl.TrimEnd('/') + "/");
 			using HttpResponseMessage response = await client
 				.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-			return response.StatusCode == HttpStatusCode.NotFound ? DirectoryProbe.Absent : DirectoryProbe.Exists;
+
+			if (response.StatusCode == HttpStatusCode.NotFound)
+			{
+				return DirectoryProbe.Absent;
+			}
+
+			return response.IsSuccessStatusCode || (int)response.StatusCode is >= 300 and < 400
+				? DirectoryProbe.Exists
+				: DirectoryProbe.TransportError;
 		}
 		catch (HttpRequestException)
 		{

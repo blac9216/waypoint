@@ -38,16 +38,17 @@ namespace Waypoint.Tests.DownloadRunner;
 /// #1482 (the actual VCF artifact acquisition), landing its handler registration and
 /// this allowlist entry in the same change per <c>DownloadRunnerJobTypes</c>'s own
 /// doc comment; <c>photon-repo-discovery</c> joined in issue #1509 (the Photon
-/// RPM-repo metadata discovery job), same convention.
+/// RPM-repo metadata discovery job), same convention; <c>photon-image-discovery</c>
+/// joined in issue #1790 (the sibling image-tree discovery job), same convention.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
 	[Fact]
-	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentCatalogPullRetentionSweepBinariesDownloadAndPhotonRepoDiscovery()
+	public void Allowed_IsExactlyCatalogIndexDownloadToolInstallDepotEnrollmentCatalogPullRetentionSweepBinariesDownloadAndPhotonDiscoveryJobs()
 	{
 		Assert.Equal(
 			new HashSet<string>(StringComparer.Ordinal)
-				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download", "photon-repo-discovery" },
+				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download", "photon-repo-discovery", "photon-image-discovery" },
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}
 

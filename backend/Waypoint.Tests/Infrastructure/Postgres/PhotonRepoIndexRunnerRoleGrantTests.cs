@@ -28,9 +28,11 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <c>waypoint_download_runner</c>) and the operations that must still be denied (no
 /// DELETE on that table for that role; no access at all for
 /// <c>waypoint_compliance_runner</c>; and no grant at all yet on
-/// <c>photon_image_index</c>/<c>photon_subscription_config</c> for either role -- this
-/// issue's documented remainder ships its own grant when it lands a consumer, mirroring
-/// 0118's <c>oci_bundles</c> precedent).
+/// <c>photon_subscription_config</c> for either role -- that table's own reader/writer
+/// is still a separate, unfiled issue, mirroring 0118's <c>oci_bundles</c> precedent).
+/// Migration 0135 (issue #1790) granted <c>photon_image_index</c> to
+/// <c>waypoint_download_runner</c> -- see <see cref="PhotonImageIndexRunnerRoleGrantTests"/>
+/// for that grant's own proof.
 /// </summary>
 [Collection("Postgres")]
 public sealed class PhotonRepoIndexRunnerRoleGrantTests : IAsyncLifetime
@@ -111,18 +113,20 @@ public sealed class PhotonRepoIndexRunnerRoleGrantTests : IAsyncLifetime
 		Assert.Equal("42501", denied.SqlState);
 	}
 
-	/// <summary>Neither runner role has any grant yet on the two tables this issue ships schema-only.</summary>
+	/// <summary>
+	/// <c>photon_subscription_config</c> is still schema-only for both roles -- issue
+	/// #1790 (migration 0135) granted <c>photon_image_index</c> to
+	/// <c>waypoint_download_runner</c> (see <see cref="PhotonImageIndexRunnerRoleGrantTests"/>
+	/// for that grant's own proof); <c>photon_subscription_config</c> has no consumer
+	/// yet (0118's <c>oci_bundles</c> precedent for the same shape of gap).
+	/// </summary>
 	[Fact]
-	public async Task NeitherRunnerRole_HasAnyGrantOnImageIndexOrSubscriptionConfig()
+	public async Task NeitherRunnerRole_HasAnyGrantOnSubscriptionConfig()
 	{
 		foreach (string connectionString in new[] { _downloadRunnerConnectionString, _complianceRunnerConnectionString })
 		{
 			await using NpgsqlConnection connection = new(connectionString);
 			await connection.OpenAsync();
-
-			await using NpgsqlCommand selectImages = new("SELECT count(*) FROM photon_image_index", connection);
-			PostgresException deniedImages = await Assert.ThrowsAsync<PostgresException>(() => selectImages.ExecuteScalarAsync());
-			Assert.Equal("42501", deniedImages.SqlState);
 
 			await using NpgsqlCommand selectSubscriptions = new("SELECT count(*) FROM photon_subscription_config", connection);
 			PostgresException deniedSubscriptions = await Assert.ThrowsAsync<PostgresException>(() => selectSubscriptions.ExecuteScalarAsync());

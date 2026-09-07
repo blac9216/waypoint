@@ -94,7 +94,8 @@ public static class JobCapabilities
 		"catalog-pull",
 		"binaries-download",
 		"retention-sweep",
-		"photon-repo-discovery"
+		"photon-repo-discovery",
+		"photon-image-discovery"
 	};
 
 	/// <summary>

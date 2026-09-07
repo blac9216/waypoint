@@ -27,7 +27,8 @@ namespace Waypoint.Core.Jobs;
 /// <see cref="Waypoint.Tests.Core.Jobs.RunTypesConstraintDriftTests"/> asserts this list
 /// stays byte-identical to the CHECK constraint the migrations produce. 0127 (issue
 /// #1436) appended <c>retention-sweep</c>; 0130 (issue #1509) appended
-/// <c>photon-repo-discovery</c>.
+/// <c>photon-repo-discovery</c>; 0135 (issue #1790) appended
+/// <c>photon-image-discovery</c>.
 /// </summary>
 public static class RunTypes
 {
@@ -50,12 +51,13 @@ public static class RunTypes
 	public const string BinariesDownload = "binaries-download";
 	public const string RetentionSweep = "retention-sweep";
 	public const string PhotonRepoDiscovery = "photon-repo-discovery";
+	public const string PhotonImageDiscovery = "photon-image-discovery";
 
 	public static readonly IReadOnlyList<string> All =
 	[
 		Scan, Remediate, Discover, Download, CatalogIndex, BundleExport, BundleImport,
 		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge, DepotEnrollment, CatalogPull,
-		BinariesDownload, RetentionSweep, PhotonRepoDiscovery,
+		BinariesDownload, RetentionSweep, PhotonRepoDiscovery, PhotonImageDiscovery,
 	];
 
 	public static bool IsValid(string runType) => All.Contains(runType, StringComparer.Ordinal);

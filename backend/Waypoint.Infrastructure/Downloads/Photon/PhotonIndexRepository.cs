@@ -26,6 +26,12 @@ public sealed class PhotonIndexRepository : IPhotonIndexRepository
 		FROM photon_repo_index
 		""";
 
+	private const string ImageProjectionSql = """
+		SELECT id, version, channel, image_kind, relative_path, size_bytes, etag,
+		       discovered_at, last_seen_at
+		FROM photon_image_index
+		""";
+
 	private readonly string _connectionString;
 
 	public PhotonIndexRepository(string connectionString)
@@ -104,6 +110,88 @@ public sealed class PhotonIndexRepository : IPhotonIndexRepository
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
 	}
+
+	/// <summary>
+	/// <c>INSERT ... ON CONFLICT (version, channel, relative_path) DO UPDATE</c> --
+	/// re-discovery of an unchanged upstream image touches only <c>last_seen_at</c> and
+	/// the mutable fields, never inserting a duplicate row and never disturbing the
+	/// original <c>discovered_at</c> (this issue's idempotent-re-run AC).
+	/// </summary>
+	public async Task UpsertImageIndexEntryAsync(PhotonImageIndexEntry entry, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		ArgumentException.ThrowIfNullOrWhiteSpace(entry.Version);
+		ArgumentException.ThrowIfNullOrWhiteSpace(entry.Channel);
+		ArgumentException.ThrowIfNullOrWhiteSpace(entry.ImageKind);
+		ArgumentException.ThrowIfNullOrWhiteSpace(entry.RelativePath);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO photon_image_index (version, channel, image_kind, relative_path, size_bytes, etag)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (version, channel, relative_path) DO UPDATE SET
+				image_kind = EXCLUDED.image_kind,
+				size_bytes = EXCLUDED.size_bytes,
+				etag = EXCLUDED.etag,
+				last_seen_at = now()
+			""", connection);
+		command.Parameters.AddWithValue(entry.Version);
+		command.Parameters.AddWithValue(entry.Channel);
+		command.Parameters.AddWithValue(entry.ImageKind);
+		command.Parameters.AddWithValue(entry.RelativePath);
+		command.Parameters.AddWithValue((object?)entry.SizeBytes ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)entry.ETag ?? DBNull.Value);
+
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	public async Task<IReadOnlyList<PhotonImageIndexEntry>> ListImageIndexEntriesAsync(CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new($"{ImageProjectionSql} ORDER BY version, channel, relative_path", connection);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+		List<PhotonImageIndexEntry> items = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			items.Add(MapImage(reader));
+		}
+		return items;
+	}
+
+	public async Task<PhotonImageIndexEntry?> GetImageIndexEntryAsync(
+		string version, string channel, string relativePath, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(version);
+		ArgumentException.ThrowIfNullOrWhiteSpace(channel);
+		ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"{ImageProjectionSql} WHERE version = $1 AND channel = $2 AND relative_path = $3", connection);
+		command.Parameters.AddWithValue(version);
+		command.Parameters.AddWithValue(channel);
+		command.Parameters.AddWithValue(relativePath);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? MapImage(reader) : null;
+	}
+
+	private static PhotonImageIndexEntry MapImage(NpgsqlDataReader reader) => new(
+		reader.GetString(1),
+		reader.GetString(2),
+		reader.GetString(3),
+		reader.GetString(4),
+		reader.IsDBNull(5) ? null : reader.GetInt64(5),
+		reader.IsDBNull(6) ? null : reader.GetString(6))
+	{
+		Id = reader.GetGuid(0),
+		DiscoveredAt = reader.GetFieldValue<DateTimeOffset>(7),
+		LastSeenAt = reader.GetFieldValue<DateTimeOffset>(8),
+	};
 
 	private static PhotonRepoIndexEntry Map(NpgsqlDataReader reader) => new(
 		reader.GetString(1),

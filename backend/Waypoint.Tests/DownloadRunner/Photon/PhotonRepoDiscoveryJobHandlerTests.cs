@@ -83,6 +83,16 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 
 		public Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(string version, string variant, string arch, CancellationToken cancellationToken) =>
 			Task.FromResult(Upserted.LastOrDefault(e => e.Version == version && e.Variant == variant && e.Arch == arch));
+
+		/// <summary>Not exercised by this suite -- the image-index half belongs to <c>PhotonImageDiscoveryJobHandlerTests</c>.</summary>
+		public Task UpsertImageIndexEntryAsync(PhotonImageIndexEntry entry, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
+
+		public Task<IReadOnlyList<PhotonImageIndexEntry>> ListImageIndexEntriesAsync(CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
+
+		public Task<PhotonImageIndexEntry?> GetImageIndexEntryAsync(string version, string channel, string relativePath, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
 	}
 
 	private sealed class FakeEventPublisher : IJobEventPublisher

@@ -622,10 +622,13 @@ public sealed class SchemaMigrationTests
 	/// folds into a surviving new-identity row -- see that migration's own header
 	/// comment for why a status VALUE was rejected in favor of a column -- bumping
 	/// 97 -&gt; 98 (0133, carried by PR #1831's <c>content_library_items</c> migration,
-	/// had not merged as of this rebase, so slot 0134 is still free); this branch's
-	/// own 0131 bumps it again, 98 -&gt; 99 --
+	/// had not merged as of this rebase, so slot 0134 is still free); 0131 (PR #1816's
+	/// consumer views) bumps it again, 98 -&gt; 99; and 0135 (issue #1790) adds the
+	/// Photon image-discovery runner grant -- originally authored as 0134, renumbered
+	/// to 0135 at rebase time because PR #1842 above merged first and also claimed
+	/// slot 0134 -- bumping 99 -&gt; 100 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 99;
+	private const int ExpectedMigrationCount = 100;
 
 	private readonly PostgresFixture _fixture;
 

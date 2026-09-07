@@ -331,4 +331,48 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 		Assert.Contains("size cap", result.Error, StringComparison.OrdinalIgnoreCase);
 		Assert.DoesNotContain("unreachable", result.Error, StringComparison.OrdinalIgnoreCase);
 	}
+
+	/// <summary>
+	/// Issue #1834: the repomd.xml call site was discarding its own sizeCapExceeded
+	/// flag and falling into the generic "unreachable" message -- the sibling
+	/// primary.xml.gz path already got this distinction right (the test above); this is
+	/// the matching fixture for the repomd.xml call site itself.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_RepomdXmlOverSizeCap_ReportsSizeCapRejection()
+	{
+		byte[] oversizedContent = new byte[HttpPhotonRepoMetadataSource.MaxSmallDocumentBytes + 1];
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(oversizedContent) });
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+		Assert.Contains("size cap", result.Error, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("unreachable", result.Error, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Issue #1835: a 5xx on the directory probe (run only after repomd.xml itself
+	/// 404s) is server-fault evidence, not existence evidence -- it must classify as a
+	/// probe error, exactly like the transport-failure case round 2 already covers,
+	/// never as <see cref="PhotonRepomdProbeKind.NoRepodata"/> (which the job handler
+	/// would otherwise upsert, silently downgrading a previously-healthy row).
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_DirectoryProbeServerError_IsAnErrorNotNoRepodata()
+	{
+		ScriptedHandler handler = new(request => request.Method == HttpMethod.Head
+			? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+			: new HttpResponseMessage(HttpStatusCode.NotFound));
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+	}
 }
