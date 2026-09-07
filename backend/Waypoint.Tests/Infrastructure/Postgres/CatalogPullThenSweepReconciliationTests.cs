@@ -13,13 +13,23 @@
 // limitations under the License.
 
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Catalog;
+using Waypoint.Core.Downloads;
+using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Secrets;
+using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
 using Xunit.Abstractions;
@@ -33,30 +43,46 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// run 2 -- 1291 pull rows + 1291 sweep rows served as 2582 for 1291 real artifacts).
 ///
 /// This test drives real Postgres through both write paths against the shared
-/// <c>depot-mini</c> fixture (issue #1696): "pull" is simulated by parsing the fixture's
-/// catalog document with the real <see cref="VendorProductVersionCatalogParser"/> and
-/// upserting through the real <see cref="DepotArtifactRepository"/> (the full
-/// <c>CatalogPullJobHandler</c> also decrypts credentials, authenticates, and promotes
-/// the on-disk catalog -- none of that machinery affects catalog IDENTITY, which is
-/// the one thing this test is proving); "sweep" runs the REAL, unmodified
-/// <c>Invoke-WaypointCatalogIndex</c> (issue #1503) over an independent materialization
-/// of the SAME fixture via the shared parity runner script
+/// <c>depot-mini</c> fixture (issue #1696). "Pull" runs the REAL, unmodified
+/// <see cref="CatalogPullJobHandler"/> (not a hand-rolled re-implementation of its
+/// parse/reconcile/upsert sequence -- PR #1805 round-1 review finding 2: a prior
+/// version of this test copied the handler's legacy-identity derivation inline, which
+/// meant nothing here actually exercised <see cref="IDepotArtifactRepository.RekeyAsync"/>'s
+/// real call site) with a <see cref="FakeMetadataPuller"/> standing in for the vendor
+/// tool process (writes the fixture's own catalog document to the staged depot path)
+/// and a <see cref="FakeCatalogVerifier"/> standing in for signature authentication
+/// (identity reconciliation is independent of that step; the real verifier is already
+/// exercised end to end by <c>CatalogPullEndToEndTests</c>). "Sweep" runs the REAL,
+/// unmodified <c>Invoke-WaypointCatalogIndex</c> (issue #1503) over an independent
+/// materialization of the SAME fixture via the shared parity runner script
 /// (<see cref="Parity.DepotMiniCatalogParityContractTests"/>'s own sibling), and each
 /// <c>ArtifactPresence</c> record is upserted exactly as
 /// <c>CatalogIndexJobHandler.ProcessSweepOutputAsync</c> would.
 ///
 /// A pre-existing row under the LEGACY pre-#1784 bare-fileName identity is seeded
-/// before the pull step, proving <c>CatalogPullJobHandler</c>'s reconciliation rename
-/// (<see cref="IDepotArtifactRepository.RekeyAsync"/> -- never a delete, design #16
-/// section 2's never-auto-remove policy) folds it onto the new identity on the very
-/// next pull -- no migration, no one-time backfill.
+/// before the pull step, proving the handler's own reconciliation rename (never a
+/// delete, design #16 section 2's never-auto-remove policy) folds it onto the new
+/// identity on the very next pull -- no migration, no one-time backfill. Because the
+/// pull now runs through the handler's own code path, a fake whose <c>RekeyAsync</c>
+/// throws makes this test fail (verified by splice at fix time, restored -- see the
+/// round-1 Fixes Applied comment); before this rewrite, the same splice left the test
+/// green, which was exactly the defect.
 /// </summary>
 [Collection("Postgres")]
-public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
+public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, IDisposable
 {
 	private readonly PostgresFixture _fixture;
 	private readonly ITestOutputHelper _output;
+	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-pull-sweep-key").FullName;
+	private readonly string _toolStatePath = Directory.CreateTempSubdirectory("wp-pull-sweep-tool-state").FullName;
+	private readonly string _depotPath = Directory.CreateTempSubdirectory("wp-pull-sweep-depot").FullName;
+	private readonly InPlaySecretRedactor _redactor = new();
+
 	private DepotArtifactRepository _artifacts = null!;
+	private JobQueueRepository _jobs = null!;
+	private JobEventPublisher _events = null!;
+	private CredentialRepository _credentials = null!;
+	private CredentialSecretStore _secretStore = null!;
 
 	public CatalogPullThenSweepReconciliationTests(PostgresFixture fixture, ITestOutputHelper output)
 	{
@@ -68,11 +94,34 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
 		await migrator.ApplyAsync();
+		await _fixture.ResetJobEngineDataAsync();
 		await ResetArtifactsAsync();
+		await ResetEnrollmentAsync();
+
 		_artifacts = new DepotArtifactRepository(_fixture.ConnectionString);
+		_jobs = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
+		_events = new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance);
+
+		string keyPath = Path.Combine(_keyDirectory, "master.key");
+		File.WriteAllBytes(keyPath, RandomNumberGenerator.GetBytes(32));
+		AesGcmEnvelopeCipher cipher = new(new FileMasterKeyProvider(keyPath));
+		_credentials = new CredentialRepository(_fixture.ConnectionString);
+		_secretStore = new CredentialSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
+
+		Guid? credentialId = await new CredentialCreationCoordinator(_fixture.ConnectionString, cipher, NullLogger<CredentialCreationCoordinator>.Instance)
+			.CreateAsync("VCF Software Depot Activation Code", "depot-activation-code", "shared", sudoEnabled: false, username: null,
+				Encoding.UTF8.GetBytes("invented-pull-then-sweep-canary"), "test-actor", CancellationToken.None); // gitleaks:allow — invented test canary
+		Assert.NotNull(credentialId);
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
+
+	public void Dispose()
+	{
+		Directory.Delete(_keyDirectory, recursive: true);
+		Directory.Delete(_toolStatePath, recursive: true);
+		Directory.Delete(_depotPath, recursive: true);
+	}
 
 	[Fact]
 	public async Task PullThenSweep_OverDepotMini_YieldsOneRowPerCatalogArtifact_WithTheSweepsStatus()
@@ -84,20 +133,11 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
 		const string legacyIdentity = "vcsa-patch.iso";
 		await _artifacts.UpsertAsync(new DepotArtifactUpsert(legacyIdentity, "aa11", DepotArtifactStatuses.Indexed, "{}"), CancellationToken.None);
 
-		// "Pull": parse with the real parser, reconciling any legacy-identity row onto
-		// the new identity (rename, never delete) BEFORE upserting -- exactly the order
-		// CatalogPullJobHandler uses.
-		IReadOnlyList<DepotArtifactUpsert> pulled = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
-		foreach (DepotArtifactUpsert upsert in pulled)
-		{
-			string legacy = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
-			if (!string.Equals(legacy, upsert.RelativePath, StringComparison.Ordinal))
-			{
-				await _artifacts.RekeyAsync(legacy, upsert.RelativePath, CancellationToken.None);
-			}
-
-			await _artifacts.UpsertAsync(upsert, CancellationToken.None);
-		}
+		// "Pull": the REAL CatalogPullJobHandler, over the depot-mini fixture's own
+		// catalog document -- exercises the handler's own RekeyAsync call site, not a
+		// copy of it.
+		JobExecutionOutcome pullOutcome = await RunPullAsync(fixture.CatalogJson);
+		Assert.Equal(JobOutcomeKind.Succeeded, pullOutcome.Kind);
 
 		(IReadOnlyList<DepotArtifact> afterPull, long afterPullTotal) = await _artifacts.ListAsync(
 			new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, CancellationToken.None);
@@ -135,6 +175,69 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
 
 		DepotArtifact nsxMissing = Assert.Single(afterSweep, a => a.ExternalId == "PROD/COMP/NSX/nsx-missing.ova");
 		Assert.Equal(DepotArtifactStatuses.Missing, nsxMissing.Status);
+	}
+
+	/// <summary>Drives the real handler for the "pull" half of the scenario, standing in only for the vendor tool process and signature authentication (neither affects catalog identity).</summary>
+	private async Task<JobExecutionOutcome> RunPullAsync(string catalogJson)
+	{
+		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath };
+		CatalogOptions catalogOptions = new() { DepotPath = _depotPath };
+		CatalogPullStateRepository pullState = new(_fixture.ConnectionString);
+		CatalogPullJobHandler handler = new(
+			new ValidatedEnrollmentRepository(), new NoOpIdentityTool(), new FakeMetadataPuller(catalogJson), new FakeCatalogVerifier(),
+			_artifacts, pullState, _secretStore, _credentials, _redactor, Options.Create(catalogOptions), Options.Create(toolOptions));
+
+		Guid runId = await _jobs.CreateRunAsync("catalog-pull", "{}", credentialId: null, "test-actor", CancellationToken.None);
+		JobSpec spec = new("catalog-pull", 1, TargetId: null, TargetName: "depot", Payload: "{}");
+		IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(runId, [spec], "test-actor", CancellationToken.None);
+		ClaimedJob? claimed = await _jobs.ClaimJobAsync(
+			"worker-test", TimeSpan.FromMinutes(5), new HashSet<string>(StringComparer.Ordinal) { "catalog-pull" }, CancellationToken.None);
+		Assert.NotNull(claimed);
+		Assert.Equal(jobIds[0], claimed!.Id);
+
+		JobExecutionContext context = new(claimed, "worker-test", _events, _jobs, JobShape.Simple);
+		return await handler.ExecuteAsync(context, CancellationToken.None);
+	}
+
+	private sealed class ValidatedEnrollmentRepository : IDepotEnrollmentRepository
+	{
+		public Task<DepotEnrollment?> GetAsync(CancellationToken cancellationToken) =>
+			Task.FromResult<DepotEnrollment?>(new DepotEnrollment(
+				DepotEnrollmentStates.Validated, "WPT-0001-DEPOT-ID", DateTimeOffset.UtcNow, "WPT-0001-DEPOT-ID", DateTimeOffset.UtcNow, null, null, DateTimeOffset.UtcNow));
+
+		public Task SetDepotIdAsync(string depotId, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+		public Task SetPairedAsync(string assetId, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+		public Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+		public Task ResetAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+	}
+
+	private sealed class NoOpIdentityTool : IDepotIdentityTool
+	{
+		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) => Task.CompletedTask;
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+	}
+
+	/// <summary>Stands in for the vendor tool process: writes the fixture's own catalog document to the staged depot path the handler hands it.</summary>
+	private sealed class FakeMetadataPuller(string catalogJson) : IManagedToolMetadataPuller
+	{
+		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken)
+		{
+			string metadataDir = Path.Combine(depotPath, "PROD", "metadata", "productVersionCatalog", "v1");
+			Directory.CreateDirectory(metadataDir);
+			File.WriteAllText(Path.Combine(metadataDir, "productVersionCatalog.json"), catalogJson);
+			return Task.FromResult(CatalogPullResult.Ok());
+		}
+	}
+
+	/// <summary>Stands in for signature authentication -- identity reconciliation does not depend on it; the real verifier is exercised end to end by <c>CatalogPullEndToEndTests</c>.</summary>
+	private sealed class FakeCatalogVerifier : IManagedToolCatalogVerifier
+	{
+		public Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(string repositoryRoot, CancellationToken cancellationToken) =>
+			Task.FromResult(ManagedToolCatalogAuthenticationResult.Ok());
+
+		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("catalog-pull only uses AuthenticateCatalogAsync.");
 	}
 
 	private static List<PowerShellSweepRecord> RunPowerShellSweep()
@@ -175,6 +278,20 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
 		await connection.OpenAsync();
 		await using NpgsqlCommand truncate = new("TRUNCATE TABLE depot_artifacts RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync();
+	}
+
+	private async Task ResetEnrollmentAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_enrollment
+			SET state = 'validated', depot_id = 'WPT-0001-DEPOT-ID', depot_id_generated_at = now(),
+			    paired_asset_id = 'WPT-0001-DEPOT-ID', paired_at = now(), last_validation_failure = NULL, reset_at = NULL
+			WHERE id = 1
+			""", connection);
+		await command.ExecuteNonQueryAsync();
 	}
 
 	private sealed record PowerShellSweepRecord(string RecordType, string RelativePath, string? Status);
