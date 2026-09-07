@@ -109,6 +109,8 @@ public sealed class SchemaMigrationTests
 		"content_libraries",
 		"content_library_folders",
 		"content_library_item_folders",
+		"subscriptions",
+		"presets",
 		"schema_migrations"
 	];
 
@@ -531,8 +533,27 @@ public sealed class SchemaMigrationTests
 	/// assignment are Operator+ API-side, folder delete is Admin, reads are Viewer+,
 	/// all via <c>ContentLibraryFoldersController</c>; no runner ever gets a grant on
 	/// either table, proven both directions by <c>RunnerRoleGrantDriftTests</c> --
+	/// 0104 (issue #1421, epic #1182, split from design record #1045; approved
+	/// design #16 section 2, ADR-0028; slot pre-assigned 2026-08-30, inside the same
+	/// 0082-0106 numbering gap 0107's own header reserves for concurrently
+	/// in-flight sibling issues): adds <c>presets</c> (shipped read-only rows and
+	/// operator clone-to-custom rows, <c>source_preset_id</c> naming lineage) and
+	/// <c>subscriptions</c> (product/lane tracked at a subminor/minor/major/
+	/// whole-release <c>line_granularity</c>, anchored at a version string,
+	/// nullable <c>preset_id</c>, and per-lane UMDS/VKS refresh-window and
+	/// retention-override dial columns) -- domain model and persistence only, no
+	/// evaluation-job wiring (#1046), API surface (#1450/#1453), or cross-lane
+	/// supersession (#1437). <c>subscriptions.lane</c> reuses the existing
+	/// <c>Waypoint.Core.Secrets.RepoStores.All</c> acquisition-lane vocabulary
+	/// rather than a new one; both tables' <c>line_granularity</c> CHECK
+	/// constraints match <c>Waypoint.Core.Subscriptions.SubscriptionLineGranularityValues.All</c>,
+	/// proven by <c>SubscriptionsConstraintDriftTests</c> (this repo's
+	/// #1517/RepoCredentialBindingConstraintDriftTests convention). No new runner
+	/// grants -- no runner-claimed job reads or writes either table yet; the first
+	/// consumer that needs runner-side access ships its own GRANT migration
+	/// (0100/0107 precedent) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 93;
+	private const int ExpectedMigrationCount = 94;
 
 	private readonly PostgresFixture _fixture;
 
