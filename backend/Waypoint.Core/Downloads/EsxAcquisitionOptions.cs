@@ -29,12 +29,15 @@ public sealed class EsxAcquisitionOptions
 	/// <summary>
 	/// Absolute path to the vendor catalog document
 	/// <see cref="IEsxPlatformVocabularyReader"/> parses the
-	/// <c>lcm.esx.supported.host.platforms</c> vocabulary from. Defaults to the same
-	/// document <see cref="ManagedToolOptions.ProductVersionCatalogPath"/> names
-	/// (combined with <see cref="ManagedToolOptions.LocalRepositoryPath"/>'s default)
-	/// -- the authenticated <c>productVersionCatalog.json</c> a connected pull
-	/// (<c>CatalogPullJobHandler</c>) or local-repository install already promotes
-	/// onto the depot share.
+	/// <c>lcm.esx.supported.host.platforms</c> vocabulary from. Left blank here
+	/// deliberately -- issue #1602: the earlier default hand-copied
+	/// <see cref="ManagedToolOptions.LocalRepositoryPath"/> +
+	/// <see cref="ManagedToolOptions.ProductVersionCatalogPath"/> as a literal
+	/// string, which silently drifted out of sync with a reconfigured
+	/// <c>ManagedTool:LocalRepositoryPath</c>. <see cref="EsxAcquisitionOptionsPostConfigure"/>
+	/// now derives the default from those two options directly (combined) whenever
+	/// this is left unset, so the two stay in sync; setting this explicitly still
+	/// overrides the derived value.
 	/// </summary>
-	public string VocabularyDocumentPath { get; set; } = "/vcf/PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json";
+	public string VocabularyDocumentPath { get; set; } = string.Empty;
 }

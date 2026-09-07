@@ -126,6 +126,10 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Downloads.EsxAcquisitionOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Downloads.EsxAcquisitionOptions.SectionName));
 
+		// Issue #1602: derives VocabularyDocumentPath from ManagedToolOptions when the
+		// operator has not set it explicitly, so the two never drift apart.
+		services.AddSingleton<IPostConfigureOptions<Waypoint.Core.Downloads.EsxAcquisitionOptions>, Waypoint.Core.Downloads.EsxAcquisitionOptionsPostConfigure>();
+
 		services.AddOptions<DiscoveryOptions>()
 			.Bind(configuration.GetSection(DiscoveryOptions.SectionName));
 
