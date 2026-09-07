@@ -271,6 +271,29 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		Assert.Contains(result.Metadata.Warnings, w => w.Contains("hardlink-hostupdate", StringComparison.OrdinalIgnoreCase) && w.Contains("staging", StringComparison.OrdinalIgnoreCase));
 	}
 
+	[Fact]
+	public void Parse_SymlinkHostupdateStagingDirectory_IsExcludedAndWarned()
+	{
+		// Issue #1642: the symlink form of the tool's staging tree gets the same
+		// defensive guard as hardlink-hostupdate -- a real deployment never nests it
+		// inside hostupdate/ (it is a sibling of hostupdate/ at the store root, see
+		// #1028), but if it were, the parser must not enumerate it as a vendor.
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "vmw-ESXi-9.1-metadata.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "vmw-ESXi-9.1-metadata.zip"), [("vib20/esx-update/pkg.vib", "ff".PadRight(64, '0'))]);
+
+		string stagingDir = WriteVendorMetadataIndex(hostupdateDir, "symlink-hostupdate", "staged-metadata.zip");
+		WriteMetadataZip(Path.Combine(stagingDir, "staged-metadata.zip"), [("vib20/esx-update/staged.vib", "13".PadRight(64, '0'))]);
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Single(result.Metadata!.Bundles);
+		Assert.DoesNotContain(result.Metadata.VendorCodes, code => string.Equals(code, "symlink-hostupdate", StringComparison.OrdinalIgnoreCase));
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains("symlink-hostupdate", StringComparison.OrdinalIgnoreCase) && w.Contains("staging", StringComparison.OrdinalIgnoreCase));
+	}
+
 	// ----- tolerant-parse behavior ----------------------------------------------
 
 	[Fact]
