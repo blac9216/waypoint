@@ -37,7 +37,12 @@ namespace Waypoint.Core.Catalog;
 /// <see cref="SizeBytes"/> and <see cref="LastVerifiedAt"/> are migration 0100's other
 /// new columns; <see cref="LastVerifiedAt"/> is left null by every upsert path in this
 /// slice (deciding when a row counts as freshly verified is presence-sweep behavior,
-/// #1503/#1512).
+/// #1503/#1512). <see cref="BundleId"/> is migration 0130's (issue #1783) new column:
+/// the vendor catalog's <c>artifacts.bundles[].id</c>, the identifier the real
+/// vcf-download-tool's <c>binaries download --id</c> actually selects on (#1027
+/// finding) -- distinct from <see cref="ExternalId"/> (the binary fileName). Null for
+/// rows indexed before this migration or by the offline disk walk, which has no
+/// vendor catalog document to read it from.
 /// </summary>
 public sealed record DepotArtifact(
 	Guid Id,
@@ -50,7 +55,8 @@ public sealed record DepotArtifact(
 	DateTimeOffset IndexedAt,
 	DateTimeOffset UpdatedAt,
 	long? SizeBytes = null,
-	DateTimeOffset? LastVerifiedAt = null);
+	DateTimeOffset? LastVerifiedAt = null,
+	string? BundleId = null);
 
 /// <summary>
 /// One artifact to upsert (e.g. parsed from a <c>catalog-index</c> job's tool output
@@ -65,14 +71,24 @@ public sealed record DepotArtifact(
 /// #1488 calls for (relative path + size/hash, <see cref="Sha256"/> already existed);
 /// it defaults to null so every pre-existing call site that does not yet know a
 /// binary's size keeps compiling unchanged -- populating it for every write path is
-/// out of this slice's scope (#1503/#1512).
+/// out of this slice's scope (#1503/#1512). <see cref="BundleId"/> is migration
+/// 0130's (issue #1783) new field, populated by
+/// <see cref="VendorProductVersionCatalogParser"/> from the vendor catalog's
+/// <c>artifacts.bundles[].id</c> -- the identifier the real tool's
+/// <c>binaries download --id</c> selects on, never the same value as
+/// <see cref="RelativePath"/>. Defaults to null so every pre-existing caller (the
+/// offline disk walk, which has no bundle id to read) keeps compiling unchanged; the
+/// repository upsert preserves a prior non-null value on a caller that does not know
+/// it (COALESCE), the same convention <see cref="Sha256"/>/<see cref="SizeBytes"/>
+/// already use.
 /// </summary>
 public sealed record DepotArtifactUpsert(
 	string RelativePath,
 	string? Sha256,
 	string Status,
 	string MetadataJson,
-	long? SizeBytes = null);
+	long? SizeBytes = null,
+	string? BundleId = null);
 
 /// <summary>Filters accepted by <c>GET /api/v1/catalog/artifacts</c>. A null field means "no filter".</summary>
 public sealed record DepotArtifactFilter(string? Product, string? Version, string? Status);

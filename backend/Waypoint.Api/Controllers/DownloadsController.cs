@@ -245,6 +245,12 @@ public sealed class DownloadsController : ControllerBase
 	/// <see cref="ListAllArtifactsAsync"/> rather than a single capped page, and a
 	/// repeated id in <c>depot_artifact_ids</c> is deduped (first-seen order) to one
 	/// job, not fanned out as a race on the same target.
+	///
+	/// Issue #1783: any resolved artifact missing a catalog <c>bundle_id</c> (rows
+	/// indexed before migration 0130, or by the offline disk walk, which has no
+	/// vendor catalog document to read one from) fails the WHOLE batch with a 409
+	/// (<c>catalog_missing_bundle_id</c>) before any run is created, rather than
+	/// enqueue a job with nothing usable to pass as the real tool's <c>--id</c>.
 	/// </summary>
 	[HttpPost("binaries")]
 	[RequireOperatorRole]
@@ -301,6 +307,24 @@ public sealed class DownloadsController : ControllerBase
 			}
 		}
 
+		// Issue #1783: a row indexed before migration 0130 (or by the offline disk
+		// walk, which has no vendor catalog document to read a bundle id from) has no
+		// bundle_id -- there is nothing this fanout could pass as the real tool's
+		// --id, and enqueuing anyway would repeat this issue's silent "0 elements"
+		// no-op bug one layer earlier. Refuse the WHOLE batch atomically (same
+		// "validate before any run is created" shape as the 404s above) rather than
+		// enqueue a partial run mixing viable and doomed jobs under one 202.
+		List<string> missingBundleId = resolved.Where(artifact => string.IsNullOrWhiteSpace(artifact.BundleId))
+			.Select(artifact => artifact.ExternalId)
+			.ToList();
+		if (missingBundleId.Count > 0)
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.Conflict, "catalog_missing_bundle_id",
+				"One or more selected depot artifacts have no catalog bundle id and cannot be downloaded.",
+				$"Re-pull the catalog (POST /catalog/pull) to populate bundle_id, then retry. Affected artifacts: {string.Join(", ", missingBundleId)}.");
+		}
+
 		// One run for the whole batch (ADR-0008), then one binaries-download job per
 		// artifact via the same shared FanOutJobsAsync path QueueDownloads uses.
 		Guid runId = await _jobs.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
@@ -312,6 +336,7 @@ public sealed class DownloadsController : ControllerBase
 			{
 				depot_artifact_id = artifact.Id,
 				external_id = artifact.ExternalId,
+				bundle_id = artifact.BundleId,
 			});
 			specs.Add(new JobSpec(RunTypes.BinariesDownload, DownloadPriority, TargetId: artifact.Id, TargetName: artifact.ExternalId, Payload: payload));
 		}

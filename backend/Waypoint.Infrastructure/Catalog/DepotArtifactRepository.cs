@@ -22,7 +22,7 @@ namespace Waypoint.Infrastructure.Catalog;
 public sealed class DepotArtifactRepository : IDepotArtifactRepository
 {
 	private const string ProjectionSql = """
-		SELECT id, relative_path, sha256, status, product, version, metadata::text, indexed_at, updated_at, size_bytes, last_verified_at
+		SELECT id, relative_path, sha256, status, product, version, metadata::text, indexed_at, updated_at, size_bytes, last_verified_at, bundle_id
 		FROM depot_artifacts
 		""";
 
@@ -54,7 +54,11 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	/// <c>CatalogIndexJobHandler</c>) had just recorded. A caller that does
 	/// know a new, smaller size (e.g. a corrected catalog re-index) still wins,
 	/// because <c>COALESCE</c> only falls back when the incoming value is null, not
-	/// when it is present but different.
+	/// when it is present but different. <c>bundle_id</c> (migration 0130, issue
+	/// #1783) uses the identical <c>COALESCE(EXCLUDED.bundle_id, ...)</c> pattern: a
+	/// present/failed verification upsert (<c>DownloadJobHandler</c>/
+	/// <c>BinariesDownloadJobHandler</c>) never carries a bundle id and must not null
+	/// out one a prior connected pull already recorded.
 	/// </summary>
 	public async Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken)
 	{
@@ -66,13 +70,14 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO depot_artifacts (relative_path, sha256, status, metadata, size_bytes)
-			VALUES ($1, $2, $3, $4::jsonb, $5)
+			INSERT INTO depot_artifacts (relative_path, sha256, status, metadata, size_bytes, bundle_id)
+			VALUES ($1, $2, $3, $4::jsonb, $5, $6)
 			ON CONFLICT (relative_path) DO UPDATE SET
 				sha256 = COALESCE(EXCLUDED.sha256, depot_artifacts.sha256),
 				status = EXCLUDED.status,
 				metadata = EXCLUDED.metadata,
-				size_bytes = COALESCE(EXCLUDED.size_bytes, depot_artifacts.size_bytes)
+				size_bytes = COALESCE(EXCLUDED.size_bytes, depot_artifacts.size_bytes),
+				bundle_id = COALESCE(EXCLUDED.bundle_id, depot_artifacts.bundle_id)
 			RETURNING id
 			""", connection);
 		command.Parameters.AddWithValue(artifact.RelativePath);
@@ -80,6 +85,7 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 		command.Parameters.AddWithValue(artifact.Status);
 		command.Parameters.AddWithValue(artifact.MetadataJson ?? "{}");
 		command.Parameters.AddWithValue((object?)artifact.SizeBytes ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)artifact.BundleId ?? DBNull.Value);
 
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return (Guid)result!;
@@ -221,6 +227,7 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 			reader.GetFieldValue<DateTimeOffset>(7),
 			reader.GetFieldValue<DateTimeOffset>(8),
 			reader.IsDBNull(9) ? null : reader.GetInt64(9),
-			reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10));
+			reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10),
+			reader.IsDBNull(11) ? null : reader.GetString(11));
 	}
 }

@@ -14,6 +14,8 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 
@@ -49,10 +51,10 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 	}
 
 	public async Task<BinariesDownloadResult> DownloadAsync(
-		string externalId, string depotStorePath, string activationCodePath, string identityHome, string assetId,
+		string id, string depotStorePath, string activationCodePath, string identityHome, string assetId,
 		CancellationToken cancellationToken)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(externalId);
+		ArgumentException.ThrowIfNullOrWhiteSpace(id);
 		ArgumentException.ThrowIfNullOrWhiteSpace(depotStorePath);
 		ArgumentException.ThrowIfNullOrWhiteSpace(activationCodePath);
 		ArgumentException.ThrowIfNullOrWhiteSpace(identityHome);
@@ -86,7 +88,7 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 		// `metadata download --help`) -- otherwise the tool has no credential and every
 		// call fails auth regardless of a validated enrollment.
 		string arguments =
-			$"binaries download --id=\"{externalId}\" --depot-store=\"{depotStorePath}\" " +
+			$"binaries download --id=\"{id}\" --depot-store=\"{depotStorePath}\" " +
 			$"\"--depot-download-activation-code-file={activationCodePath}\" --ceip=DISABLE";
 
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
@@ -99,16 +101,41 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 
 		if (exitCode == 0)
 		{
+			// Issue #1783 (Option B, required regardless of the --id fix): the real tool
+			// exits 0 even when its own "Binaries to be downloaded" table selects
+			// nothing -- a bare "0 elements" line with no other error text. Treating that
+			// as success silently no-ops the job and only fails one layer later, at
+			// verification, with a misleading "file not found" message. Checked BEFORE
+			// returning Ok so an empty selection is always reported honestly, by name,
+			// rather than surfacing downstream as something it is not.
+			string? emptySelectionReason = TryDetectEmptySelectionFailure(stdout, id);
+			if (emptySelectionReason is not null)
+			{
+				return BinariesDownloadResult.Failed(emptySelectionReason, stdout);
+			}
+
 			return BinariesDownloadResult.Ok(stdout);
 		}
+
+		// Issue #1785: the tool's stdout on a real failure is only a banner + a
+		// "Log file: <path>" line (mirrors DepotIdentityTool's identical banner
+		// parsing) -- the actual diagnostics live in that log file, never on stdout.
+		// Best-effort read it (never lets a missing/unreadable log mask the underlying
+		// failure) and fold its meaningful tail into BOTH the classification input and
+		// the reported failure reason, so a misleading tool banner (e.g. "Depot
+		// connection failure") is never the only text an operator or the classifier
+		// ever sees.
+		string? logTail = TryReadToolLogTail(identityHome);
 
 		// A completed nonzero exit is classified honestly (issue #1482 AC: "Auth vs
 		// network vs disk vs vendor-throttle failures are classified distinctly, never
 		// collapsed into a generic failure") -- never blanket auth-failed or generic
 		// failed on evidence the tool did not give.
 		string toolMessage = stdout.Length > 0 ? stdout : stderr;
-		string summary = Truncate(string.IsNullOrWhiteSpace(toolMessage) ? "the tool exited nonzero with no output." : toolMessage);
-		return DownloadToolFailureClassifier.Classify(toolMessage) switch
+		string classificationInput = logTail is null ? toolMessage : $"{toolMessage}\n{logTail}";
+		string bannerSummary = Truncate(string.IsNullOrWhiteSpace(toolMessage) ? "the tool exited nonzero with no output." : toolMessage);
+		string summary = logTail is null ? bannerSummary : $"{bannerSummary} (tool log: {Truncate(logTail)})";
+		return DownloadToolFailureClassifier.Classify(classificationInput) switch
 		{
 			DownloadToolFailureClassifier.FailureClass.Network => BinariesDownloadResult.Failed(
 				$"binaries download could not reach Broadcom (network/connectivity): {summary}", stdout),
@@ -120,6 +147,95 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 			_ => BinariesDownloadResult.Failed($"binaries download failed: {summary}", stdout),
 		};
 	}
+
+	/// <summary>Matches a bare "&lt;N&gt; elements" line -- the real tool's "Binaries to be downloaded" table footer (issue #1783).</summary>
+	private static readonly Regex ElementsCountPattern = new(@"^(\d+)\s+elements?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+	/// <summary>
+	/// Issue #1783: detects the real tool's "0 elements" empty-selection table on an
+	/// otherwise-successful (exit 0) invocation and turns it into an honest, actionable
+	/// failure naming the id that was given -- never a silent no-op success. A nonzero
+	/// element count is left alone (returns null, meaning "not empty").
+	/// </summary>
+	private static string? TryDetectEmptySelectionFailure(string stdout, string id)
+	{
+		foreach (string rawLine in stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+		{
+			Match match = ElementsCountPattern.Match(rawLine.Trim());
+			if (match.Success && match.Groups[1].Value == "0")
+			{
+				return $"binaries download selected 0 elements for --id=\"{id}\" -- this id does not match a bundle " +
+					"in the current depot catalog. Verify the artifact's bundle id and re-pull the catalog if it is stale.";
+			}
+		}
+
+		return null;
+	}
+
+	/// <summary>
+	/// Issue #1785: reads and extracts a meaningful tail from the real tool's own log
+	/// file at <c>&lt;identityHome&gt;/log/vdt.log</c> -- the same relative shape
+	/// <c>DepotIdentityToolTests</c>' fixtures assert for the shared enrollment identity
+	/// home ("Log file: &lt;identity&gt;/log/vdt.log"), which this job-scoped identity
+	/// home follows identically since both point <c>HOME</c> at their own root. Best
+	/// effort: a missing or unreadable log file must never mask the underlying failure,
+	/// so any read failure here returns null and the caller falls back to stdout/stderr
+	/// alone, exactly as before this issue.
+	/// </summary>
+	private static string? TryReadToolLogTail(string identityHome)
+	{
+		string logPath = Path.Combine(identityHome, "log", "vdt.log");
+		try
+		{
+			if (!File.Exists(logPath))
+			{
+				return null;
+			}
+
+			return ExtractMeaningfulTail(File.ReadAllText(logPath));
+		}
+		catch (IOException)
+		{
+			return null;
+		}
+		catch (UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// Prefers lines that look like an actual error (<c>ERROR</c>, <c>Exception</c>,
+	/// <c>Caused by</c>, <c>Permission denied</c>) -- the real vdt.log example issue
+	/// #1785 captured is otherwise mostly INFO-level progress noise -- and falls back
+	/// to the file's last few lines when nothing matches, so a log in an unanticipated
+	/// shape still contributes SOMETHING rather than nothing.
+	/// </summary>
+	internal static string? ExtractMeaningfulTail(string content)
+	{
+		if (string.IsNullOrWhiteSpace(content))
+		{
+			return null;
+		}
+
+		string[] lines = content.Replace("\r\n", "\n", StringComparison.Ordinal)
+			.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+		if (lines.Length == 0)
+		{
+			return null;
+		}
+
+		List<string> meaningful = [.. lines.Where(LooksLikeErrorLine)];
+		IEnumerable<string> chosen = meaningful.Count > 0 ? meaningful.TakeLast(5) : lines.TakeLast(5);
+		string tail = string.Join(" | ", chosen.Select(line => line.Trim()));
+		return string.IsNullOrWhiteSpace(tail) ? null : tail;
+	}
+
+	private static bool LooksLikeErrorLine(string line) =>
+		line.Contains("ERROR", StringComparison.Ordinal)
+		|| line.Contains("Exception", StringComparison.Ordinal)
+		|| line.Contains("Caused by", StringComparison.Ordinal)
+		|| line.Contains("Permission denied", StringComparison.OrdinalIgnoreCase);
 
 	/// <summary>
 	/// Atomically seeds <c>&lt;identityHome&gt;/.local/share/vmware/vdt/machine_id</c> --

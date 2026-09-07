@@ -52,7 +52,7 @@ public sealed class BinariesDownloadJobHandlerTests
 	private sealed class UnreachableTool : IBinariesDownloadTool
 	{
 		public Task<BinariesDownloadResult> DownloadAsync(
-			string externalId, string depotStorePath, string activationCodePath, string identityHome, string assetId,
+			string id, string depotStorePath, string activationCodePath, string identityHome, string assetId,
 			CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
 	}
@@ -82,7 +82,8 @@ public sealed class BinariesDownloadJobHandlerTests
 		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
 	}
 
-	private static JobExecutionContext ContextFor(string payload = "{\"depot_artifact_id\":\"00000000-0000-0000-0000-000000000001\",\"external_id\":\"vcf-bundle-01\"}")
+	private static JobExecutionContext ContextFor(
+		string payload = "{\"depot_artifact_id\":\"00000000-0000-0000-0000-000000000001\",\"external_id\":\"vcf-bundle-01\",\"bundle_id\":\"b1\"}")
 	{
 		ClaimedJob job = new(
 			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), JobType: RunTypes.BinariesDownload, TargetId: null, TargetName: "vcf-bundle-01",
@@ -167,6 +168,26 @@ public sealed class BinariesDownloadJobHandlerTests
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("depot_artifact_id", outcome.Note);
+	}
+
+	/// <summary>
+	/// Issue #1783: a payload with no 'bundle_id' (e.g. a hand-crafted payload, or one
+	/// enqueued before this issue's DownloadsController refusal landed) fails closed
+	/// with an actionable reason naming the artifact, rather than passing
+	/// 'external_id' to the tool as --id the way the pre-fix shape did.
+	/// </summary>
+	[Fact]
+	public async Task MissingBundleId_FailsBeforeCheckingEnrollment()
+	{
+		BinariesDownloadJobHandler handler = CreateHandler(enrollment: null);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor("{\"depot_artifact_id\":\"00000000-0000-0000-0000-000000000001\",\"external_id\":\"vcf-bundle-01\"}"),
+			CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("bundle_id", outcome.Note);
+		Assert.Contains("vcf-bundle-01", outcome.Note);
 	}
 
 	// The "Validated enrollment but no credential stored" branch and the full

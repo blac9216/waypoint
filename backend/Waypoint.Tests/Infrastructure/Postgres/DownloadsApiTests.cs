@@ -283,6 +283,73 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1783: the enqueued job payload carries the catalog <c>bundle_id</c> --
+	/// the identifier the real tool's <c>binaries download --id</c> actually selects
+	/// on (#1027 finding), not just <c>external_id</c> (the binary fileName).
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_JobPayload_CarriesBundleId()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactAsync(tag);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		// The binaries-download path has no `downloads` ledger row (that table is the
+		// legacy `download` job type's own ledger) -- look the job up directly by target_id.
+		await using NpgsqlCommand payloadCommand = new(
+			"SELECT payload::text FROM jobs WHERE target_id = $1 AND job_type = 'binaries-download'", connection);
+		payloadCommand.Parameters.AddWithValue(artifact);
+		string payloadJson = (string)(await payloadCommand.ExecuteScalarAsync())!;
+
+		using JsonDocument payload = JsonDocument.Parse(payloadJson);
+		Assert.Equal($"bundle-{tag}", payload.RootElement.GetProperty("bundle_id").GetString());
+		Assert.Equal(tag, payload.RootElement.GetProperty("external_id").GetString());
+	}
+
+	/// <summary>
+	/// Issue #1783: a resolved artifact with no catalog <c>bundle_id</c> (a row indexed
+	/// before migration 0130, or by the offline disk walk, which has no vendor catalog
+	/// document to read one from) refuses the WHOLE batch with a 409 before any run is
+	/// created -- never enqueue a job with nothing usable to pass as the real tool's
+	/// <c>--id</c>.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_ArtifactMissingBundleId_Returns409AndCreatesNoRun()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactWithoutBundleIdAsync(tag);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("catalog_missing_bundle_id", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE target_id = $1 AND job_type = 'binaries-download'", connection);
+		jobCount.Parameters.AddWithValue(artifact);
+		Assert.Equal(0L, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
 	/// Issue #1479 AC: "Whole-release selection resolves to its member artifacts at
 	/// enqueue time" -- a release selector (product+version, the depot catalog's own
 	/// release identity, since it has no separate release-id entity) fans out one job
@@ -825,10 +892,18 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		await insert.ExecuteNonQueryAsync();
 	}
 
+	/// <summary>
+	/// Seeds an artifact WITH a catalog <c>bundle_id</c> (issue #1783) -- the default
+	/// shape every existing binaries-download fanout test needs so its own assertions
+	/// are unaffected by <c>QueueBinariesDownload</c>'s new bundle-id-missing refusal;
+	/// <see cref="SeedArtifactWithoutBundleIdAsync"/> is the dedicated negative case.
+	/// </summary>
 	private async Task<Guid> SeedArtifactAsync(string externalIdTag)
 	{
 		return await _artifacts.UpsertAsync(
-			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", "{}"),
+			new DepotArtifactUpsert(
+				externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", "{}",
+				BundleId: $"bundle-{externalIdTag}"),
 			CancellationToken.None);
 	}
 
@@ -837,7 +912,17 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	{
 		string metadata = JsonSerializer.Serialize(new { product, version });
 		return await _artifacts.UpsertAsync(
-			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", metadata),
+			new DepotArtifactUpsert(
+				externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", metadata,
+				BundleId: $"bundle-{externalIdTag}"),
+			CancellationToken.None);
+	}
+
+	/// <summary>Issue #1783: an artifact with no bundle id -- the row shape a pre-migration-0130 pull, or the offline disk walk, still produces.</summary>
+	private async Task<Guid> SeedArtifactWithoutBundleIdAsync(string externalIdTag)
+	{
+		return await _artifacts.UpsertAsync(
+			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", "{}"),
 			CancellationToken.None);
 	}
 

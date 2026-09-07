@@ -134,36 +134,43 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 	private sealed class UnreachableTool : IBinariesDownloadTool
 	{
 		public Task<BinariesDownloadResult> DownloadAsync(
-			string externalId, string depotStorePath, string activationCodePath, string identityHome, string assetId,
+			string id, string depotStorePath, string activationCodePath, string identityHome, string assetId,
 			CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called: the staged-file write fails before the tool would run.");
 	}
 
 	/// <summary>
 	/// Issue #1486 review (round 1, finding 2): the real gap the prior <see cref="UnreachableTool"/>
-	/// left uncovered -- a fake that actually WRITES bytes to <c>&lt;depotStorePath&gt;/&lt;externalId&gt;</c>
-	/// and reports success, the way the real <c>vcf-download-tool</c> writes to
-	/// <c>--depot-store</c>, so control genuinely reaches <c>VerifyAndRecordAsync</c>
-	/// against real Postgres. Optionally runs <paramref name="sideEffect"/> after
+	/// left uncovered -- a fake that actually WRITES bytes to
+	/// <c>&lt;depotStorePath&gt;/&lt;relativePath&gt;</c> and reports success, the way the
+	/// real <c>vcf-download-tool</c> writes to <c>--depot-store</c>, so control genuinely
+	/// reaches <c>VerifyAndRecordAsync</c> against real Postgres. <paramref name="relativePath"/>
+	/// is the artifact's own <c>ExternalId</c> (relative path) -- distinct, since issue
+	/// #1783, from the <c>id</c> parameter <c>DownloadAsync</c> now receives (the bundle
+	/// id passed as the tool's <c>--id</c>), so this fake captures it via its own
+	/// constructor rather than the method parameter the production tool invocation uses
+	/// for something else entirely. Optionally runs <paramref name="sideEffect"/> after
 	/// writing (before returning success) to model a catalog row vanishing "mid-flight",
 	/// between the tool writing the file and the handler looking the row back up.
 	/// </summary>
 	private sealed class WritingTool : IBinariesDownloadTool
 	{
 		private readonly byte[] _bytes;
+		private readonly string _relativePath;
 		private readonly Func<Task>? _sideEffect;
 
-		public WritingTool(byte[] bytes, Func<Task>? sideEffect = null)
+		public WritingTool(byte[] bytes, string relativePath, Func<Task>? sideEffect = null)
 		{
 			_bytes = bytes;
+			_relativePath = relativePath;
 			_sideEffect = sideEffect;
 		}
 
 		public async Task<BinariesDownloadResult> DownloadAsync(
-			string externalId, string depotStorePath, string activationCodePath, string identityHome, string assetId,
+			string id, string depotStorePath, string activationCodePath, string identityHome, string assetId,
 			CancellationToken cancellationToken)
 		{
-			string destination = Path.Combine(depotStorePath, externalId);
+			string destination = Path.Combine(depotStorePath, _relativePath);
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 			await File.WriteAllBytesAsync(destination, _bytes, cancellationToken).ConfigureAwait(false);
 
@@ -190,11 +197,12 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 	private JobExecutionContext ContextFor(ClaimedJob job) =>
 		new(job, "worker-test", _events, _repository, JobShape.Simple);
 
-	private async Task<ClaimedJob> EnqueueBinariesDownloadJobAsync(Guid? depotArtifactId = null, string externalId = "vcf-bundle-01")
+	private async Task<ClaimedJob> EnqueueBinariesDownloadJobAsync(
+		Guid? depotArtifactId = null, string externalId = "vcf-bundle-01", string bundleId = "bundle-01-id")
 	{
 		Guid runId = await _repository.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, "test-actor", CancellationToken.None);
 		JobSpec spec = new(RunTypes.BinariesDownload, 1, TargetId: null, TargetName: "bundle-01",
-			Payload: $$"""{"depot_artifact_id":"{{depotArtifactId ?? Guid.NewGuid()}}","external_id":"{{externalId}}"}""");
+			Payload: $$"""{"depot_artifact_id":"{{depotArtifactId ?? Guid.NewGuid()}}","external_id":"{{externalId}}","bundle_id":"{{bundleId}}"}""");
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, [spec], "test-actor", CancellationToken.None);
 		ClaimedJob? claimed = await _repository.ClaimJobAsync(
 			"worker-test", TimeSpan.FromMinutes(5), new HashSet<string>(StringComparer.Ordinal) { RunTypes.BinariesDownload }, CancellationToken.None);
@@ -306,7 +314,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
 		Guid artifactId = await SeedArtifactAsync(externalId, expectedSha256, bytes.Length);
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -332,7 +340,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
 		Guid artifactId = await SeedArtifactAsync(externalId, sha256: null, bytes.Length);
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -360,7 +368,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
 		Guid artifactId = await SeedArtifactAsync(externalId, authenticatedSha256, bytes.Length + 1);
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -410,7 +418,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
 		Guid artifactId = await SeedArtifactAsync(externalId, authenticatedSha256, bytes.Length);
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -461,7 +469,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string quarantineRoot = Path.Combine(_toolStatePath, "binaries-download-quarantine");
 		File.WriteAllText(quarantineRoot, "blocks quarantine directory creation");
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -497,7 +505,7 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		string externalId = "vcf-bundle-" + Guid.NewGuid().ToString("N");
 		Guid artifactId = await SeedArtifactAsync(externalId, sha256: null, bytes.Length);
 
-		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, sideEffect: () => DeleteArtifactAsync(artifactId)));
+		BinariesDownloadJobHandler handler = CreateHandler(new WritingTool(bytes, externalId, sideEffect: () => DeleteArtifactAsync(artifactId)));
 		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);

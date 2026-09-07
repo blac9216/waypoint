@@ -322,7 +322,142 @@ public sealed class BinariesDownloadToolTests : IDisposable
 	}
 
 	/// <summary>
-	/// The concurrency AC's class-killer: two invocations given DIFFERENT job-scoped
+	/// Issue #1783: a stub that mimics the real tool's own "wrong id" behavior --
+	/// exit 0, but the "Binaries to be downloaded" table selects "0 elements" -- must
+	/// be reported as a FAILURE, naming the id that was given, never a silent no-op
+	/// success. This is the class-killer for Option B: reverting the empty-selection
+	/// check makes this assert <c>result.Succeeded</c> is true, which it must not be.
+	/// </summary>
+	[Fact]
+	public async Task ZeroElementsSelected_ExitsZeroButFailsWithActionableNoteNamingTheId()
+	{
+		const string stdout = """
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			0 elements
+			---------------------------------------------------------------------------
+			""";
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 0, stdout: stdout), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"wrong-id-not-a-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsAuthFailure);
+		Assert.Contains("0 elements", result.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains("wrong-id-not-a-bundle", result.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #1783: a nonzero element count is a real selection -- left alone as a success, never treated as empty.</summary>
+	[Fact]
+	public async Task NonZeroElementsSelected_ExitsZeroAndSucceeds()
+	{
+		const string stdout = """
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			b1 | VCENTER | VMware vCenter Server | 9.1.0 | 2026-01-01 | 512 MB | ISO
+			---------------------------------------------------------------------------
+			1 elements
+			""";
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 0, stdout: stdout), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"b1", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.True(result.Succeeded);
+	}
+
+	/// <summary>
+	/// Issue #1785: the real tool's stdout on failure is only a misleading banner
+	/// ("Depot connection failure") -- the actual cause lives in the tool's own log
+	/// file at <c>&lt;identityHome&gt;/log/vdt.log</c>. This proves BOTH halves of the
+	/// fix: the reported failure reason names the real error line from the log (never
+	/// just the banner), and classification uses it too (the disk-failure phrase lives
+	/// ONLY in the log here, never in stdout, so a pre-fix shape that classifies off
+	/// stdout alone would fall through to a generic failure instead of DiskFailed).
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_SurfacesMeaningfulTailFromItsOwnLogFile_NotJustTheBanner()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-log-tail");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+		File.WriteAllText(Path.Combine(logDirectory, "vdt.log"),
+			"""
+			2026-01-01 00:00:00 INFO  Validating depot credentials.
+			2026-01-01 00:00:01 INFO  Depot credentials are valid.
+			2026-01-01 00:00:02 ERROR Permission denied opening product version catalog file.
+			2026-01-01 00:00:02 ERROR Caused by: java.io.FileNotFoundException: /depot/PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json (Permission denied)
+			""");
+		string misleadingBanner =
+			"*Welcome to VCF Download Tool*\nVersion: 9.1.0.0400\n" +
+			"Depot connection failure while downloading catalog. host: dl.broadcom.com:443, http status code: 000\n" +
+			$"Log file: {Path.Combine(logDirectory, "vdt.log")}";
+
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 1, stdout: misleadingBanner), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.Contains("Permission denied", result.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains("tool log", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Issue #1785: classification input includes the log tail, not just stdout -- a
+	/// disk-failure phrase that lives ONLY in the tool's own log (never in stdout's
+	/// generic banner) still drives the classifier to <see cref="BinariesDownloadResult.IsDiskFailure"/>.
+	/// A classifier that only ever looked at stdout (the pre-#1785 shape) would fall
+	/// through to a generic, non-specific failure here instead.
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_ClassifiesUsingLogTail_WhenStdoutIsGenericAndLogNamesDisk()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-log-classifies");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+		File.WriteAllText(Path.Combine(logDirectory, "vdt.log"),
+			"2026-01-01 00:00:00 INFO  Writing binary to depot store.\n" +
+			"2026-01-01 00:00:01 ERROR write failed: /vcf/PROD/bundle.tar: No space left on device\n");
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 1, stdout: "*Welcome to VCF Download Tool*\ninternal error: something unexpected went wrong."),
+			out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.True(result.IsDiskFailure);
+		Assert.False(result.IsAuthFailure);
+		Assert.Contains("No space left on device", result.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #1785: a missing/unreadable log file must never mask the underlying failure -- falls back to stdout/stderr alone, exactly as before this issue.</summary>
+	[Fact]
+	public async Task ToolFailure_NoLogFilePresent_StillFailsWithStdoutReason()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-no-log");
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 3, stdout: "Authentication failed: activation code is expired or revoked."), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.True(result.IsAuthFailure);
+		Assert.Contains("activation code", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>The concurrency AC's class-killer: two invocations given DIFFERENT job-scoped
 	/// identity homes and different asset ids must each seed and use ONLY their own
 	/// <c>machine_id</c> -- neither ever observes the other's, proving job-scoped
 	/// identity isolation (issue #1482 AC / grill decision R2-8) independent of

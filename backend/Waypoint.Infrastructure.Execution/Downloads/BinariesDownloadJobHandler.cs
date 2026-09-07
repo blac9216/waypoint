@@ -39,11 +39,16 @@ namespace Waypoint.Infrastructure.Downloads;
 /// alongside it.
 ///
 /// Payload contract (JSON object, set by <c>DownloadsController.QueueBinariesDownload</c>):
-/// <c>{"depot_artifact_id": "&lt;guid&gt;", "external_id": "&lt;depot-relative id&gt;"}</c>.
-/// <c>external_id</c> is passed as the tool's <c>--id</c> value -- the only artifact
-/// identifier the enqueue sibling's fanout carries onto the job payload today; whether
-/// the real tool expects exactly this value for <c>--id</c> is one of this issue's
-/// pending-live facts (see the issue's "Verified expectation").
+/// <c>{"depot_artifact_id": "&lt;guid&gt;", "external_id": "&lt;relative path&gt;",
+/// "bundle_id": "&lt;vendor bundle id&gt;"}</c>. Issue #1783's live validation run 2
+/// answered #1482's own pending-live question: the real tool's <c>--id</c> is the
+/// vendor catalog's <c>artifacts.bundles[].id</c> (#1027 finding:
+/// <c>BINARY_NOT_FOUND_IN_LOCAL_PVC</c>, "bundles are addressed by catalog id"), NOT
+/// <c>external_id</c> (the binary fileName/relative path) -- passing <c>external_id</c>
+/// as <c>--id</c> resolves an empty ("0 elements") selection every time. <c>bundle_id</c>
+/// is what this handler now passes as <c>--id</c>; <c>external_id</c> stays on the
+/// payload for identity/evidence (job log lines, the verification lookup's error text)
+/// but is never passed to the tool.
 ///
 /// Concurrency (2026-08-28 grill decision R2-8, unbounded): every invocation gets its
 /// OWN job-scoped identity home (<c>&lt;ManagedTool:ToolStatePath&gt;/&lt;BinariesDownloadIdentityDirectoryName&gt;/job-&lt;job id&gt;</c>),
@@ -140,6 +145,19 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed("binaries-download payload requires a valid GUID 'depot_artifact_id'.");
 		}
 
+		// Issue #1783: the enqueue path (DownloadsController.QueueBinariesDownload)
+		// already refuses to queue a job for an artifact with no bundle_id, but a job
+		// payload is untrusted input to this handler regardless -- defense in depth
+		// against a malformed/hand-crafted payload reaching the claim loop with
+		// nothing usable to pass as the real tool's --id (see #1783's root cause: the
+		// prior shape passed 'external_id', the binary fileName, which the real tool
+		// never matches and resolves an empty selection for).
+		if (string.IsNullOrWhiteSpace(payload.BundleId))
+		{
+			return JobExecutionOutcome.Failed(
+				$"binaries-download payload requires a non-empty 'bundle_id' (the catalog artifact '{payload.ExternalId}' has none -- re-pull the catalog).");
+		}
+
 		DepotEnrollment? enrollment = await _enrollment.GetAsync(cancellationToken).ConfigureAwait(false);
 		if (enrollment is null || !string.Equals(enrollment.State, DepotEnrollmentStates.Validated, StringComparison.Ordinal))
 		{
@@ -213,7 +231,7 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			}
 
 			BinariesDownloadResult result = await _tool
-				.DownloadAsync(payload.ExternalId, depotStorePath, activationCodePath, identityHome, assetId, cancellationToken)
+				.DownloadAsync(payload.BundleId, depotStorePath, activationCodePath, identityHome, assetId, cancellationToken)
 				.ConfigureAwait(false);
 
 			// Issue #1482 AC: tool stdout is captured verbatim in job logs, never parsed
@@ -481,5 +499,5 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		}
 	}
 
-	private sealed record BinariesDownloadPayload(string? DepotArtifactId, string? ExternalId);
+	private sealed record BinariesDownloadPayload(string? DepotArtifactId, string? ExternalId, string? BundleId);
 }

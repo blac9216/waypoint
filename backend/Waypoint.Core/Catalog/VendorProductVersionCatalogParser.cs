@@ -31,6 +31,16 @@ namespace Waypoint.Core.Catalog;
 /// same entry (an ISO shared across INSTALL and PATCH bundles), so last-write-wins per
 /// identity is correct here, matching the sibling reference's own flattening
 /// rationale.
+///
+/// Also carries each bundle's own <c>id</c> field onto
+/// <see cref="DepotArtifactUpsert.BundleId"/> (migration 0130, issue #1783) -- the
+/// identifier the real vcf-download-tool's <c>binaries download --id</c> actually
+/// selects on (#1027 finding: <c>BINARY_NOT_FOUND_IN_LOCAL_PVC</c>, "bundles are
+/// addressed by catalog id"), never the same value as <c>fileName</c>. A binary whose
+/// bundle carries no <c>id</c> still parses -- the bundle id is a sibling fact, not a
+/// precondition for this method's own contract; the enqueue path
+/// (<c>DownloadsController.QueueBinariesDownload</c>) is what refuses to queue a
+/// <c>binaries-download</c> job for a null bundle id.
 /// </summary>
 public static class VendorProductVersionCatalogParser
 {
@@ -79,9 +89,13 @@ public static class VendorProductVersionCatalogParser
 						continue;
 					}
 
+					string? bundleId = bundle.TryGetProperty("id", out JsonElement bundleIdElement) && bundleIdElement.ValueKind == JsonValueKind.String
+						? bundleIdElement.GetString()
+						: null;
+
 					foreach (JsonElement binary in binaries.EnumerateArray())
 					{
-						DepotArtifactUpsert? upsert = TryParseBinary(binary, component.Name, version);
+						DepotArtifactUpsert? upsert = TryParseBinary(binary, component.Name, version, bundleId);
 						if (upsert is not null)
 						{
 							byRelativePath[upsert.RelativePath] = upsert;
@@ -94,7 +108,7 @@ public static class VendorProductVersionCatalogParser
 		return [.. byRelativePath.Values];
 	}
 
-	private static DepotArtifactUpsert? TryParseBinary(JsonElement binary, string component, string? version)
+	private static DepotArtifactUpsert? TryParseBinary(JsonElement binary, string component, string? version, string? bundleId)
 	{
 		if (!binary.TryGetProperty("fileName", out JsonElement fileNameElement) || fileNameElement.ValueKind != JsonValueKind.String)
 		{
@@ -141,6 +155,10 @@ public static class VendorProductVersionCatalogParser
 		// with contradictory statuses (live validation). DepotRelativePaths.Resolve is
 		// the single shared rule; CatalogPullJobHandler reconciles any pre-#1784 row
 		// still keyed under the legacy bare-fileName identity on the next pull.
-		return new DepotArtifactUpsert(DepotRelativePaths.Resolve(component, fileName), checksum, DepotArtifactStatuses.Indexed, metadataJson, size);
+		//
+		// bundleId (migration 0130, issue #1783) travels alongside the depot-relative
+		// RelativePath -- the two are independent identifiers (see the class doc
+		// comment above) and this rebase's conflict resolution keeps both.
+		return new DepotArtifactUpsert(DepotRelativePaths.Resolve(component, fileName), checksum, DepotArtifactStatuses.Indexed, metadataJson, size, bundleId);
 	}
 }
