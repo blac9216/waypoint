@@ -48,6 +48,12 @@ public sealed class EsxAcquisitionOptionsPostConfigure : IPostConfigureOptions<E
 		}
 
 		ManagedToolOptions managedTool = _managedToolOptions.Value;
-		options.VocabularyDocumentPath = Path.Combine(managedTool.LocalRepositoryPath, managedTool.ProductVersionCatalogPath);
+
+		// Issue #1829: apply the same rooted/escape guard the sibling ResolveConfigured
+		// helpers (BroadcomManagedToolCatalogVerifier, CatalogPullJobHandler) already
+		// apply to this exact option pair, rather than a bare Path.Combine that
+		// silently discards LocalRepositoryPath on a rooted value or resolves outside
+		// the depot root on a `../`-escaping one.
+		options.VocabularyDocumentPath = ManagedToolRelativePathResolver.Resolve(managedTool.LocalRepositoryPath, managedTool.ProductVersionCatalogPath);
 	}
 }

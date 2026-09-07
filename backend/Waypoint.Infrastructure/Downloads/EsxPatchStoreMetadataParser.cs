@@ -58,8 +58,25 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 
 	private static readonly string[] Depot91RelativeSegments = ["PROD", "COMP", "ESX_HOST", "patch-store"];
 
-	/// <summary>Bound on any single index/metadata XML document this parser will attempt (untrusted-input discipline, matches <c>XccdfParser.MaxDocumentBytes</c>).</summary>
+	/// <summary>
+	/// Byte bound on any single index/metadata XML document's on-disk file size,
+	/// checked via <see cref="FileInfo.Length"/> BEFORE the file is read into memory
+	/// (untrusted-input discipline, matches <c>XccdfParser.MaxDocumentBytes</c>; issue
+	/// #1642: an oversized file must be rejected without first materialising it as a
+	/// string).
+	/// </summary>
 	public const int MaxXmlBytes = 8 * 1024 * 1024;
+
+	/// <summary>
+	/// Character bound applied to XML text already resident in memory -- a zip entry's
+	/// decoded content (on-disk bounded by <see cref="MaxZipEntryBytes"/>, a different
+	/// and larger constant, before this check ever runs) and, as a belt-and-suspenders
+	/// backstop, any file content that reached <see cref="TryParseXmlText"/>. Shares
+	/// <see cref="MaxXmlBytes"/>'s numeric value but is named and compared as a UTF-16
+	/// character count (issue #1642: the file-size bound above is a true byte count;
+	/// this one is not, and must not claim to be).
+	/// </summary>
+	public const int MaxXmlCharacters = MaxXmlBytes;
 
 	/// <summary>Bound on entries a single metadata zip may contain before this parser gives up on it as a warning rather than a hang.</summary>
 	public const int MaxZipEntries = 20_000;
@@ -92,14 +109,22 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		List<EsxPatchStoreVendorHealth> vendorHealth = [];
 		List<EsxPatchStoreUnresolvedReference> unresolvedReferences = [];
 		SortedSet<string> vendorCodes = new(StringComparer.Ordinal);
-		foreach (string indexVendorCode in ParseConsolidatedIndexVendorCodes(hostupdateRoot, warnings))
+
+		// Issue #1658: enumerate the hostupdate/ root FIRST, before attempting the
+		// consolidated index. When the root itself cannot be listed, the index-not-found
+		// warning below must not also claim "vendor list will come from the directory
+		// listing only" -- that listing has failed too, and leading with a message that
+		// points at a missing file misattributes the real cause (a denied directory) to
+		// the caller/operator reading the warning text.
+		string[] vendorDirs = SafeEnumerateDirectories(hostupdateRoot, warnings, out bool rootReadable);
+
+		foreach (string indexVendorCode in ParseConsolidatedIndexVendorCodes(hostupdateRoot, warnings, rootReadable))
 		{
 			vendorCodes.Add(indexVendorCode);
 		}
 
 		List<EsxPatchStoreMetadataBundle> bundles = [];
 
-		string[] vendorDirs = SafeEnumerateDirectories(hostupdateRoot, warnings, out bool rootReadable);
 		foreach (string vendorDir in vendorDirs)
 		{
 			string vendorCode = Path.GetFileName(vendorDir);
@@ -173,14 +198,21 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// warning, not a failure -- the per-directory walk below is the ground truth for
 	/// what can actually be parsed, and does not depend on this succeeding.
 	/// </summary>
-	private static List<string> ParseConsolidatedIndexVendorCodes(string hostupdateRoot, List<string> warnings)
+	private static List<string> ParseConsolidatedIndexVendorCodes(string hostupdateRoot, List<string> warnings, bool rootReadable)
 	{
 		string indexPath = Path.Combine(hostupdateRoot, ConsolidatedIndexFileName);
 		List<string> codes = [];
 
 		if (!File.Exists(indexPath))
 		{
-			warnings.Add($"Consolidated index not found: '{indexPath}' (vendor list will come from the directory listing only).");
+			// Issue #1658: when the hostupdate/ root itself could not be listed
+			// (rootReadable is false -- SafeEnumerateDirectories already warned about
+			// that above), the directory listing is NOT a working fallback for the
+			// vendor list either, so the parenthetical promising one would misstate the
+			// actual cause of an empty result.
+			warnings.Add(rootReadable
+				? $"Consolidated index not found: '{indexPath}' (vendor list will come from the directory listing only)."
+				: $"Consolidated index not found: '{indexPath}'.");
 			return codes;
 		}
 
@@ -205,8 +237,11 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// <summary>
 	/// Parses one vendor directory's consolidated metadata index and resolves every
 	/// metadata entry it names into a content-identified <see cref="EsxPatchStoreMetadataBundle"/>.
-	/// The missing-index case is genuine absence (not a health failure -- nothing to
-	/// read means nothing was lost); every case below it that leaves this vendor with
+	/// The missing-index case is now decided as degradation (issue #1700, superseding
+	/// this class's earlier "genuine absence" call): a vendor directory with no index
+	/// file at all cannot be told apart from a transfer that landed zips before its
+	/// index, so it appends <see cref="EsxPatchStoreVendorHealthKind.IndexAbsent"/>
+	/// exactly like every other degraded shape below; every case below it that leaves this vendor with
 	/// zero or partial bundles despite reaching this point appends the matching
 	/// <see cref="EsxPatchStoreVendorHealth"/> entry at the exact site that also emits
 	/// today's warning text for humans (round-2 review finding F4). The one remaining
@@ -220,7 +255,12 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		string indexPath = Path.Combine(vendorDir, ConsolidatedMetadataIndexFileName);
 		if (!File.Exists(indexPath))
 		{
+			// Issue #1700: decided as degradation, not genuine absence -- see
+			// EsxPatchStoreVendorHealthKind.IndexAbsent's remarks. Without this, every
+			// zip under this vendor directory opens as a false Orphan row (a deletion
+			// candidate via #1452) the moment its index is absent for any reason.
 			warnings.Add($"Vendor '{vendorCode}': no consolidated metadata index at '{indexPath}'.");
+			vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.IndexAbsent));
 			return;
 		}
 
@@ -299,6 +339,15 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// changed mid-parse and this vendor's other previously-indexed content cannot be
 	/// trusted as fully re-verified this run either (round-2 review finding F4).
 	/// </summary>
+	/// <summary>
+	/// Issue #1644 test-only seam: <see cref="Waypoint.Tests.Infrastructure.Downloads.EsxPatchStoreMetadataParserTests"/>
+	/// sets this to delete/lock the zip after the content-key read succeeds and
+	/// before <c>ZipFile.OpenRead</c> runs, reproducing the two-open race
+	/// deterministically instead of racing real threads against real I/O timing.
+	/// Internal (not public API); never set or read outside tests.
+	/// </summary>
+	internal static Action<string>? ContentKeyComputedTestHook;
+
 	private static EsxPatchStoreMetadataBundle? TryParseMetadataZip(
 		string zipPath, string displayRelativePath, string vendorCode, string? productId, string? version, string? channelName,
 		List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
@@ -315,6 +364,13 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			vendorHealth.Add(new EsxPatchStoreVendorHealth(vendorCode, EsxPatchStoreVendorHealthKind.UnreadableZip));
 			return null;
 		}
+
+		// Issue #1644 regression test hook: deterministically simulates the zip
+		// becoming unreadable in the window between the content-key read above and
+		// ZipFile.OpenRead below (a concurrent vendor-tool sync deleting/replacing/
+		// locking the file) without depending on real thread timing. Never set
+		// outside Waypoint.Tests; a no-op in production.
+		ContentKeyComputedTestHook?.Invoke(zipPath);
 
 		List<EsxPatchStoreVibReference> vibs;
 		try
@@ -475,6 +531,18 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		string content;
 		try
 		{
+			// Issue #1642: check the file's actual byte size BEFORE reading it into
+			// memory. An oversized consolidated/vendor index must be rejected without
+			// ever being fully materialised as a string -- the 8 MB cap is meant to
+			// bound allocation, not just the XML parse that follows it.
+			long fileBytes = new FileInfo(path).Length;
+			if (fileBytes > MaxXmlBytes)
+			{
+				warnings.Add($"{description} at '{path}' is {fileBytes} bytes, over the {MaxXmlBytes}-byte file-size bound -- not read.");
+				onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.MalformedIndex);
+				return null;
+			}
+
 			content = File.ReadAllText(path);
 		}
 		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -496,9 +564,9 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			return null;
 		}
 
-		if (content.Length > MaxXmlBytes)
+		if (content.Length > MaxXmlCharacters)
 		{
-			warnings.Add($"{description} exceeds the {MaxXmlBytes}-byte parse bound ({content.Length} bytes).");
+			warnings.Add($"{description} exceeds the {MaxXmlCharacters}-character parse bound ({content.Length} characters).");
 			onDegraded?.Invoke(EsxPatchStoreVendorHealthKind.MalformedIndex);
 			return null;
 		}
@@ -507,7 +575,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 		{
 			DtdProcessing = DtdProcessing.Prohibit,
 			XmlResolver = null,
-			MaxCharactersInDocument = MaxXmlBytes,
+			MaxCharactersInDocument = MaxXmlCharacters,
 			IgnoreComments = true,
 			IgnoreProcessingInstructions = true,
 			IgnoreWhitespace = true,

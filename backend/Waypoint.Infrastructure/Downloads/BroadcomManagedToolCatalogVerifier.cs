@@ -166,20 +166,8 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 			: ManagedToolCatalogVerificationResult.Fail($"Artifact SHA-256 mismatch: catalog expects {expected.Sha256}, actual file is {actualSha256}.", actualSha256);
 	}
 
-	private static string ResolveConfigured(string root, string relative)
-	{
-		if (Path.IsPathRooted(relative))
-		{
-			throw new InvalidOperationException("Managed-tool catalog paths must be relative to the repository root.");
-		}
-		string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-		string candidate = Path.GetFullPath(Path.Combine(fullRoot, relative));
-		if (!candidate.StartsWith(fullRoot, StringComparison.Ordinal))
-		{
-			throw new InvalidOperationException("Managed-tool catalog path escapes the repository root.");
-		}
-		return candidate;
-	}
+	/// <summary>Issue #1829: delegates to the one shared implementation (<see cref="ManagedToolRelativePathResolver"/>) rather than its own copy of the rooted/escape guard.</summary>
+	private static string ResolveConfigured(string root, string relative) => ManagedToolRelativePathResolver.Resolve(root, relative);
 
 	private static CatalogCandidate[] FindCandidates(byte[] json, string fileName, string? requestedVersion)
 	{

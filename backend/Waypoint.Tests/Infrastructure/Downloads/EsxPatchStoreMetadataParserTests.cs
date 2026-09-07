@@ -196,6 +196,54 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		Assert.Contains("Depot91", result.FailureReason);
 	}
 
+	// ----- issue #1643: pin the auto-detect preference and its Layout=Legacy quirk --
+
+	/// <summary>
+	/// Issue #1643: when a store root has BOTH the legacy top-level <c>hostupdate/</c>
+	/// AND a nested <c>PROD/COMP/ESX_HOST/patch-store/hostupdate</c>, auto-detection's
+	/// documented preference (<c>ResolveHostupdateRoot</c>'s remarks) is Legacy first.
+	/// Not previously pinned -- the suite covered legacy-only, 9.1-only, forced-layout
+	/// and neither-present, but never both-present together.
+	/// </summary>
+	[Fact]
+	public void Parse_BothLayoutPathsPresent_PrefersLegacy()
+	{
+		string legacyHostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(legacyHostupdateDir, "vmw-legacy");
+
+		string depot91HostupdateDir = Path.Combine(_root, "PROD", "COMP", "ESX_HOST", "patch-store", "hostupdate");
+		WriteConsolidatedIndex(depot91HostupdateDir, "vmw-91");
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Equal(EsxPatchStoreLayout.Legacy, result.Metadata!.Layout);
+		Assert.Equal(legacyHostupdateDir, result.Metadata.HostupdateRoot);
+	}
+
+	/// <summary>
+	/// Issue #1643: passing a 9.1 store's own <c>.../patch-store</c> directory
+	/// directly as <c>storeRoot</c> (rather than the depot root above it) resolves via
+	/// the legacy probe -- <c>&lt;storeRoot&gt;/hostupdate</c> exists at that path too
+	/// -- and stamps <c>Layout=Legacy</c> even though the content is 9.1's.
+	/// <see cref="EsxPatchStoreMetadata.HostupdateRoot"/> is still correct; only
+	/// <see cref="EsxPatchStoreMetadata.Layout"/> is the probe, not the generation
+	/// (documented on <see cref="EsxPatchStoreLayout"/> itself as part of this fix).
+	/// </summary>
+	[Fact]
+	public void Parse_Depot91PatchStoreRootPassedDirectly_ResolvesButReportsLayoutLegacy()
+	{
+		string patchStoreRoot = Path.Combine(_root, "PROD", "COMP", "ESX_HOST", "patch-store");
+		string hostupdateDir = Path.Combine(patchStoreRoot, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+
+		EsxPatchStoreParseResult result = _parser.Parse(patchStoreRoot);
+
+		Assert.True(result.Succeeded);
+		Assert.Equal(hostupdateDir, result.Metadata!.HostupdateRoot);
+		Assert.Equal(EsxPatchStoreLayout.Legacy, result.Metadata.Layout);
+	}
+
 	[Fact]
 	public void Parse_NeitherLayoutPresent_FailsWithActionableReason()
 	{
@@ -215,6 +263,46 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 
 		Assert.False(result.Succeeded);
 		Assert.Contains("does not exist", result.FailureReason);
+	}
+
+	// ----- issue #1644: ZipFile.OpenRead's IOException must not escape ----------
+
+	/// <summary>
+	/// Issue #1644: <c>TryParseMetadataZip</c> opens the metadata zip twice -- once via
+	/// <c>File.OpenRead</c> for the content-key hash, then again via
+	/// <c>ZipFile.OpenRead</c> to read VIB references. A concurrent vendor-tool sync
+	/// deleting/replacing the file in the window between the two opens must warn, not
+	/// throw -- the class's documented "never throws for malformed store content"
+	/// contract. Deterministically reproduced via
+	/// <see cref="EsxPatchStoreMetadataParser.ContentKeyComputedTestHook"/> rather than
+	/// racing real threads.
+	/// </summary>
+	[Fact]
+	public void Parse_ZipDisappearsBetweenContentKeyReadAndZipOpen_WarnsRatherThanThrowing()
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "vmw-ESXi-9.1-metadata.zip");
+		string zipPath = Path.Combine(vendorDir, "vmw-ESXi-9.1-metadata.zip");
+		WriteMetadataZip(zipPath, [("vib20/esx-update/pkg.vib", "aa".PadRight(64, '0'))]);
+
+		EsxPatchStoreMetadataParser.ContentKeyComputedTestHook = path => File.Delete(path);
+		try
+		{
+			EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+			Assert.True(result.Succeeded);
+			EsxPatchStoreMetadataBundle bundle = Assert.Single(result.Metadata!.Bundles);
+			Assert.Empty(bundle.Vibs);
+			Assert.Contains(result.Metadata.Warnings, w =>
+				w.Contains("vmw") && w.Contains("could not open") && w.Contains("VIB references"));
+			Assert.Contains(result.Metadata.VendorHealth, h =>
+				h.VendorCode == "vmw" && h.Kind == EsxPatchStoreVendorHealthKind.UnreadableZip);
+		}
+		finally
+		{
+			EsxPatchStoreMetadataParser.ContentKeyComputedTestHook = null;
+		}
 	}
 
 	// ----- AC3: vvs bundle byte variance is never treated as corruption --------
