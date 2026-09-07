@@ -196,6 +196,9 @@ public sealed class ResumeProtocolTests
 
 		public string ArtifactUrl => $"http://127.0.0.1:{Port}/artifact.bin";
 
+		/// <summary>Probe-then-bind: a port-0 <see cref="TcpListener"/> reserves a free
+		/// ephemeral port and releases it before <see cref="HttpListener"/> binds the
+		/// same number, so a busy host sharing that range can rarely take it first.</summary>
 		private static int GetFreeTcpPort()
 		{
 			TcpListener probe = new(IPAddress.Loopback, 0);
