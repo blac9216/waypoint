@@ -164,6 +164,9 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 			// is only ever returned when request.FolderId is non-null (AssignItemAsync
 			// short-circuits to Unassigned before checking existence when it is null).
 			ContentLibraryItemAssignmentOutcome.FolderNotFound => throw FolderNotFoundError(request.FolderId!.Value),
+			// Migration 0133 (issue #1396): item_id now carries a real FK, so an
+			// unknown item is a distinct 404 from an unknown folder.
+			ContentLibraryItemAssignmentOutcome.ItemNotFound => throw ItemNotFoundError(itemId),
 			_ => NoContent(),
 		};
 	}
@@ -193,4 +196,7 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 
 	private static ApiException FolderNotFoundError(Guid folderId) =>
 		new(HttpStatusCode.NotFound, "not_found", $"No folder exists with id '{folderId}' in this library.");
+
+	private static ApiException ItemNotFoundError(Guid itemId) =>
+		new(HttpStatusCode.NotFound, "not_found", $"No item exists with id '{itemId}' in this library.");
 }

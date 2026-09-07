@@ -628,11 +628,21 @@ public sealed class SchemaMigrationTests
 	/// to 0135 at rebase time because PR #1842 above merged first and also claimed
 	/// slot 0134 -- bumping 99 -&gt; 100.
 	///
+	/// 0133 (issue #1396, epic #1185; slot 0133 -- uncontested: main has taken
+	/// 0131 and 0134 and PR #1844 owns 0135, so no renumbering was needed at this
+	/// rebase): adds <c>content_library_items</c>, the content-library item identity
+	/// table, plus the FK it closes on <c>content_library_item_folders.item_id</c>
+	/// (0113 shipped that column deliberately without one, per its own header -- see
+	/// 0133's header for why the FK is CASCADE rather than RESTRICT). No new runner
+	/// grants -- no runner process reads or writes this table today (0090/0113
+	/// precedent); #1057 ships its own GRANT migration when it lands. Bumps
+	/// 100 -&gt; 101.
+	///
 	/// <para>This is the ledger's closing instruction, not part of any one migration's
 	/// entry above: bump <see cref="ExpectedMigrationCount"/> alongside adding a new
 	/// <c>Data/Migrations/*.sql</c> file.</para>
 	/// </summary>
-	private const int ExpectedMigrationCount = 100;
+	private const int ExpectedMigrationCount = 101;
 
 	private readonly PostgresFixture _fixture;
 

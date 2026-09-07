@@ -36,6 +36,7 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	private readonly PostgresFixture _fixture;
 	private ContentLibraryFolderRepository _folders = null!;
 	private ContentLibraryRepository _libraries = null!;
+	private ContentLibraryItemRepository _items = null!;
 	private string _rootPath = null!;
 
 	public ContentLibraryFolderRepositoryTests(PostgresFixture fixture)
@@ -52,6 +53,7 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 		_rootPath = Directory.CreateTempSubdirectory("wp-content-library-folder-test").FullName;
 		_folders = new ContentLibraryFolderRepository(_fixture.ConnectionString);
 		_libraries = new ContentLibraryRepository(_fixture.ConnectionString, _rootPath);
+		_items = new ContentLibraryItemRepository(_fixture.ConnectionString);
 	}
 
 	public Task DisposeAsync()
@@ -72,7 +74,8 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand command = new(
-			"TRUNCATE TABLE content_library_item_folders, content_library_folders, content_libraries RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE content_library_item_folders, content_library_items, content_library_folders, content_libraries RESTART IDENTITY CASCADE",
+			connection);
 		await command.ExecuteNonQueryAsync();
 	}
 
@@ -80,6 +83,20 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	{
 		(_, ContentLibrary? library) = await _libraries.CreateAsync(name, CancellationToken.None);
 		return library!.Id;
+	}
+
+	/// <summary>
+	/// Migration 0133 (issue #1396) added a real FK from <c>content_library_item_folders.item_id</c>
+	/// onto <c>content_library_items</c> -- every folder-assignment test below now
+	/// needs a real item row to assign, not an arbitrary <see cref="Guid"/>.
+	/// </summary>
+	private async Task<Guid> SeedItemAsync(Guid libraryId, string name = "disk.iso")
+	{
+		Guid itemId = Guid.NewGuid();
+		await _items.AddAsync(
+			itemId, libraryId, itemId.ToString("N"), name, ContentLibraryItemTypes.Iso, "",
+			[new ContentLibraryItemFileWrite(name, 1, "hash")], CancellationToken.None);
+		return itemId;
 	}
 
 	[Fact]
@@ -243,7 +260,8 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-nonempty-item");
 		(_, ContentLibraryFolder? folder) = await _folders.CreateAsync(libraryId, null, "Holds-item", CancellationToken.None);
-		await _folders.AssignItemAsync(libraryId, Guid.NewGuid(), folder!.Id, CancellationToken.None);
+		Guid itemId = await SeedItemAsync(libraryId);
+		await _folders.AssignItemAsync(libraryId, itemId, folder!.Id, CancellationToken.None);
 
 		ContentLibraryFolderDeleteOutcome outcome = await _folders.DeleteAsync(folder.Id, CancellationToken.None);
 
@@ -268,7 +286,7 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 		Guid libraryId = await SeedLibraryAsync("vcsp-item-move");
 		(_, ContentLibraryFolder? folderA) = await _folders.CreateAsync(libraryId, null, "A", CancellationToken.None);
 		(_, ContentLibraryFolder? folderB) = await _folders.CreateAsync(libraryId, null, "B", CancellationToken.None);
-		Guid itemId = Guid.NewGuid();
+		Guid itemId = await SeedItemAsync(libraryId);
 
 		Assert.Equal(
 			ContentLibraryItemAssignmentOutcome.Assigned,
@@ -359,7 +377,7 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-repair-survival");
 		(_, ContentLibraryFolder? folder) = await _folders.CreateAsync(libraryId, null, "Survives", CancellationToken.None);
-		Guid itemId = Guid.NewGuid();
+		Guid itemId = await SeedItemAsync(libraryId);
 		await _folders.AssignItemAsync(libraryId, itemId, folder!.Id, CancellationToken.None);
 
 		ContentLibrary library = (await _libraries.GetAsync(libraryId, CancellationToken.None))!;
@@ -376,7 +394,8 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-cascade");
 		(_, ContentLibraryFolder? folder) = await _folders.CreateAsync(libraryId, null, "Doomed", CancellationToken.None);
-		await _folders.AssignItemAsync(libraryId, Guid.NewGuid(), folder!.Id, CancellationToken.None);
+		Guid itemId = await SeedItemAsync(libraryId);
+		await _folders.AssignItemAsync(libraryId, itemId, folder!.Id, CancellationToken.None);
 
 		// Bypass the API-level non-empty guard: this proves the DB's own ON DELETE
 		// CASCADE, not ContentLibraryFolderRepository.DeleteAsync's rejection path.

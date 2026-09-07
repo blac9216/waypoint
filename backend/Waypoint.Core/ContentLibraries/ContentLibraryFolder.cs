@@ -77,4 +77,14 @@ public enum ContentLibraryItemAssignmentOutcome
 
 	/// <summary>The requested folder does not exist, or exists in a different library.</summary>
 	FolderNotFound,
+
+	/// <summary>
+	/// The requested item does not exist in this library (migration 0133, issue #1396:
+	/// <c>content_library_item_folders.item_id</c> now carries a real FK onto
+	/// <c>content_library_items</c>, closing the gap 0113 shipped with none). Only
+	/// reachable on a non-null <c>folderId</c> assign -- unassigning (<c>folderId: null</c>)
+	/// never needs the item to exist, since it only ever deletes a row that may or may
+	/// not be there.
+	/// </summary>
+	ItemNotFound,
 }

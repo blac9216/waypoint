@@ -468,6 +468,13 @@ public static class ServiceCollectionExtensions
 			// grant exists (this repo's #556 grant-hygiene convention; see the
 			// migration's own header).
 			services.AddSingleton<IContentLibraryFolderRepository>(new ContentLibraryFolderRepository(connectionString));
+			// Issue #1396: the durable item identity table (migration 0133, epic
+			// #1185) and the operation layer that delegates every mutation through
+			// IContentLibraryWriter above so its atomicity/version guarantees hold
+			// end to end. Owner connection string, same no-runner-grant posture as
+			// the registry/folder tables (this repo's #556 convention).
+			services.AddSingleton<IContentLibraryItemRepository>(new ContentLibraryItemRepository(connectionString));
+			services.AddSingleton<IContentLibraryItemService, ContentLibraryItemService>();
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
