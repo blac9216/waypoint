@@ -179,6 +179,53 @@ public sealed class ContentLibraryFolderRepositoryTests : IAsyncLifetime
 		Assert.Null(updated.ParentFolderId);
 	}
 
+	/// <summary>
+	/// F1 (round 2): the same race class N1 (round 1) fixed on <c>AssignItemAsync</c>,
+	/// symmetric here. This test holds the folder row locked in a second
+	/// connection/transaction -- exactly the lock <c>DeleteAsync</c> takes -- proves
+	/// <c>UpdateAsync</c> blocks behind it, then deletes the folder and commits. Before
+	/// the fix, <c>UpdateAsync</c> read the folder's library_id with a plain SELECT
+	/// before taking any lock, so a concurrent delete committed in that window left the
+	/// folder absent from the locked sibling scope with nothing re-checking that the
+	/// UPDATE itself still had a row to touch -- it silently affected zero rows and
+	/// still returned <c>Updated</c>. This must resolve to <c>NotFound</c> instead.
+	/// </summary>
+	[Fact]
+	public async Task UpdateAsync_ConcurrentWithDeleteOfTheSameFolder_ResolvesToNotFoundWithoutFalseSuccess()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-update-race");
+		(_, ContentLibraryFolder? folder) = await _folders.CreateAsync(libraryId, null, "Race", CancellationToken.None);
+
+		await using NpgsqlConnection lockConnection = new(_fixture.ConnectionString);
+		await lockConnection.OpenAsync();
+		await using NpgsqlTransaction lockTransaction = await lockConnection.BeginTransactionAsync();
+		await using (NpgsqlCommand lockCommand = new(
+			"SELECT 1 FROM content_library_folders WHERE id = $1 FOR UPDATE", lockConnection, lockTransaction))
+		{
+			lockCommand.Parameters.AddWithValue(folder!.Id);
+			await lockCommand.ExecuteScalarAsync();
+		}
+
+		Task<ContentLibraryFolderUpdateOutcome> updateTask =
+			_folders.UpdateAsync(folder.Id, "Renamed", null, CancellationToken.None);
+
+		// UpdateAsync must be blocked behind the held row lock, not racing ahead.
+		Task firstToComplete = await Task.WhenAny(updateTask, Task.Delay(TimeSpan.FromMilliseconds(500)));
+		Assert.NotSame(updateTask, firstToComplete);
+
+		await using (NpgsqlCommand deleteCommand = new(
+			"DELETE FROM content_library_folders WHERE id = $1", lockConnection, lockTransaction))
+		{
+			deleteCommand.Parameters.AddWithValue(folder.Id);
+			await deleteCommand.ExecuteNonQueryAsync();
+		}
+
+		await lockTransaction.CommitAsync();
+
+		ContentLibraryFolderUpdateOutcome outcome = await updateTask;
+		Assert.Equal(ContentLibraryFolderUpdateOutcome.NotFound, outcome);
+	}
+
 	[Fact]
 	public async Task DeleteAsync_RejectsAFolderWithAChildFolder()
 	{

@@ -232,7 +232,18 @@ public sealed class ContentLibraryFolderRepository : IContentLibraryFolderReposi
 
 		try
 		{
-			await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			// F1 (round 2): the initial SELECT above (no FOR UPDATE) can be stale by the
+			// time LockLibraryFoldersAsync's FOR UPDATE re-evaluates the library's rows --
+			// a concurrent DeleteAsync can hold and release the target row's lock in
+			// between, committing its DELETE, so folderId is silently absent from
+			// siblingScope and this UPDATE affects zero rows. Trust the affected-row
+			// count rather than assuming the row is still there.
+			int affected = await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			if (affected == 0)
+			{
+				return ContentLibraryFolderUpdateOutcome.NotFound;
+			}
+
 			await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 			return ContentLibraryFolderUpdateOutcome.Updated;
 		}
