@@ -527,11 +527,12 @@ public sealed class SchemaMigrationTests
 	/// table, so it carries the caller-supplied Guid identity
 	/// <c>Waypoint.Core.ContentLibraries.ContentLibraryItemWrite.Id</c> already
 	/// establishes, pending #1396). No new runner grants (this repo's #556
-	/// grant-hygiene convention, 0090 precedent): every read/write is Admin/Viewer
-	/// API-side via <c>ContentLibraryFoldersController</c>, proven both directions by
-	/// <c>RunnerRoleGrantDriftTests</c> --
+	/// grant-hygiene convention, 0090 precedent): folder create/rename-move and item
+	/// assignment are Operator+ API-side, folder delete is Admin, reads are Viewer+,
+	/// all via <c>ContentLibraryFoldersController</c>; no runner ever gets a grant on
+	/// either table, proven both directions by <c>RunnerRoleGrantDriftTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 92;
+	private const int ExpectedMigrationCount = 93;
 
 	private readonly PostgresFixture _fixture;
 

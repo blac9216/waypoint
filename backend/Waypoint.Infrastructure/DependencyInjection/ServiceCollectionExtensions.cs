@@ -440,10 +440,11 @@ public static class ServiceCollectionExtensions
 			// one shared instance is safe.
 			services.AddSingleton<Waypoint.Core.ContentLibraries.IContentLibraryWriter, Waypoint.Infrastructure.ContentLibraries.VcspContentLibraryWriter>();
 			// Issue #1389: the DB-only virtual folder tree over a content library's
-			// items (migration 0113, epic #1185). Admin-only writes/Viewer+ reads run
-			// through the owner connection string (this repository) -- no runner grant
-			// exists (this repo's #556 grant-hygiene convention; see the migration's
-			// own header).
+			// items (migration 0113, epic #1185). Create/rename-move and item
+			// assignment run at Operator+, delete at Admin, reads at Viewer+, all
+			// through the owner connection string (this repository) -- no runner
+			// grant exists (this repo's #556 grant-hygiene convention; see the
+			// migration's own header).
 			services.AddSingleton<IContentLibraryFolderRepository>(new ContentLibraryFolderRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));

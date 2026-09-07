@@ -78,8 +78,9 @@ COMMENT ON TABLE content_library_item_folders IS
 
 -- Runner grants: deliberately NONE, same rationale and precedent as 0090's own
 -- no-grant posture for content_libraries (this repo's #556 grant-hygiene
--- convention): every read and write in this slice is Admin/Viewer API-side through
--- ContentLibraryFoldersController via the owner connection string. No runner process
+-- convention): folder create/rename-move and item assignment are Operator+ API-side,
+-- folder delete is Admin, reads are Viewer+, all through ContentLibraryFoldersController
+-- via the owner connection string. No runner process
 -- reads or writes either table today; a future runner-side consumer ships its own
 -- GRANT migration when it lands (0100/#1484, 0127/#1436 precedent). Proven both
 -- directions (both runner roles denied SELECT) by RunnerRoleGrantDriftTests, mirroring
