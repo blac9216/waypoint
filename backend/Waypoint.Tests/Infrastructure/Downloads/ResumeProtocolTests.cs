@@ -234,8 +234,20 @@ public sealed class ResumeProtocolTests
 		public void Dispose()
 		{
 			_cts.Cancel();
-			_listener.Stop();
-			_listener.Close();
+			try
+			{
+				_listener.Stop();
+				_listener.Close();
+			}
+			catch (HttpListenerException)
+			{
+				// Cleanup only -- the test's own assertions have already run by this
+				// point. Under heavy same-host contention (several full test-process
+				// runs sharing the ephemeral port range, see GetFreeTcpPort's own
+				// probe-then-bind comment) a stale prefix registration can make
+				// Close() throw "Address already in use"; that must never turn an
+				// otherwise-passing test's teardown into a reported failure.
+			}
 		}
 	}
 
