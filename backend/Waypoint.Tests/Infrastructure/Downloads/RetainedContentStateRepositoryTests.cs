@@ -212,6 +212,34 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1631: <c>RetainedContentStateTransitions.CanPin</c>'s own doc comment
+	/// promises re-pinning already-pinned content is an idempotent no-op, not a
+	/// throw -- <c>PinAsync</c> used to contradict that by throwing
+	/// <see cref="InvalidOperationException"/> whenever <c>CanPin</c> was false,
+	/// which it deliberately is for <c>pinned</c>.
+	/// </summary>
+	[Fact]
+	public async Task PinAsync_OnAlreadyPinnedContent_IsIdempotentAndPreservesOriginalMetadata()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-repin-idempotent");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.PinAsync(id, "operator-1", "original note", CancellationToken.None);
+		RetainedContentState? before = await _repository.GetAsync(id, CancellationToken.None);
+
+		// A repeat pin call from a different actor with a different note -- must not
+		// throw, and must not overwrite the original pin metadata.
+		await _repository.PinAsync(id, "operator-2", "a different note", CancellationToken.None);
+
+		RetainedContentState? after = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Pinned, after!.State);
+		Assert.Equal(before!.PinnedBy, after.PinnedBy);
+		Assert.Equal(before.PinnedAt, after.PinnedAt);
+		Assert.Equal(before.PinNote, after.PinNote);
+	}
+
+	/// <summary>
 	/// PR #1621 finding 4: <c>LoadForUpdateAsync</c> must take a real row lock so the
 	/// read-check-write in <see cref="RetainedContentStateRepository.TransitionAsync"/>
 	/// is atomic against a second concurrent caller doing the same thing (the future

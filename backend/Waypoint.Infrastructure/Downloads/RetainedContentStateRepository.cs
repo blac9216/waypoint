@@ -179,6 +179,19 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
 		RetainedContentState current = await LoadForUpdateAsync(connection, transaction, id, cancellationToken).ConfigureAwait(false);
+
+		if (string.Equals(current.State, RetainedContentStates.Pinned, StringComparison.Ordinal))
+		{
+			// Issue #1631: RetainedContentStateTransitions.CanPin's own doc comment
+			// says re-pinning already-pinned content is a no-op the caller should
+			// treat as idempotent, not a transition -- CanPin deliberately excludes
+			// 'pinned' from the legal-from set to express that. Honor the promise
+			// here: no write (the original pinned_by/pinned_at/pin_note survive
+			// untouched), no exception.
+			await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+			return;
+		}
+
 		if (!RetainedContentStateTransitions.CanPin(current.State))
 		{
 			throw new InvalidOperationException(
