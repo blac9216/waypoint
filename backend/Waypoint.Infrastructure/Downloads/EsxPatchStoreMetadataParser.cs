@@ -42,13 +42,19 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	private const string VibsEntryDirPrefix = "vibs/";
 
 	/// <summary>
-	/// The tool's download-time staging tree (issue #1164): a sibling of
+	/// The tool's download-time staging trees (issue #1164): siblings of
 	/// <c>hostupdate/</c> under the 9.1 patch-store root that this parser must never
-	/// walk into. It is not a valid vendor code, so a directory with this exact name
-	/// found while enumerating vendor directories is skipped and warned about rather
-	/// than treated as an empty/unknown vendor.
+	/// walk into. Neither is a valid vendor code, so a directory with either exact
+	/// name found while enumerating vendor directories is skipped and warned about
+	/// rather than treated as an empty/unknown vendor. Both names are guarded
+	/// symmetrically (issue #1642) so a <c>symlink-hostupdate</c> staging artifact
+	/// nested inside <c>hostupdate/</c> -- unusual nesting, exactly the case
+	/// <c>hardlink-hostupdate</c>'s guard already defends against -- cannot be
+	/// enumerated as a bogus vendor, matching <see cref="IEsxPatchStoreMetadataParser"/>'s
+	/// documented guarantee that both staging-artifact names are outside this
+	/// parser's walk.
 	/// </summary>
-	private const string StagingTreeDirName = "hardlink-hostupdate";
+	private static readonly string[] StagingTreeDirNames = ["hardlink-hostupdate", "symlink-hostupdate"];
 
 	private static readonly string[] Depot91RelativeSegments = ["PROD", "COMP", "ESX_HOST", "patch-store"];
 
@@ -84,6 +90,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 
 		List<string> warnings = [];
 		List<EsxPatchStoreVendorHealth> vendorHealth = [];
+		List<EsxPatchStoreUnresolvedReference> unresolvedReferences = [];
 		SortedSet<string> vendorCodes = new(StringComparer.Ordinal);
 		foreach (string indexVendorCode in ParseConsolidatedIndexVendorCodes(hostupdateRoot, warnings))
 		{
@@ -100,14 +107,14 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			// Never descend into the tool's own staging tree (#1164) -- it is not a
 			// vendor and re-walking it would double-count content that is also present
 			// under its real vendor directories once a download finalizes.
-			if (string.Equals(vendorCode, StagingTreeDirName, StringComparison.OrdinalIgnoreCase))
+			if (Array.Exists(StagingTreeDirNames, name => string.Equals(vendorCode, name, StringComparison.OrdinalIgnoreCase)))
 			{
 				warnings.Add($"Skipped '{vendorCode}' under '{hostupdateRoot}' -- it is the download tool's staging tree (#1164), not a vendor directory.");
 				continue;
 			}
 
 			vendorCodes.Add(vendorCode);
-			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings, vendorHealth);
+			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings, vendorHealth, unresolvedReferences);
 		}
 
 		EsxPatchStoreMetadata metadata = new(
@@ -118,7 +125,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			Bundles: bundles,
 			Warnings: warnings,
 			RootReadable: rootReadable,
-			VendorHealth: vendorHealth);
+			VendorHealth: vendorHealth,
+			UnresolvedReferences: unresolvedReferences);
 
 		return EsxPatchStoreParseResult.Ok(metadata);
 	}
@@ -206,7 +214,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// genuine absence and is precisely what missing-detection must still see.
 	/// </summary>
 	private static void ParseVendorMetadataIndex(
-		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
+		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth,
+		List<EsxPatchStoreUnresolvedReference> unresolvedReferences)
 	{
 		string indexPath = Path.Combine(vendorDir, ConsolidatedMetadataIndexFileName);
 		if (!File.Exists(indexPath))
@@ -258,6 +267,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			if (!File.Exists(zipPath))
 			{
 				warnings.Add($"Vendor '{vendorCode}': metadata zip '{fileName}' referenced by the index was not found on disk.");
+				unresolvedReferences.Add(new EsxPatchStoreUnresolvedReference(vendorCode, fileName));
 				continue;
 			}
 

@@ -111,6 +111,23 @@ public enum EsxPatchStoreVendorHealthKind
 public sealed record EsxPatchStoreVendorHealth(string VendorCode, EsxPatchStoreVendorHealthKind Kind);
 
 /// <summary>
+/// One metadata entry that names a zip which has never been found on disk (issue
+/// #1701) -- the parser's <c>!File.Exists(zipPath)</c> branch under
+/// <c>ParseVendorMetadataIndex</c>, structural counterpart to the "referenced by the
+/// index was not found on disk" warning it also emits at the same site. Distinct from
+/// <see cref="EsxPatchStoreVendorHealth"/>: this is not a read/parse failure (the
+/// vendor's own index parsed successfully) but genuine content absence -- content
+/// identity is the zip's own SHA-256, so a zip that has never been on disk has no
+/// content key of its own and can never enter <see cref="EsxPatchStoreMetadataBundle.ContentKey"/>-keyed
+/// "should exist" tracking. <c>EsxPatchStoreReconciler</c> opens a
+/// <c>Missing</c> discrepancy keyed on <c>VendorCode/FileName</c> (mirroring the
+/// orphan key shape) for each entry here, so content that is referenced but has never
+/// arrived is a first-class discrepancy record rather than only ephemeral
+/// <see cref="EsxPatchStoreMetadata.Warnings"/> prose.
+/// </summary>
+public sealed record EsxPatchStoreUnresolvedReference(string VendorCode, string FileName);
+
+/// <summary>
 /// The parsed content of one ESX patch store's <c>hostupdate/</c> tree: every vendor
 /// code the consolidated index (or, failing that, the directory listing) named, and
 /// every metadata bundle resolved under them, content-keyed per
@@ -138,7 +155,8 @@ public sealed record EsxPatchStoreMetadata(
 	IReadOnlyList<EsxPatchStoreMetadataBundle> Bundles,
 	IReadOnlyList<string> Warnings,
 	bool RootReadable,
-	IReadOnlyList<EsxPatchStoreVendorHealth> VendorHealth);
+	IReadOnlyList<EsxPatchStoreVendorHealth> VendorHealth,
+	IReadOnlyList<EsxPatchStoreUnresolvedReference> UnresolvedReferences);
 
 /// <summary>Outcome of <see cref="IEsxPatchStoreMetadataParser.Parse"/>.</summary>
 public sealed record EsxPatchStoreParseResult(bool Succeeded, EsxPatchStoreMetadata? Metadata, string? FailureReason)
