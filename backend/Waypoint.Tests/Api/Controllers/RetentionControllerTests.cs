@@ -508,4 +508,81 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 		using JsonDocument secondBody = JsonDocument.Parse(await secondPage.Content.ReadAsStringAsync());
 		Assert.Equal(5, secondBody.RootElement.GetArrayLength());
 	}
+
+	/// <summary>Issue #1786: the default (no ?state=) listing derives from the same closed set ListableStates validates against, not a second literal that can silently drift from it.</summary>
+	[Fact]
+	public async Task ListState_DefaultListing_CoversExactlyGraceAndPendingPurgeAndPinned()
+	{
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+
+		Guid graceArtifact = await InsertDepotArtifactAsync("default-listing/grace.iso");
+		Guid graceId = await TrackAsync(graceArtifact);
+		await states.TransitionAsync(graceId, RetainedContentStates.Grace, CancellationToken.None);
+
+		Guid pendingPurgeArtifact = await InsertDepotArtifactAsync("default-listing/pending-purge.iso");
+		Guid pendingPurgeId = await TrackAsync(pendingPurgeArtifact);
+		await states.TransitionAsync(pendingPurgeId, RetainedContentStates.Grace, CancellationToken.None);
+		await states.TransitionAsync(pendingPurgeId, RetainedContentStates.PendingPurge, CancellationToken.None);
+
+		Guid pinnedArtifact = await InsertDepotArtifactAsync("default-listing/pinned.iso");
+		Guid pinnedId = await TrackAsync(pinnedArtifact);
+		await states.PinAsync(pinnedId, "operator-1", null, CancellationToken.None);
+
+		Guid trackedArtifact = await InsertDepotArtifactAsync("default-listing/tracked.iso");
+		Guid trackedId = await TrackAsync(trackedArtifact); // NOT one of ListableStates -- must never appear
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state", "Viewer", null);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid[] ids = [.. body.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		Assert.Contains(graceId, ids);
+		Assert.Contains(pendingPurgeId, ids);
+		Assert.Contains(pinnedId, ids);
+		Assert.DoesNotContain(trackedId, ids);
+	}
+
+	/// <summary>Issue #1787 AC: rows sharing one created_at page deterministically -- two successive pages neither repeat nor drop a row.</summary>
+	[Fact]
+	public async Task ListState_RowsShareOneCreatedAt_PagingNeitherRepeatsNorDropsARow()
+	{
+		const int totalRows = 6;
+		List<Guid> stateIds = [];
+		for (int i = 0; i < totalRows; i++)
+		{
+			Guid artifactId = await InsertDepotArtifactAsync($"tie/artifact-{i:D2}.iso");
+			Guid stateId = await TrackAsync(artifactId);
+			RetainedContentStateRepository states = new(_fixture.ConnectionString);
+			await states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+			stateIds.Add(stateId);
+		}
+
+		// Force every row to share exactly one created_at -- the collision this
+		// AC needs, which real concurrent inserts only produce rarely.
+		DateTimeOffset sharedCreatedAt = DateTimeOffset.UtcNow;
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand update = new(
+				"UPDATE download_retained_content_state SET created_at = $1 WHERE id = ANY($2)", connection);
+			update.Parameters.AddWithValue(sharedCreatedAt);
+			update.Parameters.AddWithValue(stateIds.ToArray());
+			await update.ExecuteNonQueryAsync();
+		}
+
+		HttpResponseMessage firstPage = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?limit=3&offset=0", "Viewer", null);
+		using JsonDocument firstBody = JsonDocument.Parse(await firstPage.Content.ReadAsStringAsync());
+		Guid[] firstIds = [.. firstBody.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		HttpResponseMessage secondPage = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?limit=3&offset=3", "Viewer", null);
+		using JsonDocument secondBody = JsonDocument.Parse(await secondPage.Content.ReadAsStringAsync());
+		Guid[] secondIds = [.. secondBody.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		Assert.Equal(3, firstIds.Length);
+		Assert.Equal(3, secondIds.Length);
+		Assert.Empty(firstIds.Intersect(secondIds)); // no repeat across pages
+		Assert.Equal(
+			stateIds.OrderBy(x => x).ToArray(),
+			firstIds.Concat(secondIds).OrderBy(x => x).ToArray()); // no drop -- the union is exactly the six rows
+	}
 }

@@ -102,7 +102,12 @@ public sealed class RetentionController : ControllerBase
 		string[] states;
 		if (string.IsNullOrWhiteSpace(state))
 		{
-			states = [RetainedContentStates.Grace, RetainedContentStates.PendingPurge, RetainedContentStates.Pinned];
+			// Issue #1786: derives the default listing from the SAME closed set
+			// ListableStates already declares for the ?state= validator below,
+			// instead of a second, independently-maintained literal array -- a
+			// mutation mistakenly deleting one entry from ListableStates alone
+			// used to leave this branch silently unaffected.
+			states = ListableStates;
 		}
 		else if (Array.IndexOf(ListableStates, state) >= 0)
 		{
@@ -119,7 +124,17 @@ public sealed class RetentionController : ControllerBase
 			all.AddRange(await _states.ListByStateAsync(candidate, cancellationToken).ConfigureAwait(false));
 		}
 
-		all.Sort((a, b) => a.CreatedAt.CompareTo(b.CreatedAt));
+		// Issue #1787: Id is a deterministic secondary sort key, breaking a
+		// CreatedAt tie -- List<T>.Sort is an unstable introsort, so without this
+		// two rows sharing one CreatedAt (rare but possible: created_at defaults to
+		// the per-transaction now(), and EnsureTrackedAsync opens its own
+		// connection per call) could swap order between two successive page reads,
+		// letting an in-memory-paged client see one twice or miss it entirely.
+		all.Sort((a, b) =>
+		{
+			int byCreatedAt = a.CreatedAt.CompareTo(b.CreatedAt);
+			return byCreatedAt != 0 ? byCreatedAt : a.Id.CompareTo(b.Id);
+		});
 
 		Response.Headers["X-Total-Count"] = all.Count.ToString(CultureInfo.InvariantCulture);
 		IEnumerable<RetainedContentState> pageItems = all.Skip(page.Offset).Take(page.Limit);
