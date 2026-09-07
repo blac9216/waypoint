@@ -581,7 +581,7 @@ public sealed class SchemaMigrationTests
 	/// job reads or writes either table yet; the first consumer that needs
 	/// runner-side access ships its own GRANT migration (0100/0107 precedent) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 94;
+	private const int ExpectedMigrationCount = 95;
 
 	private readonly PostgresFixture _fixture;
 
