@@ -147,7 +147,7 @@ public sealed class DownloadJobHandler : IJobHandler
 			downloadRateBps: null, etaSeconds: 0, failureReason: null, cancellationToken).ConfigureAwait(false);
 		await EmitProgressAsync(context, payload.DownloadId, DownloadStates.Verified, invocation.Size, invocation.Size, cancellationToken).ConfigureAwait(false);
 		await _artifacts.UpsertAsync(
-			new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "present", artifact.MetadataJson), cancellationToken).ConfigureAwait(false);
+			new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, DepotArtifactStatuses.Present, artifact.MetadataJson), cancellationToken).ConfigureAwait(false);
 
 		return JobExecutionOutcome.Succeeded($"Downloaded and verified '{artifact.ExternalId}' ({invocation.Size} bytes).");
 	}
@@ -259,7 +259,7 @@ public sealed class DownloadJobHandler : IJobHandler
 		if (artifact is not null)
 		{
 			await _artifacts.UpsertAsync(
-				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, "failed", artifact.MetadataJson), cancellationToken).ConfigureAwait(false);
+				new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, DepotArtifactStatuses.Failed, artifact.MetadataJson), cancellationToken).ConfigureAwait(false);
 		}
 	}
 

@@ -85,6 +85,42 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 		return (Guid)result!;
 	}
 
+	/// <summary>
+	/// The <c>NOT EXISTS</c> guard reads a statement-start snapshot under Postgres's
+	/// default READ COMMITTED isolation, not a locked/rechecked read: if a presence
+	/// sweep commits a row at <paramref name="toRelativePath"/> concurrently with this
+	/// UPDATE, the two can race, and this statement can still attempt (and fail with a
+	/// unique-key violation on <c>relative_path</c>) a rename onto an identity that
+	/// exists by the time it commits. This is distinct from the DOCUMENTED remainder
+	/// tracked at #1804 (the ordinary, non-concurrent case where the sweep already
+	/// created the TO row BEFORE this pull started -- that case correctly no-ops here,
+	/// verified in <see cref="DepotArtifactRepositoryTests"/>). The narrower
+	/// concurrent-commit race is timing-dependent, unobserved in production, and left
+	/// unfixed (a <c>FOR UPDATE</c>/advisory-lock closes it but adds
+	/// contention to every rekey for a window that has never been hit) -- recorded here
+	/// so a future unhandled-exception report from this call site is not a surprise.
+	/// </summary>
+	/// <inheritdoc/>
+	public async Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(fromRelativePath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(toRelativePath);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_artifacts
+			SET relative_path = $2
+			WHERE relative_path = $1
+			  AND NOT EXISTS (SELECT 1 FROM depot_artifacts WHERE relative_path = $2)
+			""", connection);
+		command.Parameters.AddWithValue(fromRelativePath);
+		command.Parameters.AddWithValue(toRelativePath);
+		int renamed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		return renamed > 0;
+	}
+
 	/// <inheritdoc/>
 	public async Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
 	{

@@ -52,7 +52,12 @@ function Get-FileManifest {
 	# matching how Get-FileManifest keys a real depot -- a bare-filename key here would
 	# let this fake pass against the pre-fix module's bare-filename lookup and hide
 	# round-2 finding 1's defect.
+	#
+	# Issue #1512: a second, deliberately unmatched manifest entry exercises the real
+	# module's UnknownFile emission path end-to-end (a file on disk matching no catalog
+	# entry) alongside the matched artifact above.
 	return [ordered]@{
-		'PROD/COMP/VCENTER/vcsa-patch.iso' = @{ Size = 100; Hash = 'AAAA' }
+		'PROD/COMP/VCENTER/vcsa-patch.iso'  = @{ Size = 100; Hash = 'AAAA' }
+		'PROD/COMP/VCENTER/orphan-file.iso' = @{ Size = 55; Hash = 'BBBB' }
 	}
 }

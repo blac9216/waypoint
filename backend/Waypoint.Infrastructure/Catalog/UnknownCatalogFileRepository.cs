@@ -47,6 +47,24 @@ public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 	/// there is deliberately no statement anywhere in this type that removes a row
 	/// (design decision Q11: alert instead of drop).
 	///
+	/// Issue #1613: this row is a "last seen" record, not an identity ledger, so
+	/// <c>size_bytes</c> is deliberately an unconditional
+	/// <c>EXCLUDED.size_bytes</c> overwrite on every re-touch -- including a caller
+	/// passing <c>sizeBytes: null</c>, which wipes a previously recorded size. This is
+	/// the opposite of <see cref="DepotArtifactRepository.UpsertAsync"/>'s
+	/// <c>COALESCE(EXCLUDED.x, depot_artifacts.x)</c> convention (that table's round-1
+	/// #1593 review fix), and deliberately so: a <c>depot_artifacts</c> row is the
+	/// catalog's own durable record of a known artifact, where a caller with no new
+	/// size (e.g. a "failed" upsert) must not silently null out a size a prior write
+	/// already established; an <c>unknown_catalog_files</c> row is nothing but "what did
+	/// the most recent sweep observe at this path" -- there is no other write path that
+	/// could regress it to a stale size the way a partial-information caller could on
+	/// the catalog table, so refreshing to the latest observation, unknown-size
+	/// included, is the more honest semantic here.
+	/// <see cref="UnknownCatalogFileRepositoryTests.RecordSeenAsync_ReTouchWithNullSize_WipesPreviouslyRecordedSize"/>
+	/// pins this overwrite behavior -- a re-touch with a null size wipes a
+	/// previously recorded one; it fails under a <c>COALESCE</c> rewrite.
+	///
 	/// Issue #1495 AC3: a genuinely new unknown file (not a re-touch of one already
 	/// on record) emits <see cref="JobEventTypes.SystemNotice"/> through the same
 	/// best-effort event sink <c>CatalogIndexJobHandler</c> uses for auth failures
@@ -82,7 +100,6 @@ public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 		Guid id = reader.GetGuid(0);
 		bool wasNewlyInserted = reader.GetBoolean(1);
-		await reader.DisposeAsync().ConfigureAwait(false);
 
 		if (wasNewlyInserted && _events is not null)
 		{

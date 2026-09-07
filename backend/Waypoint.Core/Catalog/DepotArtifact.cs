@@ -26,10 +26,14 @@ namespace Waypoint.Core.Catalog;
 /// column, kept under its original C# property name to avoid a mechanical rename
 /// across every read-side consumer -- schema and behavior are rekeyed to the
 /// catalog's own relative-path identity; the property that carries it is not. It is
-/// the depot-relative path both write paths now populate (CatalogIndexJobHandler's
-/// offline disk walk already wrote a relative path here; VendorProductVersionCatalogParser's
-/// connected pull, issue #687, writes the vendor catalog's bare filename -- true
-/// nested-path resolution for the connected side is presence-sweep behavior, #1503).
+/// the SAME depot-relative path every write path now populates (issue #1784):
+/// <c>CatalogIndexJobHandler</c>'s offline presence sweep and
+/// <see cref="VendorProductVersionCatalogParser"/>'s connected pull both resolve to
+/// <see cref="DepotRelativePaths.Resolve"/>'s <c>PROD/COMP/&lt;product&gt;/&lt;fileName&gt;</c>
+/// identity, converging on one row per real artifact -- prior to #1784 the connected
+/// pull wrote the vendor catalog's bare filename instead, and a stack that both
+/// pulled and swept reported every shared artifact twice under two different
+/// identities with contradictory statuses.
 /// <see cref="SizeBytes"/> and <see cref="LastVerifiedAt"/> are migration 0100's other
 /// new columns; <see cref="LastVerifiedAt"/> is left null by every upsert path in this
 /// slice (deciding when a row counts as freshly verified is presence-sweep behavior,
@@ -54,7 +58,8 @@ public sealed record DepotArtifact(
 /// #687). <see cref="RelativePath"/> is the depot's own stable catalog identity
 /// (migration 0100, issue #1488: renamed from a bare <c>ExternalId</c> string that
 /// silently stood in for two incompatible namespaces -- an offline disk-relative path
-/// and a connected-pull bare filename) and is the idempotency key: upserting the same
+/// and a connected-pull bare filename, unified onto the one depot-relative identity by
+/// issue #1784) and is the idempotency key: upserting the same
 /// path twice yields one row with the newer payload (issue #193 acceptance
 /// criterion). <see cref="SizeBytes"/> is the other half of the catalog identity pair
 /// #1488 calls for (relative path + size/hash, <see cref="Sha256"/> already existed);
@@ -106,6 +111,34 @@ public static class DepotArtifactStatuses
 
 	/// <summary>The subset the presence sweep itself can emit (<c>WaypointCatalogIndex.psm1</c>'s <c>ValidateSet</c>).</summary>
 	public static readonly IReadOnlyList<string> PresenceSweepEmitted = [Present, Missing];
+}
+
+/// <summary>
+/// Issue #1784: the single depot-relative identity-resolution rule both catalog
+/// writers must agree on. Before this fix, <see cref="VendorProductVersionCatalogParser"/>
+/// (connected pull) passed the vendor catalog's bare <c>fileName</c> as
+/// <see cref="DepotArtifactUpsert.RelativePath"/>, while <c>WaypointCatalogIndex.psm1</c>'s
+/// <c>Get-CatalogEntryDepotRelativePath</c> (offline presence sweep, #1503/#1512)
+/// resolved the SAME binary to <c>PROD/COMP/&lt;Product&gt;/&lt;fileName&gt;</c> --
+/// two different <c>depot_artifacts.relative_path</c> values for one real artifact, so
+/// a stack that both pulled and swept reported every shared artifact twice with
+/// contradictory statuses (live validation, issue #1784). <see cref="DepotRoot"/>/
+/// <see cref="ComponentBinariesDir"/> mirror the psm1's <c>$Script:DepotRoot</c>/
+/// <c>$Script:ComponentBinariesDir</c> module-scoped variables exactly --
+/// <c>DepotRelativePathsConstraintDriftTests</c> parses the psm1 source and asserts
+/// both stay equal, the same drift-guard convention <see cref="DepotArtifactStatuses"/>
+/// already established for the status vocabulary.
+/// </summary>
+public static class DepotRelativePaths
+{
+	public const string DepotRoot = "PROD";
+	public const string ComponentBinariesDir = "COMP";
+
+	/// <summary>
+	/// Resolves a catalog binary's depot-relative identity exactly as
+	/// <c>Get-CatalogEntryDepotRelativePath</c> does: <c>PROD/COMP/&lt;product&gt;/&lt;fileName&gt;</c>.
+	/// </summary>
+	public static string Resolve(string product, string fileName) => $"{DepotRoot}/{ComponentBinariesDir}/{product}/{fileName}";
 }
 
 /// <summary>

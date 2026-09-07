@@ -223,26 +223,38 @@ public sealed class CatalogPullJobHandler : IJobHandler
 				return await RecordFailureAsync(false, $"Authenticated vendor catalog is malformed: {exception.Message}", cancellationToken).ConfigureAwait(false);
 			}
 
-			// Atomic promotion: the authenticated staged catalog replaces the prior
-			// on-disk one via a same-volume file rename, so a reader of the depot
-			// share never observes a partially written catalog and a failure before
-			// this point leaves the prior-good file untouched (issue #687 AC).
-			string activeCatalogPath = ResolveConfigured(catalogOptions.DepotPath, toolOptions.ProductVersionCatalogPath);
-			try
-			{
-				Directory.CreateDirectory(Path.GetDirectoryName(activeCatalogPath)!);
-				File.Copy(stagedCatalogPath, activeCatalogPath + ".tmp", overwrite: true);
-				File.Move(activeCatalogPath + ".tmp", activeCatalogPath, overwrite: true);
-			}
-			catch (IOException exception)
-			{
-				return await RecordFailureAsync(false, $"Authenticated catalog could not be promoted: {exception.Message}", cancellationToken).ConfigureAwait(false);
-			}
-
+			// Issue #764: index depot_artifacts and record catalog_pull_state success
+			// BEFORE promoting the on-disk catalog, not after. The prior order promoted
+			// first -- a crash between promotion and the index/state write left a NEW
+			// on-disk catalog but STALE depot_artifacts rows and STALE
+			// catalog_pull_state.last_success_* facts, disagreeing with what a reader
+			// could see on disk. Promotion is the cheap, replayable step (a same-volume
+			// rename over the already-authenticated staged file), so it moves last: a
+			// crash before it completes leaves the prior on-disk catalog untouched
+			// (still self-healing, same as before -- the next successful pull re-parses,
+			// re-indexes, and re-promotes from scratch) while the facts this handler
+			// records about what it fetched are never ahead of what it wrote to disk.
 			int upserted = 0;
 			foreach (DepotArtifactUpsert upsert in parsed)
 			{
+				// Issue #1784 reconciliation: prior to #1784, this parser identified a
+				// binary by its bare fileName (the trailing segment of the NEW
+				// depot-relative identity below); a pre-#1784 pull may have left a row
+				// under that legacy identity. RekeyAsync (never a delete -- design #16
+				// section 2's never-auto-remove policy) renames that legacy row onto the
+				// new identity in place BEFORE the upsert below, so the upsert always has
+				// a row to freshen either way -- self-healing the duplicate on the very
+				// next connected pull without a migration or a one-time backfill, for
+				// every artifact the presence sweep has not already indexed under the new
+				// identity first (the documented remainder: see RekeyAsync's doc comment).
+				string legacyIdentity = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
+				if (!string.Equals(legacyIdentity, upsert.RelativePath, StringComparison.Ordinal))
+				{
+					await _artifacts.RekeyAsync(legacyIdentity, upsert.RelativePath, cancellationToken).ConfigureAwait(false);
+				}
+
 				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
+
 				upserted++;
 				if (upserted % 25 == 0)
 				{
@@ -251,6 +263,35 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			}
 
 			await _pullState.RecordSuccessAsync(upserted, cancellationToken).ConfigureAwait(false);
+			await EmitProgressAsync(context, $"Indexed {upserted} artifact(s); promoting catalog.", cancellationToken).ConfigureAwait(false);
+
+			// Atomic promotion: the authenticated staged catalog replaces the prior
+			// on-disk one via a same-volume file rename, so a reader of the depot
+			// share never observes a partially written catalog. A failure here no
+			// longer leaves index/state ahead of a stale on-disk file the way the
+			// pre-#764 promote-first order could -- the freshly indexed/recorded facts
+			// above already describe what was just fetched and authenticated, and the
+			// on-disk catalog simply has not caught up to them yet (self-healing on the
+			// next successful pull, same as issue #687's original AC).
+			string activeCatalogPath = ResolveConfigured(catalogOptions.DepotPath, toolOptions.ProductVersionCatalogPath);
+			try
+			{
+				Directory.CreateDirectory(Path.GetDirectoryName(activeCatalogPath)!);
+				File.Copy(stagedCatalogPath, activeCatalogPath + ".tmp", overwrite: true);
+				File.Move(activeCatalogPath + ".tmp", activeCatalogPath, overwrite: true);
+			}
+			catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+			{
+				// UnauthorizedAccessException alongside IOException: on Linux a promotion
+				// target that is unwritable (a permission error, or -- the crash-window
+				// test's own probe -- a path component that is unexpectedly a directory)
+				// surfaces as UnauthorizedAccessException, not IOException, so both must
+				// be caught here for the #764 reorder's "index/state already recorded,
+				// only the on-disk promotion failed" outcome to actually be reachable
+				// rather than an unhandled exception escaping the handler.
+				return JobExecutionOutcome.Failed(_redactor.Redact($"Indexed {upserted} artifact(s), but the authenticated catalog could not be promoted: {exception.Message}"));
+			}
+
 			await EmitProgressAsync(context, $"Pull complete: indexed {upserted} artifact(s).", cancellationToken).ConfigureAwait(false);
 			return JobExecutionOutcome.Succeeded($"Pulled and indexed {upserted} artifact(s) from the authenticated vendor catalog.");
 		}
