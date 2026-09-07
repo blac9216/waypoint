@@ -227,6 +227,17 @@ public sealed class EndpointRoleMatrixTests
 		["EsxAcquisitionController.CreateSubscription"] = WaypointRole.Admin,
 		["EsxAcquisitionController.UpdateSubscription"] = WaypointRole.Admin,
 
+		// ConsumerViewsController -- issue #1464, epic #1183. Decision R2-10 puts
+		// "serving/auth dials" at Admin; unlike EsxAcquisitionController's
+		// Viewer-readable subscriptions, EVERY verb here (including read) is
+		// Admin-only -- matches RepoCredentialsController's own stricter-than-usual
+		// read floor.
+		["ConsumerViewsController.List"] = WaypointRole.Admin,
+		["ConsumerViewsController.Get"] = WaypointRole.Admin,
+		["ConsumerViewsController.Create"] = WaypointRole.Admin,
+		["ConsumerViewsController.Update"] = WaypointRole.Admin,
+		["ConsumerViewsController.Delete"] = WaypointRole.Admin,
+
 		// ManagedToolController -- issue #39, ADR-0015 install paths. Same Operator+
 		// floor as DownloadsController.QueueDownloads (a write that starts real work);
 		// install history read is Viewer+, matching ListDownloads/GetReadiness.

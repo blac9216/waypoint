@@ -318,6 +318,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.Downloads.IEsxAcquisitionSubscriptionRepository>(
 				new Downloads.EsxAcquisitionSubscriptionRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IManagedToolInstallRepository>(new Downloads.ManagedToolInstallRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Downloads.IConsumerViewRepository>(new Downloads.ConsumerViewRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IDepotEnrollmentRepository>(new Downloads.DepotEnrollmentRepository(connectionString));
 
