@@ -58,7 +58,15 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	/// #1783) uses the identical <c>COALESCE(EXCLUDED.bundle_id, ...)</c> pattern: a
 	/// present/failed verification upsert (<c>DownloadJobHandler</c>/
 	/// <c>BinariesDownloadJobHandler</c>) never carries a bundle id and must not null
-	/// out one a prior connected pull already recorded.
+	/// out one a prior connected pull already recorded. Bound on the resulting
+	/// staleness: if the vendor reassigns/retires a bundle id between catalog pulls,
+	/// this COALESCE keeps the row's PRIOR bundle_id until the next connected pull
+	/// re-syncs it (a present/failed verification upsert never supplies a fresher one
+	/// to overwrite it with) -- that stale id is never silently accepted as still valid,
+	/// though: <c>BinariesDownloadTool.TryDetectEmptySelectionFailure</c> (issue #1783)
+	/// reports the real tool's own "0 elements" empty-selection table as an honest,
+	/// actionable failure naming the id, so a job queued against a stale bundle_id
+	/// fails loudly rather than resolving nothing and reporting silent success.
 	/// </summary>
 	public async Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken)
 	{
