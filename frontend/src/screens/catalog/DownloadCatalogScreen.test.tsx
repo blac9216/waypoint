@@ -947,6 +947,31 @@ describe("DownloadCatalogScreen", () => {
 		});
 	});
 
+	it("issue #1792 F4: unmounting mid-walk aborts the in-flight request", async () => {
+		installFetchMock("Operator");
+		const view = render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("VCF-Installer-5.2.1.iso")).toBeInTheDocument());
+
+		const { signals } = installDeferredArtifactsFetchMock();
+
+		fireEvent.change(screen.getByLabelText("Filter by product"), { target: { value: "VCF Installer" } });
+		await waitFor(() => expect(signals.length).toBe(1));
+		expect(signals[0].aborted).toBe(false);
+
+		// Before the fix, the load effect returned no cleanup: only the
+		// *next* `load` call aborted the previous walk, never unmount — this
+		// asserts the signal is aborted purely by unmounting.
+		view.unmount();
+
+		expect(signals[0].aborted).toBe(true);
+	});
+
 	it("issue #1592: changing only the search filter issues no additional catalog fetches", async () => {
 		installFetchMock("Operator");
 		await mount();

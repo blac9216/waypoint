@@ -54,7 +54,8 @@ function statusLabel(artifact: CatalogArtifact, live: DownloadQueueItem | undefi
 	// comes from the live SSE overlay above — so this switches on
 	// `displayStatus`, the UI-only rendering vocabulary catalog.ts derives
 	// from it, rather than on the raw wire value.
-	switch (displayStatus(artifact.status)) {
+	const display = displayStatus(artifact.status);
+	switch (display) {
 		case "downloading":
 			return { text: `downloading ${artifact.progress_percent ?? 0}%`, tone: "acc" };
 		case "verified":
@@ -63,8 +64,14 @@ function statusLabel(artifact: CatalogArtifact, live: DownloadQueueItem | undefi
 			return { text: `failed — ${artifact.failure_reason ?? "checksum mismatch"}`, tone: "bad" };
 		case "missing":
 			return { text: "missing", tone: "bad" };
-		default:
+		case "not_downloaded":
 			return { text: "not downloaded", tone: "txt3" };
+		default:
+			// Issue #1792 F2: `displayStatus` returns `null` for a wire status
+			// outside `ArtifactStatus` (backend drift this table has no other
+			// way to detect) — surface the raw value rather than silently
+			// mislabeling it as "not downloaded", the opposite of the truth.
+			return { text: artifact.status, tone: "txt3" };
 	}
 }
 

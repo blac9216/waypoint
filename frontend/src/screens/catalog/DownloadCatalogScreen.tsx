@@ -18,6 +18,8 @@ import type { WaypointEvent } from "../../lib/events";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import { useSystem } from "../../lib/system-context";
 import {
+	DISPLAY_STATUS_LABELS,
+	displayStatus,
 	fetchCatalogArtifacts,
 	filterArtifactsBySearch,
 	formatEta,
@@ -50,16 +52,19 @@ const TYPE_OPTIONS: { value: ProductType | ""; label: string }[] = [
 // Issue #1768: values are the backend's own `DepotArtifactStatuses.All`
 // vocabulary (`indexed`/`downloading`/`present`/`failed`/`missing`) — this
 // filter binds server-side (`ListArtifacts`'s `status` query parameter), so
-// every value offered here must be one the API actually accepts. Labels use
-// `displayStatus` so the operator-facing copy stays the same friendly text
-// the table renders, without the dropdown's own values drifting from it.
+// every value offered here must be one the API actually accepts, in this
+// order. Labels are derived through `displayStatus`/`DISPLAY_STATUS_LABELS`
+// (review round 1 finding F1 — a prior version of this comment claimed
+// that already, while the labels underneath were still hand-written
+// literals that could drift from the table's own copy) so the dropdown's
+// text can never drift from `ArtifactTable`'s.
+const STATUS_ORDER: ArtifactStatus[] = ["indexed", "downloading", "present", "failed", "missing"];
 const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	{ value: "", label: "Any status" },
-	{ value: "indexed", label: "Not downloaded" },
-	{ value: "downloading", label: "Downloading" },
-	{ value: "present", label: "Verified" },
-	{ value: "failed", label: "Failed" },
-	{ value: "missing", label: "Missing" },
+	...STATUS_ORDER.map((value) => ({
+		value,
+		label: DISPLAY_STATUS_LABELS[displayStatus(value) ?? "not_downloaded"],
+	})),
 ];
 
 // Run-level terminal states (docs/api-contract.md's `run.progress` `state`
@@ -208,6 +213,16 @@ export function DownloadCatalogScreen() {
 			version: version || undefined,
 			status: status || undefined,
 		});
+		// Review round 1 finding F4: without this cleanup, the walk started
+		// above is aborted only by the *next* `load` call, never by unmount —
+		// navigating away mid-walk left up to six serial page requests in
+		// flight, each still calling `setArtifacts`/`setIndexSyncedAt` on an
+		// unmounted component when they resolved. Abort whatever `load` most
+		// recently started so unmount cancels it the same way a superseded
+		// `load` call already does.
+		return () => {
+			loadAbortRef.current?.abort();
+		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [product, version, status, load]);
 

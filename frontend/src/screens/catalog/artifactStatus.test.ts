@@ -87,4 +87,8 @@ describe("ArtifactStatus (backend DepotArtifactStatuses.All parity, parsed from 
 			expect(() => displayStatus(status as ArtifactStatus)).not.toThrow();
 		}
 	});
+
+	it("issue #1792 F2: displayStatus returns null (not a silent 'not_downloaded' mislabel) for a status outside ArtifactStatus", () => {
+		expect(displayStatus("archived" as ArtifactStatus)).toBeNull();
+	});
 });

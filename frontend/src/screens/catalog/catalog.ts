@@ -37,7 +37,31 @@ export type ArtifactStatus = "indexed" | "downloading" | "present" | "failed" | 
  */
 export type DisplayStatus = "not_downloaded" | "downloading" | "verified" | "failed" | "missing";
 
-export function displayStatus(status: ArtifactStatus): DisplayStatus {
+/** Operator-facing label for each `DisplayStatus` — the single source both
+ * `ArtifactTable`'s status cell and `DownloadCatalogScreen`'s status filter
+ * dropdown derive their copy from, so the two can never drift from each
+ * other the way the dropdown's hand-written labels once could (review
+ * round 1 finding F1). */
+export const DISPLAY_STATUS_LABELS: Record<DisplayStatus, string> = {
+	not_downloaded: "Not downloaded",
+	downloading: "Downloading",
+	verified: "Verified",
+	failed: "Failed",
+	missing: "Missing",
+};
+
+/**
+ * `status` arrives from `apiGetPaged` as an unvalidated wire string, typed
+ * `ArtifactStatus` only by assertion — a value outside the closed union
+ * (backend drift `artifactStatus.test.ts`'s guard hasn't caught, or simply
+ * a response older than that guard) still reaches here at runtime even
+ * though the switch below is exhaustive over the *type*. Returning `null`
+ * for that case (rather than falling through to `undefined`) lets callers
+ * render the raw wire value instead of silently mislabeling an unknown
+ * status as its opposite — `ArtifactTable.tsx`'s previous `not downloaded`
+ * fallback, which review round 1 finding F2 flagged as exactly that trap.
+ */
+export function displayStatus(status: ArtifactStatus): DisplayStatus | null {
 	switch (status) {
 		case "indexed":
 			return "not_downloaded";
@@ -47,6 +71,8 @@ export function displayStatus(status: ArtifactStatus): DisplayStatus {
 		case "failed":
 		case "missing":
 			return status;
+		default:
+			return null;
 	}
 }
 
@@ -196,8 +222,15 @@ export interface CatalogArtifactsResponse {
 	index_synced_at: string | null;
 }
 
+/**
+ * Issue #1792 F6: `search` is deliberately absent — `fetchCatalogArtifacts`
+ * below has never bound it to a server query parameter (`ListArtifacts`
+ * doesn't read one), so keeping it in this type let a future caller pass
+ * `{ search: "x" }` and get an unfiltered result with no type error to warn
+ * them. `filterArtifactsBySearch` below is the only supported way to apply
+ * a search term, over the already-walked superset this fetches.
+ */
 export interface CatalogArtifactsQuery {
-	search?: string;
 	product?: string;
 	version?: string;
 	status?: ArtifactStatus;
