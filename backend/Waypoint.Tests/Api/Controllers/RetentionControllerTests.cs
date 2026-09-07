@@ -600,8 +600,8 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 		// comparator RetentionController.ListState applies -- and, on this data
 		// set, equivalent to Postgres's own uuid byte ordering, per the round-1
 		// Fixes Applied comment's probe) is the only thing that determines this
-		// order, so this goes red the moment either tiebreak (the SQL
-		// "ORDER BY created_at, id" or this in-memory comparator) is removed --
+		// order, so this goes red when that in-memory comparator is removed (the
+		// SQL tiebreak is covered by the repository test, not observable here) --
 		// Assert.Empty(...Intersect...) above cannot detect that because it is a
 		// set operation, and comparing two independently-sorted sides never
 		// examines the order either side actually produced.
