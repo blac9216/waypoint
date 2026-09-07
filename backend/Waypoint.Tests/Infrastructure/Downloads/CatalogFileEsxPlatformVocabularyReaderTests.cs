@@ -84,8 +84,11 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 	}
 
 	[Fact]
-	public async Task GetSupportedPlatformsAsync_ReadsTheVocabularyKey_FreshOnEveryCall_NotHardcoded()
+	public async Task GetSupportedPlatformsAsync_MutatingTheDocument_ReflectedOnTheVeryNextCall_NotHardcoded()
 	{
+		// Issue #1470 AC, still proven with the issue #1603 cache in place: the
+		// mutated document has a different length, so it always misses the
+		// last-write-time/length cache key and is re-parsed.
 		string documentPath = Path.Combine(_tempDirectory, "productVersionCatalog.json");
 		await File.WriteAllTextAsync(documentPath, """{ "lcm.esx.supported.host.platforms": ["esx-8.0-standard"] }""");
 		CatalogFileEsxPlatformVocabularyReader reader = CreateReader(documentPath);
@@ -100,6 +103,51 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 
 		IReadOnlyList<string> after = await reader.GetSupportedPlatformsAsync(CancellationToken.None);
 		Assert.Equal(["esx-8.0-standard", "esx-8.0-hpe", "esx-8.0-dell"], after);
+	}
+
+	/// <summary>
+	/// Issue #1603: an unchanged document (same last-write time and length) is not
+	/// re-parsed on the second call -- proved by making the document unreadable
+	/// AFTER the first successful call, with its mtime/length otherwise untouched,
+	/// and observing the second call still return the cached values rather than
+	/// degrading to empty (which is what would happen if it attempted a fresh read).
+	/// Skipped when the test process runs as root (root reads through a mode that
+	/// denies every other user, so this precondition cannot be constructed).
+	/// </summary>
+	[Fact]
+	public async Task GetSupportedPlatformsAsync_UnchangedDocument_IsNotReReadOnTheSecondCall()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		if (IsRoot())
+		{
+			return;
+		}
+
+		string documentPath = Path.Combine(_tempDirectory, "productVersionCatalog.json");
+		await File.WriteAllTextAsync(documentPath, """{ "lcm.esx.supported.host.platforms": ["esx-8.0-standard"] }""");
+		CatalogFileEsxPlatformVocabularyReader reader = CreateReader(documentPath);
+
+		IReadOnlyList<string> before = await reader.GetSupportedPlatformsAsync(CancellationToken.None);
+		Assert.Equal(["esx-8.0-standard"], before);
+
+		File.SetUnixFileMode(documentPath, UnixFileMode.None);
+		try
+		{
+			IReadOnlyList<string> after = await reader.GetSupportedPlatformsAsync(CancellationToken.None);
+
+			// If the cache were bypassed, this read would fail (permission denied)
+			// and degrade to empty -- getting the same values back proves the second
+			// call never touched the file's content.
+			Assert.Equal(["esx-8.0-standard"], after);
+		}
+		finally
+		{
+			File.SetUnixFileMode(documentPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+		}
 	}
 
 	[Fact]

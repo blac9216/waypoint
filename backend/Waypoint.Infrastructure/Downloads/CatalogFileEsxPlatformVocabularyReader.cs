@@ -24,13 +24,24 @@ namespace Waypoint.Infrastructure.Downloads;
 /// array key on <see cref="EsxAcquisitionOptions.VocabularyDocumentPath"/> -- the
 /// same already-authenticated vendor catalog document
 /// <c>VendorProductVersionCatalogParser</c> flattens for depot artifact indexing.
-/// Reads the file fresh on every call (never cached), which is what lets a test
-/// mutate the on-disk document and observe the very next call reflect it (issue
-/// #1470 AC: "no hardcoding"). Never throws on an unavailable/unreadable/malformed
-/// document -- every degrade path returns an empty list and logs a WARNING naming the
-/// reason (issue #1602), so an operator-visible symptom (an empty platforms list, or
-/// every write carrying a platform key rejected as "not in the current vendor
-/// vocabulary") has a server-side explanation.
+/// Never throws on an unavailable/unreadable/malformed document -- every degrade path
+/// returns an empty list and logs a WARNING naming the reason (issue #1602), so an
+/// operator-visible symptom (an empty platforms list, or every write carrying a
+/// platform key rejected as "not in the current vendor vocabulary") has a
+/// server-side explanation.
+///
+/// <para>
+/// Issue #1603: a successful parse is cached, keyed on the document's last-write time
+/// and length -- cheap `stat`-level metadata, not a hash -- so an unchanged document is
+/// parsed at most once per (path, mtime, length) tuple rather than on every call. A
+/// changed document (different mtime or length) always misses the cache and is
+/// re-parsed, which is what still lets a test mutate the on-disk document and observe
+/// the very next call reflect it (issue #1470 AC: "no hardcoding") -- the two mtime/
+/// length values are exceedingly unlikely to collide across a real edit, and this is
+/// advisory admin-facing vocabulary input, not a security boundary. A failed read or
+/// parse is never cached, so a transient problem (permission fixed, document rewritten
+/// correctly) is retried on the very next call rather than sticking.
+/// </para>
 /// </summary>
 public sealed partial class CatalogFileEsxPlatformVocabularyReader : IEsxPlatformVocabularyReader
 {
@@ -38,6 +49,7 @@ public sealed partial class CatalogFileEsxPlatformVocabularyReader : IEsxPlatfor
 
 	private readonly IOptions<EsxAcquisitionOptions> _options;
 	private readonly ILogger<CatalogFileEsxPlatformVocabularyReader> _logger;
+	private CacheEntry? _cache;
 
 	public CatalogFileEsxPlatformVocabularyReader(
 		IOptions<EsxAcquisitionOptions> options,
@@ -58,10 +70,20 @@ public sealed partial class CatalogFileEsxPlatformVocabularyReader : IEsxPlatfor
 			return [];
 		}
 
-		if (!File.Exists(path))
+		FileInfo fileInfo = new(path);
+		if (!fileInfo.Exists)
 		{
 			LogDocumentAbsent(path);
 			return [];
+		}
+
+		CacheEntry? cached = _cache;
+		if (cached is not null
+			&& string.Equals(cached.Path, path, StringComparison.Ordinal)
+			&& cached.LastWriteTimeUtc == fileInfo.LastWriteTimeUtc
+			&& cached.Length == fileInfo.Length)
+		{
+			return cached.Platforms;
 		}
 
 		string json;
@@ -102,6 +124,7 @@ public sealed partial class CatalogFileEsxPlatformVocabularyReader : IEsxPlatfor
 				}
 			}
 
+			_cache = new CacheEntry(path, fileInfo.LastWriteTimeUtc, fileInfo.Length, values);
 			return values;
 		}
 		catch (JsonException exception)
@@ -113,6 +136,13 @@ public sealed partial class CatalogFileEsxPlatformVocabularyReader : IEsxPlatfor
 			return [];
 		}
 	}
+
+	/// <summary>
+	/// A benign data race is possible if two calls race the cache miss/parse/store
+	/// sequence concurrently (both parse, one's store wins) -- acceptable for this
+	/// advisory, read-mostly vocabulary; no lock is taken.
+	/// </summary>
+	private sealed record CacheEntry(string Path, DateTime LastWriteTimeUtc, long Length, IReadOnlyList<string> Platforms);
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "ESX platform vocabulary degraded to empty: EsxAcquisition:VocabularyDocumentPath is unset.")]
 	private partial void LogPathUnset();
