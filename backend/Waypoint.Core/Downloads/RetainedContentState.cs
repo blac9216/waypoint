@@ -44,6 +44,14 @@ public static class RetainedContentStates
 	public const string Pinned = "pinned";
 	public const string PendingPurge = "pending-purge";
 	public const string Purged = "purged";
+
+	/// <summary>
+	/// Issue #1686: the closed set in declaration order, mirroring every other
+	/// closed-vocabulary constants class in this repo (e.g. <c>OciBundleStatuses.All</c>)
+	/// -- what <c>ManualDownloadDialConstraintDriftTests</c> asserts against
+	/// <c>download_retained_content_state_state_check</c>'s own value order.
+	/// </summary>
+	public static readonly IReadOnlyCollection<string> All = [Tracked, Grace, Pinned, PendingPurge, Purged];
 }
 
 /// <summary>

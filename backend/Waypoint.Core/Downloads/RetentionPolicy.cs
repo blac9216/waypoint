@@ -45,4 +45,12 @@ public static class ManualDownloadDialOptions
 	public const string AutoPrune = "auto-prune";
 	public const string Keep = "keep";
 	public const string Review = "review";
+
+	/// <summary>
+	/// Issue #1686: the closed set in declaration order, mirroring every other
+	/// closed-vocabulary constants class in this repo (e.g. <c>OciBundleStatuses.All</c>)
+	/// -- what <c>ManualDownloadDialConstraintDriftTests</c> asserts against
+	/// <c>download_retention_policies_dial_check</c>'s own value order.
+	/// </summary>
+	public static readonly IReadOnlyCollection<string> All = [AutoPrune, Keep, Review];
 }
