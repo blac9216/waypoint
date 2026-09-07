@@ -18,8 +18,10 @@ namespace Waypoint.Core.Downloads;
 /// The grace-window auto-prune driver for <c>download_retained_content_state</c>
 /// (migration 0107, issue #1406) -- issue #1436, epic #1182. One implementation
 /// (<c>Waypoint.Infrastructure.Downloads.RetentionSweepService</c>), consumed by
-/// <c>Waypoint.Infrastructure.Execution.Downloads.RetentionSweepJobHandler</c> (the
-/// <c>retention-sweep</c> <c>waypoint_download_runner</c>-claimed job).
+/// <c>Waypoint.Infrastructure.Downloads.RetentionSweepJobHandler</c> (issue #1664:
+/// the handler lives in the <c>Waypoint.Infrastructure.Execution</c> project, but
+/// declares <c>namespace Waypoint.Infrastructure.Downloads;</c>) -- the
+/// <c>retention-sweep</c> <c>waypoint_download_runner</c>-claimed job.
 ///
 /// Candidate discovery is deliberately NOT this service's job: "identify
 /// superseded/out-of-window content within a subscription's scope" (this issue's own

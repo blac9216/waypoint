@@ -35,9 +35,16 @@ public interface IRetainedContentStateRepository
 	/// <c>updated_at</c> bump -- genuinely a no-op, not merely non-throwing). Passing
 	/// a non-null <paramref name="policyId"/> that differs from the existing row's is
 	/// an explicit adopt-the-new-value update, not silently discarded -- the row's
-	/// <c>policy_id</c> is overwritten and <c>updated_at</c> moves. This is the path
-	/// the future #1436 sweep uses when it re-evaluates an already-tracked artifact
-	/// against a freshly resolved policy.
+	/// <c>policy_id</c> is overwritten and <c>updated_at</c> moves. Issue #1664: this
+	/// is NOT the path <c>RetentionSweepService</c>'s landed sweep uses to
+	/// re-evaluate an already-tracked artifact against a freshly resolved policy --
+	/// migration 0127 grants <c>waypoint_download_runner</c> only <c>SELECT,
+	/// UPDATE</c> on this table (see <see cref="IRetentionSweepService"/>'s own doc
+	/// comment), so the runner-executed sweep can never call this INSERT; it skips
+	/// an untracked candidate instead. This method exists for the API-process caller
+	/// landed by #1453 (<c>Waypoint.Infrastructure.Downloads.ReviewListDeletionService</c>,
+	/// deleting an out-of-scope review-list entry) that first names an artifact as
+	/// retention-worthy.
 	/// </summary>
 	Task<Guid> EnsureTrackedAsync(Guid depotArtifactId, Guid? policyId, CancellationToken cancellationToken);
 

@@ -508,4 +508,105 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 		using JsonDocument secondBody = JsonDocument.Parse(await secondPage.Content.ReadAsStringAsync());
 		Assert.Equal(5, secondBody.RootElement.GetArrayLength());
 	}
+
+	/// <summary>Issue #1786: the default (no ?state=) listing derives from the same closed set ListableStates validates against, not a second literal that can silently drift from it.</summary>
+	[Fact]
+	public async Task ListState_DefaultListing_CoversExactlyGraceAndPendingPurgeAndPinned()
+	{
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+
+		Guid graceArtifact = await InsertDepotArtifactAsync("default-listing/grace.iso");
+		Guid graceId = await TrackAsync(graceArtifact);
+		await states.TransitionAsync(graceId, RetainedContentStates.Grace, CancellationToken.None);
+
+		Guid pendingPurgeArtifact = await InsertDepotArtifactAsync("default-listing/pending-purge.iso");
+		Guid pendingPurgeId = await TrackAsync(pendingPurgeArtifact);
+		await states.TransitionAsync(pendingPurgeId, RetainedContentStates.Grace, CancellationToken.None);
+		await states.TransitionAsync(pendingPurgeId, RetainedContentStates.PendingPurge, CancellationToken.None);
+
+		Guid pinnedArtifact = await InsertDepotArtifactAsync("default-listing/pinned.iso");
+		Guid pinnedId = await TrackAsync(pinnedArtifact);
+		await states.PinAsync(pinnedId, "operator-1", null, CancellationToken.None);
+
+		Guid trackedArtifact = await InsertDepotArtifactAsync("default-listing/tracked.iso");
+		Guid trackedId = await TrackAsync(trackedArtifact); // NOT one of ListableStates -- must never appear
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state", "Viewer", null);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid[] ids = [.. body.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		Assert.Contains(graceId, ids);
+		Assert.Contains(pendingPurgeId, ids);
+		Assert.Contains(pinnedId, ids);
+		Assert.DoesNotContain(trackedId, ids);
+	}
+
+	/// <summary>
+	/// Issue #1787 AC: rows sharing one created_at page deterministically -- two
+	/// successive pages neither repeat nor drop a row, in the exact sequence the
+	/// (created_at, id) total order dictates. 20 rows, not 6: below 17 elements
+	/// <c>List&lt;T&gt;.Sort</c> takes .NET's insertion-sort path, which happens to
+	/// be stable, so at 6 rows all sharing one created_at the pre-#1787 code (no
+	/// in-memory Id tiebreak) reproduces the SQL row order by accident and this
+	/// test cannot tell it apart from the fixed code -- confirmed by probe,
+	/// documented in the round-1 Fixes Applied comment. Above 16 elements the
+	/// introspective-sort path is not stable for tied keys, so a comparator that
+	/// ignores Id (mutation: <c>all.Sort((a, b) =&gt; a.CreatedAt.CompareTo(b.CreatedAt))</c>)
+	/// measurably reorders the page split.
+	/// </summary>
+	[Fact]
+	public async Task ListState_RowsShareOneCreatedAt_PagingNeitherRepeatsNorDropsARow()
+	{
+		const int totalRows = 20;
+		List<Guid> stateIds = [];
+		for (int i = 0; i < totalRows; i++)
+		{
+			Guid artifactId = await InsertDepotArtifactAsync($"tie/artifact-{i:D2}.iso");
+			Guid stateId = await TrackAsync(artifactId);
+			RetainedContentStateRepository states = new(_fixture.ConnectionString);
+			await states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+			stateIds.Add(stateId);
+		}
+
+		// Force every row to share exactly one created_at -- the collision this
+		// AC needs, which real concurrent inserts only produce rarely.
+		DateTimeOffset sharedCreatedAt = DateTimeOffset.UtcNow;
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand update = new(
+				"UPDATE download_retained_content_state SET created_at = $1 WHERE id = ANY($2)", connection);
+			update.Parameters.AddWithValue(sharedCreatedAt);
+			update.Parameters.AddWithValue(stateIds.ToArray());
+			await update.ExecuteNonQueryAsync();
+		}
+
+		HttpResponseMessage firstPage = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?limit=10&offset=0", "Viewer", null);
+		using JsonDocument firstBody = JsonDocument.Parse(await firstPage.Content.ReadAsStringAsync());
+		Guid[] firstIds = [.. firstBody.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		HttpResponseMessage secondPage = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state?limit=10&offset=10", "Viewer", null);
+		using JsonDocument secondBody = JsonDocument.Parse(await secondPage.Content.ReadAsStringAsync());
+		Guid[] secondIds = [.. secondBody.RootElement.EnumerateArray().Select(e => e.GetProperty("id").GetGuid())];
+
+		Assert.Equal(10, firstIds.Length);
+		Assert.Equal(10, secondIds.Length);
+		Assert.Empty(firstIds.Intersect(secondIds)); // no repeat across pages
+
+		// Assert the actual SEQUENCE the two pages concatenate to, not a
+		// sorted-both-sides set: with every row sharing one created_at, the
+		// controller's in-memory Id tiebreak (Comparer<Guid>.Default, the same
+		// comparator RetentionController.ListState applies -- and, on this data
+		// set, equivalent to Postgres's own uuid byte ordering, per the round-1
+		// Fixes Applied comment's probe) is the only thing that determines this
+		// order, so this goes red when that in-memory comparator is removed (the
+		// SQL tiebreak is covered by the repository test, not observable here) --
+		// Assert.Empty(...Intersect...) above cannot detect that because it is a
+		// set operation, and comparing two independently-sorted sides never
+		// examines the order either side actually produced.
+		Assert.Equal(
+			stateIds.OrderBy(x => x, Comparer<Guid>.Default).ToArray(),
+			firstIds.Concat(secondIds).ToArray()); // no drop, in the exact page order the controller emits
+	}
 }

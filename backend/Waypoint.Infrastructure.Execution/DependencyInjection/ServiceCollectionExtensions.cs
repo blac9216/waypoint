@@ -141,11 +141,16 @@ public static class ServiceCollectionExtensions
 
 		// Issue #1436 (epic #1182): the retention grace-window auto-prune driver over
 		// #1406's download_retained_content_state/download_retention_policies model.
-		// RetentionSweepService (Waypoint.Infrastructure.Downloads) is registered here,
-		// not in AddWaypointInfrastructure, because it is only ever consumed by this
-		// runner-side job handler -- unlike the repositories it depends on
-		// (IRetainedContentStateRepository/IRetentionPolicyRepository/IDepotArtifactRepository),
-		// which are control-plane-shared and registered by AddWaypointInfrastructure.
+		// RetentionSweepService (Waypoint.Infrastructure.Downloads) is ALSO registered
+		// here, for this runner-side scheduled-sweep job handler -- issue #1789: PR
+		// #1758 (#1453) additionally registered the same interface in
+		// AddWaypointInfrastructure, since the API process now consumes it too
+		// (RetentionController.PurgeNow, ReviewListDeletionService). A runner host
+		// calls both AddWaypointInfrastructure and this method against one shared
+		// container, so THIS registration -- being added last -- wins the resolve
+		// (Microsoft.Extensions.DependencyInjection's documented last-registration-
+		// wins rule for a single, non-IEnumerable resolve); the Infrastructure-side
+		// registration's own comment describes that resolution order accurately.
 		services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService, Waypoint.Infrastructure.Downloads.RetentionSweepService>();
 		services.AddSingleton<IJobHandler, Downloads.RetentionSweepJobHandler>();
 

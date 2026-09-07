@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Downloads;
@@ -212,6 +213,34 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1631: <c>RetainedContentStateTransitions.CanPin</c>'s own doc comment
+	/// promises re-pinning already-pinned content is an idempotent no-op, not a
+	/// throw -- <c>PinAsync</c> used to contradict that by throwing
+	/// <see cref="InvalidOperationException"/> whenever <c>CanPin</c> was false,
+	/// which it deliberately is for <c>pinned</c>.
+	/// </summary>
+	[Fact]
+	public async Task PinAsync_OnAlreadyPinnedContent_IsIdempotentAndPreservesOriginalMetadata()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-repin-idempotent");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.PinAsync(id, "operator-1", "original note", CancellationToken.None);
+		RetainedContentState? before = await _repository.GetAsync(id, CancellationToken.None);
+
+		// A repeat pin call from a different actor with a different note -- must not
+		// throw, and must not overwrite the original pin metadata.
+		await _repository.PinAsync(id, "operator-2", "a different note", CancellationToken.None);
+
+		RetainedContentState? after = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Pinned, after!.State);
+		Assert.Equal(before!.PinnedBy, after.PinnedBy);
+		Assert.Equal(before.PinnedAt, after.PinnedAt);
+		Assert.Equal(before.PinNote, after.PinNote);
+	}
+
+	/// <summary>
 	/// PR #1621 finding 4: <c>LoadForUpdateAsync</c> must take a real row lock so the
 	/// read-check-write in <see cref="RetainedContentStateRepository.TransitionAsync"/>
 	/// is atomic against a second concurrent caller doing the same thing (the future
@@ -349,5 +378,47 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 
 		Assert.Contains(tracked, s => s.Id == trackedId);
 		Assert.DoesNotContain(tracked, s => s.Id == gracedId);
+	}
+
+	/// <summary>
+	/// Issue #1787 AC1: <c>ListByStateAsync</c>'s own SQL ("ORDER BY created_at, id")
+	/// is a unique total order, exercised here independently of
+	/// <see cref="Waypoint.Api.Controllers.RetentionController"/>'s in-memory
+	/// tiebreak so this fails on a regression in the repository's SQL even if the
+	/// controller's comparator masked it. With every row forced to share one
+	/// created_at, "id" is the sole determinant of Postgres's row order; Postgres
+	/// compares its native <c>uuid</c> by raw byte value, which matches ordinal
+	/// comparison of each id's canonical (RFC 4122) hex text -- the same text both
+	/// Postgres and <see cref="Guid.ToString()"/> render -- so that ordinal
+	/// comparison is a correct oracle for the SQL side -- as, on .NET 8, is
+	/// <see cref="Guid.CompareTo"/>, which yields that identical order.
+	/// </summary>
+	[Fact]
+	public async Task ListByStateAsync_RowsShareOneCreatedAt_OrdersByCreatedAtThenId()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		List<Guid> stateIds = [];
+		for (int i = 0; i < 5; i++)
+		{
+			Guid artifactId = await InsertDepotArtifactAsync(connection, $"retained-content-sql-order-{i:D2}");
+			Guid stateId = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+			stateIds.Add(stateId);
+		}
+
+		DateTimeOffset sharedCreatedAt = DateTimeOffset.UtcNow;
+		await using NpgsqlCommand update = new(
+			"UPDATE download_retained_content_state SET created_at = $1 WHERE id = ANY($2)", connection);
+		update.Parameters.AddWithValue(sharedCreatedAt);
+		update.Parameters.AddWithValue(stateIds.ToArray());
+		await update.ExecuteNonQueryAsync();
+
+		IReadOnlyList<RetainedContentState> listed = await _repository.ListByStateAsync(
+			RetainedContentStates.Tracked, CancellationToken.None);
+
+		Guid[] expected = [.. stateIds.OrderBy(id => id.ToString(), StringComparer.Ordinal)];
+		Guid[] actual = [.. listed.Select(s => s.Id)];
+		Assert.Equal(expected, actual);
 	}
 }
