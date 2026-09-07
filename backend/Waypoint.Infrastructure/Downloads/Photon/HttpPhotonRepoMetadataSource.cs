@@ -116,8 +116,16 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		{
 			// A 404 on repomd.xml alone cannot tell "directory absent upstream" apart from
 			// "directory present, no repodata" -- probe the directory itself to decide.
-			bool directoryExists = await ProbeDirectoryExistsAsync(repoBaseUrl, cancellationToken).ConfigureAwait(false);
-			return directoryExists ? PhotonRepomdProbeResult.NotFound : PhotonRepomdProbeResult.Absent;
+			DirectoryProbe directoryProbe = await ProbeDirectoryExistsAsync(repoBaseUrl, cancellationToken).ConfigureAwait(false);
+			return directoryProbe switch
+			{
+				DirectoryProbe.Exists => PhotonRepomdProbeResult.NotFound,
+				DirectoryProbe.Absent => PhotonRepomdProbeResult.Absent,
+				_ => PhotonRepomdProbeResult.Failed(
+					$"repodata/repomd.xml was 404 at '{repomdUrl}' and the follow-up directory HEAD on " +
+					$"'{repoBaseUrl}' failed at the transport layer, so absent-upstream and " +
+					"present-without-repodata cannot be told apart -- reported as a probe error, not as absent."),
+			};
 		}
 
 		if (bytes is null)
@@ -145,7 +153,8 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		{
 			return PhotonRepomdProbeResult.Failed(
 				$"repomd.xml at '{repomdUrl}' declared a rejected primary <location href='{primaryLocation}'> " +
-				"(must be a relative repodata/<kind> path with no scheme, no rooted path, and no '..' segment) -- never fetched.");
+				"(must be a relative repodata/<kind> path with no scheme, no rooted path, no percent-encoding, " +
+				"and no '..' segment) -- never fetched.");
 		}
 
 		string primaryUrl = $"{repoBaseUrl.TrimEnd('/')}/{primaryLocation.TrimStart('/')}";
@@ -176,8 +185,14 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 	/// <summary>
 	/// Rejects a <c>repomd.xml</c> primary <c>&lt;location href&gt;</c> unless it is a
 	/// plain relative path under <c>repodata/</c> with no scheme/authority, no rooted
-	/// path, no <c>..</c> segment, and a filename matching one of the repomd metadata
-	/// kinds (<see cref="RepomdMetadataFilenamePattern"/>). <c>repomd.xml</c> is unsigned
+	/// path, no <c>..</c> segment, no percent-encoding at all, and a filename matching
+	/// one of the repomd metadata kinds (<see cref="RepomdMetadataFilenamePattern"/>).
+	/// The blanket <c>%</c> rejection closes round-2 review note 1: a percent-encoded dot
+	/// segment (<c>repodata/%2e%2e/%2e%2e/x/primary.xml.gz</c>) carries no literal
+	/// <c>..</c> and would otherwise pass every other check. Real repomd metadata
+	/// filenames are hex-digest-prefixed names that never contain a <c>%</c>, so nothing
+	/// legitimate is lost by refusing the character outright rather than decoding first
+	/// and re-checking. <c>repomd.xml</c> is unsigned
 	/// upstream, so this href is hostile input by default -- a value shaped like
 	/// <c>../../../other_repo/RPMS/x86_64/some-package.rpm</c> must be refused before any
 	/// fetch is attempted, never normalized-and-followed (this issue's AC 5).
@@ -189,7 +204,8 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 			return false;
 		}
 
-		if (href.Contains("..", StringComparison.Ordinal)
+		if (href.Contains('%', StringComparison.Ordinal)
+			|| href.Contains("..", StringComparison.Ordinal)
 			|| href.StartsWith('/')
 			|| href.StartsWith('\\')
 			|| href.Contains("://", StringComparison.Ordinal)
@@ -203,15 +219,32 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 		return RepomdMetadataFilenamePattern.IsMatch(filename);
 	}
 
+	/// <summary>Outcome of the repo-directory <c>HEAD</c> probe.</summary>
+	private enum DirectoryProbe
+	{
+		/// <summary>The directory answered something other than 404 -- it exists.</summary>
+		Exists,
+
+		/// <summary>The directory answered an explicit 404 -- it is gone upstream.</summary>
+		Absent,
+
+		/// <summary>The probe never got an answer (transport failure or timeout).</summary>
+		TransportError,
+	}
+
 	/// <summary>
 	/// Distinguishes "the repo directory does not exist upstream" from "the directory
 	/// exists but has no <c>repodata/</c>" -- both look identical from a bare 404 on
 	/// <c>repodata/repomd.xml</c>. A <c>HEAD</c> on the repo base itself: any response
 	/// other than a 404 (200, a directory-listing 403, a method-not-allowed 405, ...) is
-	/// treated as "exists" -- only an explicit 404 or unreachable transport counts as
-	/// absent, erring toward the existing <c>NoRepodata</c> classification when unsure.
+	/// <see cref="DirectoryProbe.Exists"/>, an explicit 404 is
+	/// <see cref="DirectoryProbe.Absent"/>, and a transport failure or timeout is
+	/// <see cref="DirectoryProbe.TransportError"/> -- NOT absent (round-2 review note 3:
+	/// a transient blip on a repo that genuinely exists would otherwise silently drop
+	/// its row for the sweep and, with the <c>indexed == 0</c> gate, be counted as
+	/// "absent" rather than as the error it is).
 	/// </summary>
-	private async Task<bool> ProbeDirectoryExistsAsync(string repoBaseUrl, CancellationToken cancellationToken)
+	private async Task<DirectoryProbe> ProbeDirectoryExistsAsync(string repoBaseUrl, CancellationToken cancellationToken)
 	{
 		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpPhotonRepoMetadataSource));
 		try
@@ -219,15 +252,15 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 			using HttpRequestMessage request = new(HttpMethod.Head, repoBaseUrl.TrimEnd('/') + "/");
 			using HttpResponseMessage response = await client
 				.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-			return response.StatusCode != HttpStatusCode.NotFound;
+			return response.StatusCode == HttpStatusCode.NotFound ? DirectoryProbe.Absent : DirectoryProbe.Exists;
 		}
 		catch (HttpRequestException)
 		{
-			return false;
+			return DirectoryProbe.TransportError;
 		}
 		catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
 		{
-			return false;
+			return DirectoryProbe.TransportError;
 		}
 	}
 

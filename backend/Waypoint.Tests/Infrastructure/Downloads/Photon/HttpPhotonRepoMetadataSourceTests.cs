@@ -233,6 +233,10 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	[InlineData("repodata/primary.rpm")]
 	[InlineData("repodata/../primary.xml.gz")]
 	[InlineData("other/primary.xml.gz")]
+	// Round-2 review note 1: percent-encoded dot segments carry no literal ".." .
+	[InlineData("repodata/%2e%2e/%2e%2e/photon_release_5.0_x86_64/repodata/primary.xml.gz")]
+	[InlineData("repodata/%2E%2E/primary.xml.gz")]
+	[InlineData("repodata/%2f%2e%2e%2fprimary.xml.gz")]
 	public async Task TryGetRepomdRevisionAndPackageCountAsync_RejectedHref_RefusesAndNeverFetches(string rejectedHref)
 	{
 		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -245,7 +249,60 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
 
 		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
-		Assert.Single(handler.RequestedUrls, url => url.EndsWith("repomd.xml", StringComparison.Ordinal));
+		// Exactly one request, and it is the repomd.xml GET: the rejected href is never fetched,
+		// not even in a form the transport would normalize (round-2 review note 1).
+		Assert.Single(handler.RequestedUrls);
+		Assert.EndsWith("repodata/repomd.xml", handler.RequestedUrls[0], StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-2 review note 1: <c>repodata/%2e%2e/%2e%2e/x/primary.xml.gz</c> contains no
+	/// literal <c>..</c>, is <c>repodata/</c>-prefixed, and ends in a valid metadata
+	/// filename -- it passed every pre-note check. The guard now refuses any <c>%</c> in
+	/// an href outright (repomd metadata filenames never contain one), so the encoded
+	/// traversal is a probe error and NOTHING beyond <c>repomd.xml</c> is ever fetched.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_PercentEncodedTraversingHref_RefusesAndNeverFetches()
+	{
+		const string encodedTraversingHref = "repodata/%2e%2e/%2e%2e/photon_release_5.0_x86_64/repodata/primary.xml.gz";
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
+		{
+			Content = new StringContent(RepomdXmlWithHref(encodedTraversingHref)),
+		});
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+		// The repomd.xml GET is the ONLY request the source is allowed to have made.
+		Assert.Single(handler.RequestedUrls);
+		Assert.EndsWith("repodata/repomd.xml", handler.RequestedUrls[0], StringComparison.Ordinal);
+		Assert.False(HttpPhotonRepoMetadataSource.IsValidPrimaryHref(encodedTraversingHref));
+	}
+
+	/// <summary>
+	/// Round-2 review note 3: a transport failure on the directory <c>HEAD</c> probe used
+	/// to degrade to <c>Absent</c>, which (with the round-2 finding-1 <c>indexed == 0</c>
+	/// gate) would let a transient blip be counted as "the repo is gone upstream". It is
+	/// a probe <see cref="PhotonRepomdProbeKind.Error"/> instead: unknown, not absent.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_DirectoryProbeTransportFailure_IsAnErrorNotAbsent()
+	{
+		ScriptedHandler handler = new(request => request.Method == HttpMethod.Head
+			? throw new HttpRequestException("simulated transport failure")
+			: new HttpResponseMessage(HttpStatusCode.NotFound));
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_debuginfo_5.0_aarch64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+		Assert.Contains("transport", result.Error, StringComparison.OrdinalIgnoreCase);
 	}
 
 	[Theory]

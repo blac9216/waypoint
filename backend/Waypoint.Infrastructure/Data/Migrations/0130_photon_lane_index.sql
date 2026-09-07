@@ -42,7 +42,7 @@
 -- unknown, resolved here: index it, do not error) -- repomd_revision/package_count
 -- stay NULL for such a row. A (version, variant, arch) combination this lane's
 -- cartesian enumeration guesses but the vendor never actually published gets NO row
--- at all (round-0 review finding #4, PR #1791): a bare 404 on repomd.xml cannot
+-- at all (round-1 review finding #4, PR #1791): a bare 404 on repomd.xml cannot
 -- distinguish "directory absent" from "directory present, no repodata" on its own,
 -- so the discovery job probes the directory itself first and only writes this
 -- has_repodata=false row when that directory is confirmed to exist.
@@ -76,7 +76,7 @@ COMMENT ON TABLE photon_repo_index IS
 COMMENT ON COLUMN photon_repo_index.variant IS
     'release | updates | extras | debuginfo | srpms | snapshots | composite -- the repo axis observed at every sampled Photon branch (research #1029 finding 1). composite is the bare photon_<version>_<arch> repo (no variant word in its directory name).';
 COMMENT ON COLUMN photon_repo_index.has_repodata IS
-    'false for a photon_snapshots-style directory that EXISTS upstream but has no repodata/repomd.xml -- indexed, never an error (research #1029 finding 5 / this issue AC 3). A directory that does not exist upstream at all gets no row (PR #1791 round-0 review finding #4).';
+    'false for a photon_snapshots-style directory that EXISTS upstream but has no repodata/repomd.xml -- indexed, never an error (research #1029 finding 5 / this issue AC 3). A directory that does not exist upstream at all gets no row (PR #1791 round-1 review finding #4).';
 COMMENT ON COLUMN photon_repo_index.repomd_revision IS
     'repodata/repomd.xml''s <revision> value, the natural per-repo change-detection token (research #1029 finding 1). NULL when has_repodata is false.';
 COMMENT ON COLUMN photon_repo_index.package_count IS

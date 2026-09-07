@@ -38,9 +38,13 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 /// probe fails outright (<see cref="PhotonRepomdProbeKind.Error"/>) is skipped and its
 /// error collected -- one bad repo never fails the whole job, matching this repo's
 /// tolerant-parse convention elsewhere (e.g. <c>EsxPatchStoreMetadataParser</c>) -- but
-/// when EVERY probe in the sweep fails, the job itself fails rather than reporting a
-/// misleading "Indexed 0" success (a wholly unreachable mirror must not look identical
-/// to a real, empty discovery run).
+/// when the sweep indexes NOTHING, the job itself fails rather than reporting a
+/// misleading "Indexed 0" success, whatever mix of absent/errored/unreachable probes
+/// produced that outcome (round-2 review finding 1: an upstream repo-directory rename
+/// classifies every probe <c>Absent</c> while <c>photon_versions.json</c> keeps
+/// serving, which errors on nothing yet indexes nothing -- a permanently stale index
+/// behind a green run). At least one indexed repo is partial success: the job succeeds
+/// and the probe errors ride along as a warning in the outcome message.
 /// Payload: <c>{"base_url": "https://packages.broadcom.com/photon"}</c> -- required, no
 /// hardcoded production default, so a test can point this handler at a fixture host
 /// (<c>https://photon.example.internal/photon</c> in this repo's own tests) with zero
@@ -142,12 +146,15 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 			}
 		}
 
-		if (errors.Count == totalProbes)
+		if (indexed == 0)
 		{
-			LogRepoErrors(_logger, errors.Count);
-			return JobExecutionOutcome.Failed(
-				$"photon-repo-discovery: all {totalProbes} repo probe(s) failed across {versions.Count} version(s); " +
-				$"nothing indexed. Failed probes: {string.Join("; ", errors)}");
+			LogNothingIndexed(_logger, totalProbes, absent, errors.Count);
+			string diagnosis = $"photon-repo-discovery: indexed 0 of {totalProbes} repo probe(s) across " +
+				$"{versions.Count} version(s) ({absent} absent upstream, {errors.Count} probe error(s), " +
+				$"{noRepodata} without repodata); nothing indexed.";
+			return JobExecutionOutcome.Failed(errors.Count > 0
+				? $"{diagnosis} Failed probes: {string.Join("; ", errors)}"
+				: diagnosis);
 		}
 
 		string summary = $"Indexed {indexed} Photon repo(s) across {versions.Count} version(s) " +
@@ -173,6 +180,9 @@ public sealed partial class PhotonRepoDiscoveryJobHandler : IJobHandler
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "photon-repo-discovery: {Count} repo probe(s) failed and were skipped")]
 	private static partial void LogRepoErrors(ILogger logger, int count);
+
+	[LoggerMessage(Level = LogLevel.Error, Message = "photon-repo-discovery: indexed nothing -- {TotalProbes} probe(s), {Absent} absent upstream, {Errors} probe error(s)")]
+	private static partial void LogNothingIndexed(ILogger logger, int totalProbes, int absent, int errors);
 
 	[LoggerMessage(Level = LogLevel.Debug, Message = "photon-repo-discovery: {Version}/{Variant}/{Arch} directory absent upstream ({RepoBaseUrl}), no row indexed")]
 	private static partial void LogRepoAbsent(ILogger logger, string version, string variant, string arch, string repoBaseUrl);

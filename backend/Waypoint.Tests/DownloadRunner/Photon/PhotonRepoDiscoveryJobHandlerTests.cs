@@ -216,6 +216,33 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 		Assert.NotEmpty(repository.Upserted);
 	}
 
+	/// <summary>
+	/// Round-2 review finding 1: an upstream repo-directory rename classifies EVERY probe
+	/// <c>Absent</c> while <c>photon_versions.json</c> keeps serving -- zero errors, zero
+	/// rows. The prior <c>errors.Count == totalProbes</c> gate returned
+	/// <c>Succeeded("Indexed 0 ...")</c> for that sweep, hiding a permanently stale index
+	/// behind a green run. The gate is <c>indexed == 0</c>, so this fails, and the note
+	/// names the absent/error counts.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_EveryProbeAbsent_FailsTheJob()
+	{
+		FakeMetadataSource source = new() { DefaultProbeResult = PhotonRepomdProbeResult.Absent };
+		FakeIndexRepository repository = new();
+		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		int totalProbes = PhotonRepoVariants.All.Count * PhotonArches.All.Count;
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Empty(repository.Upserted);
+		Assert.NotNull(outcome.Note);
+		Assert.Contains($"{totalProbes} absent upstream", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("0 probe error(s)", outcome.Note, StringComparison.Ordinal);
+		// Every probe was still attempted -- the failure is the verdict, not an early exit.
+		Assert.Equal(totalProbes, source.RepomdRequests.Count);
+	}
+
 	/// <summary>Round-0 review finding #4: a repo directory absent upstream produces no row, only a debug-level note.</summary>
 	[Fact]
 	public async Task ExecuteAsync_AbsentRepoDirectory_ProducesNoRowAndIsNotAnError()
