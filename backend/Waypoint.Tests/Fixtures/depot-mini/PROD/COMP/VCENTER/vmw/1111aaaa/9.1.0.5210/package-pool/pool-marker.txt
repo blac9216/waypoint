@@ -1,0 +1,1 @@
+invented package-pool marker (issue #1640: a real expanded updaterepo tree's own package-pool/ subdirectory)

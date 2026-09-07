@@ -52,8 +52,8 @@ report that already has implementing code on `main`:
 (reached via `WaypointDownload.psm1`'s `Invoke-WaypointDownload`, which dot-
 sources it) implements the `Save-WebFile` resume protocol — `.resume.tmp`
 merge, the 200-vs-206 response distinction, oversize handling, and 401/403
-*documented* as non-retryable (see RP-05 below for a real-listener-discovered
-gap in that specific guard, tracked as deferred bug #1799). `DownloadJobHandler.cs` is the C# caller that
+non-retryable (issue #1799 closed the real-listener-discovered exception-type
+gap in that guard; see RP-05 below). `DownloadJobHandler.cs` is the C# caller that
 delegates resume/retry to this PowerShell layer entirely and layers its own
 independent sha256 verification on top (see the handler's own doc comment).
 `#1411` pins the PowerShell-layer behavior with concrete tests; every other
@@ -66,7 +66,7 @@ lane below has no implementing code on `main` yet and is marked
 | RP-02 206 resume | A genuine 206 response, `Content-Range` start confirmed against the partial size, appends the remainder byte-for-byte (not a body-size heuristic). | covered | #1411 |
 | RP-03 200-to-ranged restart | A 200 response to a ranged request (edge-cache behavior, issue #1169) restarts the file from zero and logs a Warning. | covered | #1411 |
 | RP-04 oversize rejection | A response longer than the declared/expected size is rejected outright, never truncated or merged as a "success". | covered | #1411 |
-| RP-05 401/403 non-retryable | Documented contract: a 401/403 fails without retry. Covered as pinning the CURRENT (defective) behavior — a real pwsh7 `HttpResponseException` is not recognized by `Save-WebFile`'s `WebException`-typed guard, so the request is actually retried with backoff; see deferred bug #1799. | covered | #1411 |
+| RP-05 401/403 non-retryable | A 401/403 fails immediately, without retry, "Authentication error" in the failure reason. Issue #1799 taught `Save-WebFile`'s auth-error guard to also recognize a real pwsh7 `HttpResponseException` (it previously matched only the Windows PowerShell 5.1 `WebException` shape). | covered | #1411, #1799 |
 | RP-06 Content-Range mismatch | A 206 response whose `Content-Range` start disagrees with the requested offset throws rather than silently appending at the wrong offset. | covered | #1411 |
 
 `ExpectedSize` note: the RP-01…RP-04/RP-06 tests pass `ExpectedSize` explicitly,

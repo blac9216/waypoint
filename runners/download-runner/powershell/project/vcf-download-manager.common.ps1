@@ -660,10 +660,26 @@ function Save-WebFile {
 	}
 
 	# Get expected size from HEAD request if not provided
+	#
+	# Issue #1800 root cause: PowerShell 7's Invoke-WebRequest (with or without
+	# -UseBasicParsing) types a WebResponseObject's .Headers indexer as
+	# Dictionary<string, string[]> -- $HeadResponse.Headers['Content-Length'] returns
+	# a System.String[] even for a header with exactly one value, and PowerShell's
+	# [long] cast never auto-unwraps a single-element array: it throws "Cannot
+	# convert the 'System.String[]' value ... to type 'System.Int64'" every time,
+	# silently swallowed below by this function's own catch. This is deterministic
+	# and reproduces with the real, unmodified script directly (no SDK-hosted
+	# runspace, no C# executor involved) -- NOT test-harness-specific, confirmed
+	# production-relevant. Coerce to a scalar first, the same pattern the 206-resume
+	# branch below already uses for Content-Range (issue #1743 review round 1).
 	if ($ExpectedSize -le 0) {
 		try {
 			$HeadResponse = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-			$ExpectedSize = [long]$HeadResponse.Headers['Content-Length']
+			$ContentLengthRaw = $HeadResponse.Headers['Content-Length']
+			$ContentLengthValue = if ($null -eq $ContentLengthRaw) { $null } else { @($ContentLengthRaw) -join '' }
+			if (-not [string]::IsNullOrWhiteSpace($ContentLengthValue)) {
+				$ExpectedSize = [long]$ContentLengthValue
+			}
 		} catch {
 			Write-Log "Could not get Content-Length for $Url" -Severity 'Debug' @WriteLogParams
 		}
@@ -817,22 +833,42 @@ function Save-WebFile {
 			$LastError = $_
 
 			# Auth errors - don't retry
+			#
+			# Windows PowerShell 5.1's Invoke-WebRequest throws
+			# System.Net.WebException for a non-2xx response, with the status
+			# code on $WebException.Response. PowerShell 7's HttpClient-backed
+			# Invoke-WebRequest (this repo's runtime -- ADR-0013, including the
+			# SDK-hosted in-process runspace) never throws that type: it throws
+			# Microsoft.PowerShell.Commands.HttpResponseException instead, with
+			# its own Response property (an HttpResponseMessage, not a
+			# WebResponse). Checking only the WebException shape left this
+			# branch dead code against any real pwsh7 HTTP failure -- a real
+			# 401/403 fell through to the generic retry-with-backoff bucket
+			# below instead of failing immediately (issue #1799).
+			$StatusCode = $null
 			if ($_.Exception -is [System.Net.WebException]) {
 				$WebException = $_.Exception -as [System.Net.WebException]
 				if ($WebException.Response) {
 					$StatusCode = [int]$WebException.Response.StatusCode
-					if ($StatusCode -in @(401, 403)) {
-						throw "Authentication error ($StatusCode): $Url"
-					}
-					if ($StatusCode -eq 404) {
-						Write-Log "File not found (404): $Url" -Severity 'Warning' @WriteLogParams
-						return [PSCustomObject]@{
-							Url       = $Url
-							LocalPath = $OutFile
-							Success   = $false
-							Skipped   = $true
-							Error     = "404 Not Found"
-						}
+				}
+			} elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+				$HttpResponseException = $_.Exception -as [Microsoft.PowerShell.Commands.HttpResponseException]
+				if ($HttpResponseException.Response) {
+					$StatusCode = [int]$HttpResponseException.Response.StatusCode
+				}
+			}
+			if ($null -ne $StatusCode) {
+				if ($StatusCode -in @(401, 403)) {
+					throw "Authentication error ($StatusCode): $Url"
+				}
+				if ($StatusCode -eq 404) {
+					Write-Log "File not found (404): $Url" -Severity 'Warning' @WriteLogParams
+					return [PSCustomObject]@{
+						Url       = $Url
+						LocalPath = $OutFile
+						Success   = $false
+						Skipped   = $true
+						Error     = "404 Not Found"
 					}
 				}
 			}
