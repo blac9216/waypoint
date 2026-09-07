@@ -35,17 +35,36 @@ namespace Waypoint.Tests.Core.Downloads;
 /// C# side previously produced only a hard runtime <see cref="ArgumentException"/> in
 /// the retention path, with nothing in CI failing.
 ///
+/// Resolution is scoped by BOTH the owning table and the constraint name (PR #1821
+/// review round 1, F2 -- the exact shape #1795 fixed for
+/// <c>VksConstraintDriftTests</c> in PR #1782, and that issue #1814, open, exists to
+/// remove from the remaining name-only helpers): a CHECK is only read when it is
+/// declared inside the owning table's own <c>CREATE TABLE</c> body or added to that
+/// table by a later <c>ALTER TABLE ... ADD CONSTRAINT</c>, so an identically- OR
+/// differently-named <c>... IN (...)</c> CHECK on some other table can never be picked
+/// up in its place. Round-1 review proved a name-only scan wrong by mutation: a
+/// scratch migration declaring a brand-new <c>reviewer_probe_table</c> with a CHECK
+/// constraint carrying the REAL constraint's own name
+/// (<c>download_retention_policies_dial_check</c>) repointed the old, name-only guard
+/// at the decoy's <c>('decoy-only')</c> value set (dropped, observed red, removed,
+/// tree restored byte-identical -- see PR #1821's evidence). The two "ignores a decoy
+/// on a different table" tests below keep that proof permanent.
+///
 /// Issue #1660 note: this follows the same "latest declaration wins" resolution the
-/// four exemplars above already use (last CHECK match across migration-ordered
-/// resources); if #1660 changes that repo-wide convention, this file should follow
-/// suit rather than keep its own copy.
+/// four column-only exemplars above and <c>VksConstraintDriftTests</c> already use
+/// (last CHECK match across migration-ordered resources); if #1660 changes that
+/// repo-wide convention, this file should follow suit rather than keep its own copy.
 /// </summary>
 public sealed class ManualDownloadDialConstraintDriftTests
 {
+	private const string RetentionPoliciesTable = "download_retention_policies";
+	private const string RetainedContentStateTable = "download_retained_content_state";
+
 	[Fact]
 	public void ManualDownloadDialOptionsAll_EqualsDownloadRetentionPoliciesDialCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseCheckValues("download_retention_policies_dial_check", "manual_download_dial_default");
+		List<string> constraintValues = ParseLatestCheckAcrossMigrations(
+			ReadEmbeddedMigrations(), RetentionPoliciesTable, "download_retention_policies_dial_check", "manual_download_dial_default");
 
 		Assert.Equal(ManualDownloadDialOptions.All, constraintValues);
 	}
@@ -53,7 +72,8 @@ public sealed class ManualDownloadDialConstraintDriftTests
 	[Fact]
 	public void RetainedContentStatesAll_EqualsDownloadRetainedContentStateStateCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseCheckValues("download_retained_content_state_state_check", "state");
+		List<string> constraintValues = ParseLatestCheckAcrossMigrations(
+			ReadEmbeddedMigrations(), RetainedContentStateTable, "download_retained_content_state_state_check", "state");
 
 		Assert.Equal(RetainedContentStates.All, constraintValues);
 	}
@@ -81,39 +101,180 @@ public sealed class ManualDownloadDialConstraintDriftTests
 	}
 
 	/// <summary>
-	/// Reads every embedded <c>Data/Migrations/*.sql</c> resource in migration order
-	/// (ordinal on the zero-padded filename prefix, matching
-	/// <see cref="NpgsqlSchemaMigrator"/>) and returns the value list of the LAST
-	/// <paramref name="constraintName"/> CHECK constraint declared across them -- i.e.
-	/// the constraint the fully-migrated database actually enforces.
+	/// PR #1821 review round 1, F2 -- the round-1 reviewer's own probe, reproduced
+	/// here permanently: a CHECK on an unrelated table carrying the REAL dial
+	/// constraint's own name must never be read in its place. Table scoping is what
+	/// makes the real <c>['auto-prune', 'keep', 'review']</c> still resolve.
 	/// </summary>
-	private static List<string> ParseCheckValues(string constraintName, string columnName)
+	[Fact]
+	public void ParseLatestCheckAcrossMigrations_IgnoresAnIdenticallyNamedDialCheckOnADifferentTable()
+	{
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS download_retention_policies (
+			    manual_download_dial_default TEXT NOT NULL CONSTRAINT download_retention_policies_dial_check CHECK (manual_download_dial_default IN ('auto-prune', 'keep', 'review'))
+			);
+			""",
+			"""
+			CREATE TABLE reviewer_probe_table (
+			    manual_download_dial_default TEXT NOT NULL CONSTRAINT download_retention_policies_dial_check CHECK (manual_download_dial_default IN ('decoy-only'))
+			);
+			""",
+		];
+
+		List<string> values = ParseLatestCheckAcrossMigrations(
+			migrations, RetentionPoliciesTable, "download_retention_policies_dial_check", "manual_download_dial_default");
+
+		Assert.Equal(["auto-prune", "keep", "review"], values);
+	}
+
+	/// <summary>Same proof as above for the state vocabulary/table pairing, so both halves of this guard carry the same discrimination coverage.</summary>
+	[Fact]
+	public void ParseLatestCheckAcrossMigrations_IgnoresAnIdenticallyNamedStateCheckOnADifferentTable()
+	{
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS download_retained_content_state (
+			    state TEXT NOT NULL CONSTRAINT download_retained_content_state_state_check CHECK (state IN ('tracked', 'grace', 'pinned', 'pending-purge', 'purged'))
+			);
+			""",
+			"""
+			CREATE TABLE reviewer_probe_table_2 (
+			    state TEXT NOT NULL CONSTRAINT download_retained_content_state_state_check CHECK (state IN ('decoy-only'))
+			);
+			""",
+		];
+
+		List<string> values = ParseLatestCheckAcrossMigrations(
+			migrations, RetainedContentStateTable, "download_retained_content_state_state_check", "state");
+
+		Assert.Equal(["tracked", "grace", "pinned", "pending-purge", "purged"], values);
+	}
+
+	private static List<string> ReadEmbeddedMigrations()
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
 		string[] resourceNames = [.. assembly.GetManifestResourceNames()
 			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
 			.OrderBy(name => name, StringComparer.Ordinal)];
 
-		Regex checkPattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
-
-		List<string>? latest = null;
+		List<string> sqlTexts = [];
 		foreach (string resourceName in resourceNames)
 		{
 			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
 			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
+			sqlTexts.Add(reader.ReadToEnd());
+		}
 
-			foreach (Match match in checkPattern.Matches(sql))
+		return sqlTexts;
+	}
+
+	/// <summary>
+	/// Reads every migration text, in migration order (ordinal on the zero-padded
+	/// filename prefix, matching <see cref="NpgsqlSchemaMigrator"/>), and returns the
+	/// value list of the LAST <paramref name="constraintName"/> CHECK constraint
+	/// declared ON <paramref name="table"/> across them -- i.e. the constraint the
+	/// fully-migrated database actually enforces. Both scopes are load-bearing: the
+	/// TABLE scope is what keeps an identically- or differently-named CHECK on
+	/// another table invisible here, and the NAME scope keeps sibling CHECKs on the
+	/// same table apart.
+	/// </summary>
+	private static List<string> ParseLatestCheckAcrossMigrations(
+		IEnumerable<string> migrationSqlTexts, string table, string constraintName, string columnName)
+	{
+		List<string>? latest = null;
+		foreach (string sql in migrationSqlTexts)
+		{
+			foreach (List<string> values in FindTableScopedChecks(sql, table, constraintName, columnName))
 			{
-				latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
+				latest = values;
 			}
 		}
 
 		Assert.NotNull(latest);
 		Assert.NotEmpty(latest!);
 		return latest!;
+	}
+
+	/// <summary>
+	/// Every declaration of <paramref name="constraintName"/> on <paramref name="table"/>
+	/// within one migration text, in the order it appears. Two shapes count, and only
+	/// these two: a <c>CONSTRAINT &lt;name&gt; CHECK (...)</c> inside that table's own
+	/// <c>CREATE TABLE</c> body (inline on a column or as a table-level constraint),
+	/// and an <c>ALTER TABLE &lt;table&gt; ADD CONSTRAINT &lt;name&gt; CHECK (...)</c>
+	/// re-declaration. Anything declared inside another table's body -- however it is
+	/// named -- is not a declaration on this table and is skipped.
+	/// </summary>
+	private static List<List<string>> FindTableScopedChecks(string sql, string table, string constraintName, string columnName)
+	{
+		Regex checkPattern = new(
+			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+		Regex alterPattern = new(
+			$@"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{Regex.Escape(table)}\s+ADD\s+CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+		List<(int Position, List<string> Values)> found = [];
+
+		foreach ((int bodyStart, int bodyEnd) in CreateTableBodies(sql, table))
+		{
+			foreach (Match match in checkPattern.Matches(sql[bodyStart..bodyEnd]))
+			{
+				found.Add((bodyStart + match.Index, ParseValues(match)));
+			}
+		}
+
+		foreach (Match match in alterPattern.Matches(sql))
+		{
+			found.Add((match.Index, ParseValues(match)));
+		}
+
+		return [.. found.OrderBy(entry => entry.Position).Select(entry => entry.Values)];
+	}
+
+	/// <summary>
+	/// The (start, end) character bounds of the body of every
+	/// <c>CREATE TABLE [IF NOT EXISTS] &lt;table&gt; (...)</c> in one migration text,
+	/// found by walking parentheses from the opening one to its match so that nested
+	/// parens (a <c>CHECK (...)</c>, a <c>NUMERIC(10, 2)</c>) do not end the body early.
+	/// </summary>
+	private static List<(int Start, int End)> CreateTableBodies(string sql, string table)
+	{
+		Regex headerPattern = new(
+			$@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{Regex.Escape(table)}\s*\(",
+			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+		List<(int Start, int End)> bodies = [];
+		foreach (Match header in headerPattern.Matches(sql))
+		{
+			int start = header.Index + header.Length;
+			int depth = 1;
+			int index = start;
+			while (index < sql.Length && depth > 0)
+			{
+				if (sql[index] == '(')
+				{
+					depth++;
+				}
+				else if (sql[index] == ')')
+				{
+					depth--;
+				}
+
+				index++;
+			}
+
+			bodies.Add((start, depth == 0 ? index - 1 : sql.Length));
+		}
+
+		return bodies;
+	}
+
+	private static List<string> ParseValues(Match match)
+	{
+		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
+		return [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
 	}
 }
