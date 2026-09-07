@@ -833,22 +833,42 @@ function Save-WebFile {
 			$LastError = $_
 
 			# Auth errors - don't retry
+			#
+			# Windows PowerShell 5.1's Invoke-WebRequest throws
+			# System.Net.WebException for a non-2xx response, with the status
+			# code on $WebException.Response. PowerShell 7's HttpClient-backed
+			# Invoke-WebRequest (this repo's runtime -- ADR-0013, including the
+			# SDK-hosted in-process runspace) never throws that type: it throws
+			# Microsoft.PowerShell.Commands.HttpResponseException instead, with
+			# its own Response property (an HttpResponseMessage, not a
+			# WebResponse). Checking only the WebException shape left this
+			# branch dead code against any real pwsh7 HTTP failure -- a real
+			# 401/403 fell through to the generic retry-with-backoff bucket
+			# below instead of failing immediately (issue #1799).
+			$StatusCode = $null
 			if ($_.Exception -is [System.Net.WebException]) {
 				$WebException = $_.Exception -as [System.Net.WebException]
 				if ($WebException.Response) {
 					$StatusCode = [int]$WebException.Response.StatusCode
-					if ($StatusCode -in @(401, 403)) {
-						throw "Authentication error ($StatusCode): $Url"
-					}
-					if ($StatusCode -eq 404) {
-						Write-Log "File not found (404): $Url" -Severity 'Warning' @WriteLogParams
-						return [PSCustomObject]@{
-							Url       = $Url
-							LocalPath = $OutFile
-							Success   = $false
-							Skipped   = $true
-							Error     = "404 Not Found"
-						}
+				}
+			} elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+				$HttpResponseException = $_.Exception -as [Microsoft.PowerShell.Commands.HttpResponseException]
+				if ($HttpResponseException.Response) {
+					$StatusCode = [int]$HttpResponseException.Response.StatusCode
+				}
+			}
+			if ($null -ne $StatusCode) {
+				if ($StatusCode -in @(401, 403)) {
+					throw "Authentication error ($StatusCode): $Url"
+				}
+				if ($StatusCode -eq 404) {
+					Write-Log "File not found (404): $Url" -Severity 'Warning' @WriteLogParams
+					return [PSCustomObject]@{
+						Url       = $Url
+						LocalPath = $OutFile
+						Success   = $false
+						Skipped   = $true
+						Error     = "404 Not Found"
 					}
 				}
 			}

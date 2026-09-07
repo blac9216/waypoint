@@ -613,7 +613,7 @@ Describe 'Save-WebFile' {
 		{ Save-WebFile -Url 'https://example.invalid/mismatch.bin' -OutFile $Out -ExpectedSize 999 -RetryCount 1 } | Should -Throw
 	}
 
-	It 'does not retry on a 401/403 auth error' {
+	It 'does not retry on a 401/403 auth error (Windows PowerShell 5.1 WebException shape)' {
 		Mock Invoke-WebRequest {
 			$WebEx = [System.Net.WebException]::new('unauthorized')
 			$WebEx | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = 401 }) -Force
@@ -622,6 +622,25 @@ Describe 'Save-WebFile' {
 
 		$Out = Join-Path -Path 'TestDrive:' -ChildPath 'download/auth.bin'
 		{ Save-WebFile -Url 'https://example.invalid/auth.bin' -OutFile $Out -RetryCount 5 } | Should -Throw '*Authentication error*'
+		Should -Invoke Invoke-WebRequest -Times 1
+	}
+
+	It 'does not retry on a 401/403 auth error (real pwsh7 HttpResponseException shape, issue #1799)' {
+		# Issue #1799: PowerShell 7's HttpClient-backed Invoke-WebRequest never
+		# throws System.Net.WebException for a non-2xx response -- it throws
+		# Microsoft.PowerShell.Commands.HttpResponseException, with the status
+		# code on its own Response (an HttpResponseMessage, not a WebResponse).
+		# The test above alone let a regression to the WebException-only guard
+		# hide, because it mocks the type the OLD guard already matched
+		# (PR #1629/#1638 review's "mock encodes the code's own wrong
+		# assumption" trap). This pins the real pwsh7 exception shape.
+		Mock Invoke-WebRequest {
+			$Response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden)
+			throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('forbidden', $Response)
+		}
+
+		$Out = Join-Path -Path 'TestDrive:' -ChildPath 'download/auth-real.bin'
+		{ Save-WebFile -Url 'https://example.invalid/auth-real.bin' -OutFile $Out -RetryCount 5 } | Should -Throw '*Authentication error*'
 		Should -Invoke Invoke-WebRequest -Times 1
 	}
 
