@@ -14,6 +14,8 @@
 
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
 using Xunit;
@@ -36,8 +38,24 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// equals the C# constant, in order, so adding/removing a value on either side without
 /// the other fails here.
 /// </summary>
-public sealed class RepoCredentialBindingConstraintDriftTests
+[Collection("Postgres")]
+public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
 {
+	private readonly PostgresFixture _fixture;
+
+	public RepoCredentialBindingConstraintDriftTests(PostgresFixture fixture)
+	{
+		_fixture = fixture;
+	}
+
+	public async Task InitializeAsync()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+	}
+
+	public Task DisposeAsync() => Task.CompletedTask;
+
 	[Fact]
 	public void RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet()
 	{
@@ -48,18 +66,42 @@ public sealed class RepoCredentialBindingConstraintDriftTests
 
 	/// <summary>
 	/// <see cref="CredentialTypes"/>' backing CHECK (<c>credentials_credential_type_check</c>)
-	/// has been widened twice via the repo's DROP/ADD idiom (0022 -&gt; 0047 -&gt; 0103), so
-	/// unlike the single-declaration store check above, the authoritative value list is
-	/// whichever migration declared it LAST across the fully-migrated database -- the same
-	/// "scan every embedded migration, keep the latest declaration" approach
-	/// <c>OciBundleStatusesConstraintDriftTests</c> uses for its own widened constraint.
+	/// has been widened twice via the repo's DROP/ADD idiom (0022 -&gt; 0047 -&gt; 0103).
+	/// Issue #1660: parsing embedded migration files in ordinal-filename order and
+	/// keeping the last declaration (the approach this test used to take, and that
+	/// <c>OciBundleStatusesConstraintDriftTests</c> still uses) silently picks the
+	/// wrong declaration once a migration is slotted BELOW an already-merged
+	/// declaration but applied to an existing deployment AFTER it (this repo reserves
+	/// low slots for concurrently in-flight work, so ordinal file order is not always
+	/// application order -- see #1660's Motivation). Reading the CHECK definition back
+	/// out of <c>pg_constraint</c> after actually applying every embedded migration,
+	/// via <see cref="NpgsqlSchemaMigrator"/>, in its real applied order removes the
+	/// ordering question entirely: this asserts against what the fully-migrated
+	/// database actually enforces, not a guess about which file "looks latest".
 	/// </summary>
 	[Fact]
-	public void CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet()
+	public async Task CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseLatestCheckAcrossMigrations("credentials_credential_type_check", "credential_type");
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
 
-		Assert.Equal(CredentialTypes.All, constraintValues);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT pg_get_constraintdef(oid) FROM pg_constraint
+			WHERE conname = 'credentials_credential_type_check' AND conrelid = 'credentials'::regclass
+			""", connection);
+
+		string? definition = (string?)await command.ExecuteScalarAsync();
+		Assert.NotNull(definition);
+
+		HashSet<string> schemaTypes = [.. Regex
+			.Matches(definition!, "'([^']+)'::text", RegexOptions.None, TimeSpan.FromSeconds(5))
+			.Select(match => match.Groups[1].Value)];
+
+		HashSet<string> codeTypes = [.. CredentialTypes.All];
+
+		Assert.NotEmpty(schemaTypes);
+		Assert.Equal(schemaTypes.OrderBy(type => type, StringComparer.Ordinal), codeTypes.OrderBy(type => type, StringComparer.Ordinal));
 	}
 
 	/// <summary>The raw text of one embedded migration resource, matched by its filename suffix.</summary>
@@ -78,6 +120,10 @@ public sealed class RepoCredentialBindingConstraintDriftTests
 	/// ('a', 'b', ...))</c> from migration SQL, in file order (matching the C# constants'
 	/// own declaration order -- unlike <c>SchemaMigrationTests.ParseCheckInList</c>, this
 	/// does NOT sort, since <see cref="RepoStores.All"/> is asserted in declaration order).
+	/// This helper is safe for <c>repo_credential_bindings_store_check</c> because that
+	/// constraint has exactly one declaration (0103) -- no "latest across migrations"
+	/// resolution is needed, so the ordering hazard #1660 fixed for the widened
+	/// <c>credentials_credential_type_check</c> guard above does not apply here.
 	/// </summary>
 	private static List<string> ParseCheckInList(string sql, string constraintName)
 	{
@@ -90,42 +136,5 @@ public sealed class RepoCredentialBindingConstraintDriftTests
 		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
 		Assert.NotEmpty(values);
 		return [.. values.Select(m => m.Groups[1].Value)];
-	}
-
-	/// <summary>
-	/// Reads every embedded <c>Data/Migrations/*.sql</c> resource in migration order
-	/// (ordinal on the zero-padded filename prefix, matching
-	/// <see cref="NpgsqlSchemaMigrator"/>) and returns the value list of the LAST
-	/// <paramref name="constraintName"/> CHECK constraint declared across them -- i.e.
-	/// the constraint the fully-migrated database actually enforces.
-	/// </summary>
-	private static List<string> ParseLatestCheckAcrossMigrations(string constraintName, string columnName)
-	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string[] resourceNames = [.. assembly.GetManifestResourceNames()
-			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
-			.OrderBy(name => name, StringComparer.Ordinal)];
-
-		Regex checkPattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
-
-		List<string>? latest = null;
-		foreach (string resourceName in resourceNames)
-		{
-			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
-
-			foreach (Match match in checkPattern.Matches(sql))
-			{
-				latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
-			}
-		}
-
-		Assert.NotNull(latest);
-		Assert.NotEmpty(latest!);
-		return latest!;
 	}
 }
