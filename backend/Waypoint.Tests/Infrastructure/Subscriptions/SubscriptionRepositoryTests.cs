@@ -96,7 +96,6 @@ public sealed class SubscriptionRepositoryTests : IAsyncLifetime
 	[InlineData(SubscriptionLineGranularity.Subminor)]
 	[InlineData(SubscriptionLineGranularity.Minor)]
 	[InlineData(SubscriptionLineGranularity.Major)]
-	[InlineData(SubscriptionLineGranularity.WholeRelease)]
 	public async Task CreateAsync_RoundTripsEveryLineGranularity(SubscriptionLineGranularity granularity)
 	{
 		Subscription subscription = NewSubscription() with { LineGranularity = granularity };

@@ -23,11 +23,14 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issue #1421, migration 0104: this repo's real class-killing drift guard (the
-/// <see cref="RepoCredentialBindingConstraintDriftTests"/> convention) for two
-/// vocabularies migration 0104 hardcodes as CHECK constraints -- parses the
+/// <see cref="RepoCredentialBindingConstraintDriftTests"/> convention) for every
+/// vocabulary migration 0104 hardcodes as a CHECK constraint -- parses the
 /// authoritative value set out of the embedded migration SQL and asserts it equals
 /// the C# side, in order, so adding/removing a value on either side without the other
-/// fails here rather than at runtime.
+/// fails here rather than at runtime. Review round 1 finding F2 added the fourth test
+/// below (<c>presets_stack_check</c> against <see cref="PresetStacks.All"/>) after
+/// finding the migration introduced that vocabulary with neither a mirroring C#
+/// constant nor a drift test, unlike every other vocabulary here.
 /// </summary>
 public sealed class SubscriptionsConstraintDriftTests
 {
@@ -55,6 +58,14 @@ public sealed class SubscriptionsConstraintDriftTests
 		// subscriptions.lane reuses the RepoStores.All acquisition-lane vocabulary
 		// (migration 0104's own header comment) rather than a new one.
 		Assert.Equal(RepoStores.All, ParseCheckInList(migration0104, "subscriptions_lane_check"));
+	}
+
+	[Fact]
+	public void PresetStacksAll_EqualsPresetsStackCheckConstraintValueSet()
+	{
+		string migration0104 = ReadMigrationSql("0104_subscriptions_presets.sql");
+
+		Assert.Equal(PresetStacks.All, ParseCheckInList(migration0104, "presets_stack_check"));
 	}
 
 	/// <summary>The raw text of one embedded migration resource, matched by its filename suffix.</summary>

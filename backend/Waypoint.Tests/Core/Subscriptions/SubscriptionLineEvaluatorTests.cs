@@ -18,9 +18,10 @@ using Xunit;
 namespace Waypoint.Tests.Core.Subscriptions;
 
 /// <summary>
-/// Issue #1421 AC3: line-membership boundaries for subminor/minor/major/whole-release,
-/// including the quarantined-candidate delegation case. Fixture version strings are
-/// invented (repo convention, never lab/vendor-exported values).
+/// Issue #1421 AC3 (amended 2026-09-07 to ADR-0028's three tracking widths):
+/// line-membership boundaries for subminor/minor/major, including the
+/// quarantined-candidate delegation case. Fixture version strings are invented (repo
+/// convention, never lab/vendor-exported values).
 /// </summary>
 public sealed class SubscriptionLineEvaluatorTests
 {
@@ -33,7 +34,6 @@ public sealed class SubscriptionLineEvaluatorTests
 	[InlineData("11.4.7", "11.5.0", SubscriptionLineGranularity.Minor, SubscriptionLineMembership.OutOfLine)]
 	[InlineData("11.4.7", "11.9.2", SubscriptionLineGranularity.Major, SubscriptionLineMembership.InLine)]
 	[InlineData("11.4.7", "12.0.0", SubscriptionLineGranularity.Major, SubscriptionLineMembership.OutOfLine)]
-	[InlineData("11.4.7", "97.13.2", SubscriptionLineGranularity.WholeRelease, SubscriptionLineMembership.InLine)]
 	public void Evaluate_ParsedCandidate_MatchesExpectedMembership(
 		string anchor, string candidate, SubscriptionLineGranularity granularity, SubscriptionLineMembership expected)
 	{
@@ -51,15 +51,6 @@ public sealed class SubscriptionLineEvaluatorTests
 		// Undated AND unparseable -- epic #16 decision R2-5's quarantine rung.
 		SubscriptionLineEvaluation result = _evaluator.Evaluate(
 			"11.4.7", product: null, granularity, candidateVersion: "N/A", candidateCatalogReleaseDate: null);
-
-		Assert.Equal(SubscriptionLineMembership.Quarantined, result.Membership);
-	}
-
-	[Fact]
-	public void Evaluate_QuarantinedCandidate_NeverRanksInLine_EvenAtWholeRelease()
-	{
-		SubscriptionLineEvaluation result = _evaluator.Evaluate(
-			"11.4.7", product: null, SubscriptionLineGranularity.WholeRelease, candidateVersion: "TBD", candidateCatalogReleaseDate: null);
 
 		Assert.Equal(SubscriptionLineMembership.Quarantined, result.Membership);
 	}

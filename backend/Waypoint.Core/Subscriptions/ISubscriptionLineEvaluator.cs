@@ -19,7 +19,7 @@ namespace Waypoint.Core.Subscriptions;
 /// <summary>Outcome of asking whether one candidate version falls within a subscription's tracked line.</summary>
 public enum SubscriptionLineMembership
 {
-	/// <summary>The candidate's line matches the anchor's line at the declared granularity (or the granularity is <see cref="SubscriptionLineGranularity.WholeRelease"/>).</summary>
+	/// <summary>The candidate's line matches the anchor's line at the declared granularity.</summary>
 	InLine,
 
 	/// <summary>The candidate parsed (or date-ordered) but its line does not match the anchor's.</summary>

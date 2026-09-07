@@ -538,20 +538,29 @@ public sealed class SchemaMigrationTests
 	/// 0082-0106 numbering gap 0107's own header reserves for concurrently
 	/// in-flight sibling issues): adds <c>presets</c> (shipped read-only rows and
 	/// operator clone-to-custom rows, <c>source_preset_id</c> naming lineage) and
-	/// <c>subscriptions</c> (product/lane tracked at a subminor/minor/major/
-	/// whole-release <c>line_granularity</c>, anchored at a version string,
-	/// nullable <c>preset_id</c>, and per-lane UMDS/VKS refresh-window and
-	/// retention-override dial columns) -- domain model and persistence only, no
-	/// evaluation-job wiring (#1046), API surface (#1450/#1453), or cross-lane
-	/// supersession (#1437). <c>subscriptions.lane</c> reuses the existing
-	/// <c>Waypoint.Core.Secrets.RepoStores.All</c> acquisition-lane vocabulary
-	/// rather than a new one; both tables' <c>line_granularity</c> CHECK
-	/// constraints match <c>Waypoint.Core.Subscriptions.SubscriptionLineGranularityValues.All</c>,
-	/// proven by <c>SubscriptionsConstraintDriftTests</c> (this repo's
-	/// #1517/RepoCredentialBindingConstraintDriftTests convention). No new runner
-	/// grants -- no runner-claimed job reads or writes either table yet; the first
-	/// consumer that needs runner-side access ships its own GRANT migration
-	/// (0100/0107 precedent) --
+	/// <c>subscriptions</c> (product/lane tracked at a subminor/minor/major
+	/// <c>line_granularity</c> -- ADR-0028 names exactly these three widths;
+	/// review round 1 removed a fourth <c>whole-release</c> value the issue's own
+	/// AC3 had modelled in error, per the 2026-09-07 AC amendment -- anchored at a
+	/// version string, nullable <c>preset_id</c>, and per-lane UMDS/VKS
+	/// refresh-window and retention-override dial columns) -- domain model and
+	/// persistence only, no evaluation-job wiring (#1046), API surface
+	/// (#1450/#1453), or cross-lane supersession (#1437). <c>subscriptions.lane</c>
+	/// reuses the existing <c>Waypoint.Core.Secrets.RepoStores.All</c>
+	/// acquisition-lane vocabulary rather than a new one; both tables'
+	/// <c>line_granularity</c> CHECK constraints match
+	/// <c>Waypoint.Core.Subscriptions.SubscriptionLineGranularityValues.All</c>, and
+	/// <c>presets.stack</c>'s CHECK matches
+	/// <c>Waypoint.Core.Subscriptions.PresetStacks.All</c> (round 1 finding F2 --
+	/// the migration originally introduced that vocabulary with no mirroring C#
+	/// constant), both proven by <c>SubscriptionsConstraintDriftTests</c> (this
+	/// repo's #1517/RepoCredentialBindingConstraintDriftTests convention). Two
+	/// lineage CHECKs (<c>presets_lineage_requires_custom_check</c>,
+	/// <c>presets_source_preset_id_not_self_check</c>) enforce, in schema, the
+	/// invariant the table's own comments state but the original migration left
+	/// unenforced (round 1 finding F4). No new runner grants -- no runner-claimed
+	/// job reads or writes either table yet; the first consumer that needs
+	/// runner-side access ships its own GRANT migration (0100/0107 precedent) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
 	private const int ExpectedMigrationCount = 94;
 

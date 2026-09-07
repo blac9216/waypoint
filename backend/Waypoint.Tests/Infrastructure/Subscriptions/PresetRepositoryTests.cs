@@ -137,4 +137,41 @@ public sealed class PresetRepositoryTests : IAsyncLifetime
 
 		Assert.Null(await _repository.GetAsync(id, CancellationToken.None));
 	}
+
+	/// <summary>Review round 1 finding F2: <c>presets.stack</c> is a closed vocabulary (<see cref="PresetStacks"/>) enforced by <c>presets_stack_check</c>.</summary>
+	[Fact]
+	public async Task CreateAsync_InvalidStack_ViolatesCheckConstraint()
+	{
+		Preset invalidStack = NewShippedPreset() with { Id = Guid.Empty, Stack = "not-a-real-stack" };
+
+		await Assert.ThrowsAsync<PostgresException>(() => _repository.CreateAsync(invalidStack, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Review round 1 finding F4: <c>presets_lineage_requires_custom_check</c>
+	/// rejects a shipped (<c>is_custom = false</c>) row that names a
+	/// <c>source_preset_id</c> -- the migration's own comment says lineage only
+	/// exists for a clone.
+	/// </summary>
+	[Fact]
+	public async Task CreateAsync_ShippedPresetWithSourcePresetId_ViolatesCheckConstraint()
+	{
+		Guid shippedId = await _repository.CreateAsync(NewShippedPreset("vcf-shipped-lineage-source"), CancellationToken.None);
+		Preset invalidLineage = NewShippedPreset("vcf-shipped-with-lineage") with { Id = Guid.Empty, IsCustom = false, SourcePresetId = shippedId };
+
+		await Assert.ThrowsAsync<PostgresException>(() => _repository.CreateAsync(invalidLineage, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Review round 1 finding F4: <c>presets_source_preset_id_not_self_check</c>
+	/// rejects a preset that names itself as its own clone source.
+	/// </summary>
+	[Fact]
+	public async Task CreateAsync_SelfReferencingSourcePresetId_ViolatesCheckConstraint()
+	{
+		Guid selfId = Guid.NewGuid();
+		Preset selfReferencing = NewShippedPreset("self-referencing") with { Id = selfId, IsCustom = true, SourcePresetId = selfId };
+
+		await Assert.ThrowsAsync<PostgresException>(() => _repository.CreateAsync(selfReferencing, CancellationToken.None));
+	}
 }

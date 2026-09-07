@@ -19,10 +19,19 @@ namespace Waypoint.Core.Subscriptions;
 /// declares (issue #1421, ADR-0028, epic #16 decision 5: "tracking at
 /// subminor/minor/major granularity ... no hardcoded major versions"). Migration
 /// 0104's <c>line_granularity</c> columns store the lower-kebab-case member names
-/// below (<c>subminor</c>/<c>minor</c>/<c>major</c>/<c>whole-release</c>) -- see
+/// below (<c>subminor</c>/<c>minor</c>/<c>major</c>) -- see
 /// <see cref="SubscriptionLineGranularityValues"/> for the string<->enum mapping every
 /// caller and CHECK-constraint drift test must go through, rather than each caller
 /// inventing its own string literal.
+/// <para>
+/// Issue #1421 AC amendment (2026-09-07, review round 1 F-finding): ADR-0028's
+/// Decision names exactly three tracking widths -- "tracking granularity is
+/// subminor/minor/major ... and adopting a subscription pulls the whole release
+/// (every bundle/binary), not a filtered subset". "Pulls the whole release" is
+/// artifact completeness (what a lane acquires once a subscription is in-line), not
+/// a fourth tracking width -- a prior revision of this type modelled it as one
+/// (<c>WholeRelease</c>), which matched every parseable candidate and was removed.
+/// </para>
 /// </summary>
 public enum SubscriptionLineGranularity
 {
@@ -34,14 +43,6 @@ public enum SubscriptionLineGranularity
 
 	/// <summary>First numeric segment must match the anchor's line, e.g. <c>8</c>. Maps to <see cref="Waypoint.Core.Versions.VersionLineGranularity.Major"/>.</summary>
 	Major,
-
-	/// <summary>
-	/// No line boundary at all -- every parsed, non-quarantined release of the
-	/// tracked product/lane is in scope. The broadest option; has no
-	/// <see cref="Waypoint.Core.Versions.VersionLineGranularity"/> counterpart since
-	/// it never narrows by numeric segment.
-	/// </summary>
-	WholeRelease,
 }
 
 /// <summary>
@@ -57,17 +58,15 @@ public static class SubscriptionLineGranularityValues
 	public const string Subminor = "subminor";
 	public const string Minor = "minor";
 	public const string Major = "major";
-	public const string WholeRelease = "whole-release";
 
 	/// <summary>Declaration order matches the migration's CHECK constraint value list.</summary>
-	public static readonly IReadOnlyList<string> All = [Subminor, Minor, Major, WholeRelease];
+	public static readonly IReadOnlyList<string> All = [Subminor, Minor, Major];
 
 	public static string ToDbValue(SubscriptionLineGranularity granularity) => granularity switch
 	{
 		SubscriptionLineGranularity.Subminor => Subminor,
 		SubscriptionLineGranularity.Minor => Minor,
 		SubscriptionLineGranularity.Major => Major,
-		SubscriptionLineGranularity.WholeRelease => WholeRelease,
 		_ => throw new ArgumentOutOfRangeException(nameof(granularity), granularity, null),
 	};
 
@@ -76,7 +75,6 @@ public static class SubscriptionLineGranularityValues
 		Subminor => SubscriptionLineGranularity.Subminor,
 		Minor => SubscriptionLineGranularity.Minor,
 		Major => SubscriptionLineGranularity.Major,
-		WholeRelease => SubscriptionLineGranularity.WholeRelease,
 		_ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unrecognised subscription line granularity."),
 	};
 }

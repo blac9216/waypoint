@@ -30,26 +30,20 @@ public sealed class SubscriptionLineEvaluator : ISubscriptionLineEvaluator
 		ArgumentException.ThrowIfNullOrWhiteSpace(candidateVersion);
 
 		// Quarantine is decided first and unconditionally -- a quarantined candidate
-		// can never become "in line" no matter the granularity, including
-		// whole-release (issue #1421 AC3, epic #16 decision R2-5).
+		// can never become "in line" no matter the granularity (issue #1421 AC3, epic
+		// #16 decision R2-5).
 		ClassifiedProductVersion candidate = ProductVersionClassifier.Classify(candidateVersion, product, candidateCatalogReleaseDate);
 		if (candidate.Outcome == VersionClassificationOutcome.Quarantined)
 		{
 			return new SubscriptionLineEvaluation(SubscriptionLineMembership.Quarantined, AnchorLine: null, CandidateLine: null);
 		}
 
-		// whole-release tracks every non-quarantined release of the product/lane --
-		// no numeric line boundary at all, so there is nothing further to compare.
-		if (granularity == SubscriptionLineGranularity.WholeRelease)
-		{
-			return new SubscriptionLineEvaluation(SubscriptionLineMembership.InLine, AnchorLine: null, CandidateLine: null);
-		}
-
 		VersionLineGranularity lineGranularity = ToVersionLineGranularity(granularity);
 
 		// A date-ordered candidate (unparseable but dated) has no numeric segments to
-		// extract a line from at a numeric granularity -- it can never be judged
-		// in-line against a subminor/minor/major anchor, only against whole-release.
+		// extract a line from -- it can never be judged in-line against a
+		// subminor/minor/major anchor (issue #1421 AC amendment 2026-09-07: ADR-0028
+		// names exactly these three tracking widths).
 		if (candidate.Outcome != VersionClassificationOutcome.Parsed || candidate.Parsed is null)
 		{
 			return new SubscriptionLineEvaluation(SubscriptionLineMembership.OutOfLine, AnchorLine: null, CandidateLine: null);
@@ -77,6 +71,6 @@ public sealed class SubscriptionLineEvaluator : ISubscriptionLineEvaluator
 		SubscriptionLineGranularity.Subminor => VersionLineGranularity.Subminor,
 		SubscriptionLineGranularity.Minor => VersionLineGranularity.Minor,
 		SubscriptionLineGranularity.Major => VersionLineGranularity.Major,
-		_ => throw new ArgumentOutOfRangeException(nameof(granularity), granularity, "WholeRelease is handled before this call and has no VersionLineGranularity counterpart."),
+		_ => throw new ArgumentOutOfRangeException(nameof(granularity), granularity, null),
 	};
 }

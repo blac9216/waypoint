@@ -19,13 +19,24 @@
 -- number is ever hardcoded in a migration or in C# (epic #16 decision 5 / this
 -- issue's own AC4) -- the appliance's shipped-preset seed data supplies the actual
 -- values, not this migration. line_granularity is the tracking-line vocabulary
--- ADR-0028 fixes: subminor/minor/major/whole-release (subminor/minor/major mirror
--- Waypoint.Core.Versions.VersionLineGranularity 1:1; whole-release tracks every
--- release of the product with no line boundary at all, the broadest option, and
--- has no VersionLineGranularity counterpart since it never narrows by numeric
--- segment). anchor_version is nullable because a from-scratch custom preset (no
+-- ADR-0028's Decision fixes: subminor/minor/major, mirroring
+-- Waypoint.Core.Versions.VersionLineGranularity 1:1 (issue #1421 AC amendment
+-- 2026-09-07, review round 1: ADR-0028 names exactly three widths -- "adopting a
+-- subscription pulls the whole release (every bundle/binary)" is artifact
+-- completeness, not a fourth tracking width, so no whole-release value exists
+-- here). anchor_version is nullable because a from-scratch custom preset (no
 -- source_preset_id) may exist before an operator has picked a starting version;
--- a shipped preset always carries one.
+-- a shipped preset always carries one. stack is a second closed vocabulary
+-- (VCF/VVF), mirrored by Waypoint.Core.Subscriptions.PresetStacks.All and proven
+-- against this CHECK by SubscriptionsConstraintDriftTests (review round 1 F2),
+-- the same convention subscriptions.lane below follows against RepoStores.All.
+-- The two lineage CHECKs below enforce, in the schema rather than only in prose,
+-- the invariant this table's own COMMENT ON COLUMN source_preset_id states
+-- (review round 1 F4): a shipped preset (is_custom = false) may never carry
+-- lineage, and a preset may never name itself as its own clone source. Neither
+-- CHECK catches a longer cycle (A clones from B, B clones from A) -- Postgres has
+-- no portable per-row CHECK for that, and no evaluation logic in this PR walks
+-- lineage chains yet, so a longer cycle is left undetected here.
 CREATE TABLE IF NOT EXISTS presets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     stack TEXT NOT NULL,
@@ -39,7 +50,11 @@ CREATE TABLE IF NOT EXISTS presets (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT presets_stack_check CHECK (stack IN ('VCF', 'VVF')),
     CONSTRAINT presets_line_granularity_check
-        CHECK (line_granularity IN ('subminor', 'minor', 'major', 'whole-release'))
+        CHECK (line_granularity IN ('subminor', 'minor', 'major')),
+    CONSTRAINT presets_lineage_requires_custom_check
+        CHECK (source_preset_id IS NULL OR is_custom = true),
+    CONSTRAINT presets_source_preset_id_not_self_check
+        CHECK (source_preset_id IS NULL OR source_preset_id <> id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_presets_is_custom ON presets (is_custom);
@@ -53,7 +68,7 @@ COMMENT ON TABLE presets IS
 COMMENT ON COLUMN presets.generation IS
     'Data, not a literal: e.g. the text "9.0". No migration or C# source hardcodes a release generation (epic #16 decision 5).';
 COMMENT ON COLUMN presets.source_preset_id IS
-    'The preset this row was cloned from, when is_custom = true and the clone has known lineage. NULL for a shipped preset or a from-scratch custom preset.';
+    'The preset this row was cloned from, when is_custom = true and the clone has known lineage. NULL for a shipped preset or a from-scratch custom preset -- enforced by presets_lineage_requires_custom_check (a non-NULL value requires is_custom = true) and presets_source_preset_id_not_self_check (a preset may never name itself).';
 
 -- subscriptions ------------------------------------------------------------------------
 -- One row per operator-durable "keep this scope current" expression (ADR-0028): a
@@ -87,7 +102,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     CONSTRAINT subscriptions_lane_check
         CHECK (lane IN ('depot', 'umds', 'photon', 'vmtools', 'vks', 'content-libraries')),
     CONSTRAINT subscriptions_line_granularity_check
-        CHECK (line_granularity IN ('subminor', 'minor', 'major', 'whole-release')),
+        CHECK (line_granularity IN ('subminor', 'minor', 'major')),
     CONSTRAINT subscriptions_refresh_window_days_check CHECK (refresh_window_days IS NULL OR refresh_window_days > 0),
     CONSTRAINT subscriptions_retention_override_days_check CHECK (retention_override_days IS NULL OR retention_override_days > 0)
 );
