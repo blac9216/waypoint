@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Downloads;
@@ -377,5 +378,47 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 
 		Assert.Contains(tracked, s => s.Id == trackedId);
 		Assert.DoesNotContain(tracked, s => s.Id == gracedId);
+	}
+
+	/// <summary>
+	/// Issue #1787 AC1: <c>ListByStateAsync</c>'s own SQL ("ORDER BY created_at, id")
+	/// is a unique total order, exercised here independently of
+	/// <see cref="Waypoint.Api.Controllers.RetentionController"/>'s in-memory
+	/// tiebreak so this fails on a regression in the repository's SQL even if the
+	/// controller's comparator masked it. With every row forced to share one
+	/// created_at, "id" is the sole determinant of Postgres's row order; Postgres
+	/// compares its native <c>uuid</c> by raw byte value, which matches ordinal
+	/// comparison of each id's canonical (RFC 4122) hex text -- the same text both
+	/// Postgres and <see cref="Guid.ToString()"/> render -- so that ordinal
+	/// comparison, not <see cref="Guid.CompareTo"/> (a different, .NET-internal
+	/// field order), is the correct oracle for the SQL side.
+	/// </summary>
+	[Fact]
+	public async Task ListByStateAsync_RowsShareOneCreatedAt_OrdersByCreatedAtThenId()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		List<Guid> stateIds = [];
+		for (int i = 0; i < 5; i++)
+		{
+			Guid artifactId = await InsertDepotArtifactAsync(connection, $"retained-content-sql-order-{i:D2}");
+			Guid stateId = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+			stateIds.Add(stateId);
+		}
+
+		DateTimeOffset sharedCreatedAt = DateTimeOffset.UtcNow;
+		await using NpgsqlCommand update = new(
+			"UPDATE download_retained_content_state SET created_at = $1 WHERE id = ANY($2)", connection);
+		update.Parameters.AddWithValue(sharedCreatedAt);
+		update.Parameters.AddWithValue(stateIds.ToArray());
+		await update.ExecuteNonQueryAsync();
+
+		IReadOnlyList<RetainedContentState> listed = await _repository.ListByStateAsync(
+			RetainedContentStates.Tracked, CancellationToken.None);
+
+		Guid[] expected = [.. stateIds.OrderBy(id => id.ToString(), StringComparer.Ordinal)];
+		Guid[] actual = [.. listed.Select(s => s.Id)];
+		Assert.Equal(expected, actual);
 	}
 }

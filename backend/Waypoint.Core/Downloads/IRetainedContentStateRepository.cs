@@ -41,8 +41,10 @@ public interface IRetainedContentStateRepository
 	/// migration 0127 grants <c>waypoint_download_runner</c> only <c>SELECT,
 	/// UPDATE</c> on this table (see <see cref="IRetentionSweepService"/>'s own doc
 	/// comment), so the runner-executed sweep can never call this INSERT; it skips
-	/// an untracked candidate instead. This method exists for the future API-process
-	/// caller (#1453) that first names an artifact as retention-worthy.
+	/// an untracked candidate instead. This method exists for the API-process caller
+	/// landed by #1453 (<c>Waypoint.Infrastructure.Downloads.ReviewListDeletionService</c>,
+	/// deleting an out-of-scope review-list entry) that first names an artifact as
+	/// retention-worthy.
 	/// </summary>
 	Task<Guid> EnsureTrackedAsync(Guid depotArtifactId, Guid? policyId, CancellationToken cancellationToken);
 
