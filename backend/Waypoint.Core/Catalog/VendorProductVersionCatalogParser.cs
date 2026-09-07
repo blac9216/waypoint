@@ -33,7 +33,7 @@ namespace Waypoint.Core.Catalog;
 /// rationale.
 ///
 /// Also carries each bundle's own <c>id</c> field onto
-/// <see cref="DepotArtifactUpsert.BundleId"/> (migration 0130, issue #1783) -- the
+/// <see cref="DepotArtifactUpsert.BundleId"/> (migration 0132, issue #1783) -- the
 /// identifier the real vcf-download-tool's <c>binaries download --id</c> actually
 /// selects on (#1027 finding: <c>BINARY_NOT_FOUND_IN_LOCAL_PVC</c>, "bundles are
 /// addressed by catalog id"), never the same value as <c>fileName</c>. A binary whose

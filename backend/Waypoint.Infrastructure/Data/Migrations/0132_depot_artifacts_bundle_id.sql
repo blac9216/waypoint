@@ -1,6 +1,8 @@
--- Issue #1783 (part of validation epic #1704; slot 0130 -- the next free slot after
--- #1705's 0129 at the time this migration was authored, verified against both the
--- migrations directory and `gh pr list --state open` before use): live validation run
+-- Issue #1783 (part of validation epic #1704; slot 0132 -- 0130 and 0131 were both
+-- claimed by other in-flight PRs (#1791/#1509's 0130_photon_lane_index.sql, and 0131
+-- assigned to #1464) after this migration was originally authored at 0130; renumbered
+-- per orchestrator correction, verified against both the migrations directory and
+-- `gh pr list --state open` before use): live validation run
 -- 2 of #1704 proved `binaries-download` passes `depot_artifacts.relative_path`
 -- (the catalog's binary fileName, VendorProductVersionCatalogParser's own
 -- flattening key) as the real vcf-download-tool's `--id`, which the tool never

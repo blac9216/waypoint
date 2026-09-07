@@ -54,7 +54,7 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	/// <c>CatalogIndexJobHandler</c>) had just recorded. A caller that does
 	/// know a new, smaller size (e.g. a corrected catalog re-index) still wins,
 	/// because <c>COALESCE</c> only falls back when the incoming value is null, not
-	/// when it is present but different. <c>bundle_id</c> (migration 0130, issue
+	/// when it is present but different. <c>bundle_id</c> (migration 0132, issue
 	/// #1783) uses the identical <c>COALESCE(EXCLUDED.bundle_id, ...)</c> pattern: a
 	/// present/failed verification upsert (<c>DownloadJobHandler</c>/
 	/// <c>BinariesDownloadJobHandler</c>) never carries a bundle id and must not null

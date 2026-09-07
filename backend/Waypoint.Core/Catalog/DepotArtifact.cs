@@ -37,7 +37,7 @@ namespace Waypoint.Core.Catalog;
 /// <see cref="SizeBytes"/> and <see cref="LastVerifiedAt"/> are migration 0100's other
 /// new columns; <see cref="LastVerifiedAt"/> is left null by every upsert path in this
 /// slice (deciding when a row counts as freshly verified is presence-sweep behavior,
-/// #1503/#1512). <see cref="BundleId"/> is migration 0130's (issue #1783) new column:
+/// #1503/#1512). <see cref="BundleId"/> is migration 0132's (issue #1783) new column:
 /// the vendor catalog's <c>artifacts.bundles[].id</c>, the identifier the real
 /// vcf-download-tool's <c>binaries download --id</c> actually selects on (#1027
 /// finding) -- distinct from <see cref="ExternalId"/> (the binary fileName). Null for
@@ -72,7 +72,7 @@ public sealed record DepotArtifact(
 /// it defaults to null so every pre-existing call site that does not yet know a
 /// binary's size keeps compiling unchanged -- populating it for every write path is
 /// out of this slice's scope (#1503/#1512). <see cref="BundleId"/> is migration
-/// 0130's (issue #1783) new field, populated by
+/// 0132's (issue #1783) new field, populated by
 /// <see cref="VendorProductVersionCatalogParser"/> from the vendor catalog's
 /// <c>artifacts.bundles[].id</c> -- the identifier the real tool's
 /// <c>binaries download --id</c> selects on, never the same value as

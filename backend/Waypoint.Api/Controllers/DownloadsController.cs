@@ -247,7 +247,7 @@ public sealed class DownloadsController : ControllerBase
 	/// job, not fanned out as a race on the same target.
 	///
 	/// Issue #1783: any resolved artifact missing a catalog <c>bundle_id</c> (rows
-	/// indexed before migration 0130, or by the offline disk walk, which has no
+	/// indexed before migration 0132, or by the offline disk walk, which has no
 	/// vendor catalog document to read one from) fails the WHOLE batch with a 409
 	/// (<c>catalog_missing_bundle_id</c>) before any run is created, rather than
 	/// enqueue a job with nothing usable to pass as the real tool's <c>--id</c>.
@@ -307,7 +307,7 @@ public sealed class DownloadsController : ControllerBase
 			}
 		}
 
-		// Issue #1783: a row indexed before migration 0130 (or by the offline disk
+		// Issue #1783: a row indexed before migration 0132 (or by the offline disk
 		// walk, which has no vendor catalog document to read a bundle id from) has no
 		// bundle_id -- there is nothing this fanout could pass as the real tool's
 		// --id, and enqueuing anyway would repeat this issue's silent "0 elements"

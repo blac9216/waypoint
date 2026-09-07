@@ -318,7 +318,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 
 	/// <summary>
 	/// Issue #1783: a resolved artifact with no catalog <c>bundle_id</c> (a row indexed
-	/// before migration 0130, or by the offline disk walk, which has no vendor catalog
+	/// before migration 0132, or by the offline disk walk, which has no vendor catalog
 	/// document to read one from) refuses the WHOLE batch with a 409 before any run is
 	/// created -- never enqueue a job with nothing usable to pass as the real tool's
 	/// <c>--id</c>.
@@ -918,7 +918,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 			CancellationToken.None);
 	}
 
-	/// <summary>Issue #1783: an artifact with no bundle id -- the row shape a pre-migration-0130 pull, or the offline disk walk, still produces.</summary>
+	/// <summary>Issue #1783: an artifact with no bundle id -- the row shape a pre-migration-0132 pull, or the offline disk walk, still produces.</summary>
 	private async Task<Guid> SeedArtifactWithoutBundleIdAsync(string externalIdTag)
 	{
 		return await _artifacts.UpsertAsync(
