@@ -14,6 +14,7 @@
 
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Downloads;
 using Xunit;
 
@@ -155,9 +156,61 @@ public sealed class BinariesDownloadToolTests : IDisposable
 			""");
 	}
 
+	/// <summary>
+	/// Round-1 review finding: <see cref="WellFormedInvocation_AgainstRealContractStub_ReturnsOk"/>
+	/// and its siblings only ever assert that whatever <c>id</c> string
+	/// <c>DownloadAsync</c> was called with literally appears in argv -- tautological
+	/// for the real-world CRITICAL bug (issue #1783), since the tool has no opinion at
+	/// this test's level about WHICH id (bundle vs. external/relative-path) it was
+	/// given. This variant mirrors the real tool's own selection behavior instead: it
+	/// treats <paramref name="validId"/> as the only <c>--id=</c> value that resolves a
+	/// real selection, and reports the "0 elements" empty-selection table (the exact
+	/// shape <c>BinariesDownloadTool.TryDetectEmptySelectionFailure</c> detects) for any
+	/// other id -- including an external_id-shaped one, so a caller (production or a
+	/// test) that ever passes the wrong id genuinely fails here, not merely by
+	/// assertion.
+	/// </summary>
+	private string IdAwareContractStub(string validId)
+	{
+		string logAppend = $"echo \"$*\" >> \"{Path.Combine(_root, "calls.log")}\"";
+
+		return Script(
+			$$"""
+			{{logAppend}}
+			id_value=""
+			for arg in "$@"; do
+			  case "$arg" in
+			    --id=*) id_value="${arg#--id=}" ;;
+			  esac
+			done
+			if [ "$id_value" = "{{validId}}" ]; then
+			  cat <<'STDOUT_EOF'
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			{{validId}} | VCENTER | VMware vCenter Server | 9.1.0 | 2026-01-01 | 512 MB | ISO
+			---------------------------------------------------------------------------
+			1 elements
+			STDOUT_EOF
+			else
+			  cat <<'STDOUT_EOF'
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			0 elements
+			---------------------------------------------------------------------------
+			STDOUT_EOF
+			fi
+			exit 0
+			""");
+	}
+
 	private static string Script(string body) => "#!/bin/sh\n" + body;
 
-	private BinariesDownloadTool CreateTool(string script, out string callLogPath, IManagedToolPresenceChecker? presenceChecker = null)
+	private BinariesDownloadTool CreateTool(
+		string script, out string callLogPath, IManagedToolPresenceChecker? presenceChecker = null, ISecretRedactor? redactor = null)
 	{
 		string binDir = Path.Combine(_root, "active", "bin");
 		Directory.CreateDirectory(binDir);
@@ -175,7 +228,7 @@ public sealed class BinariesDownloadToolTests : IDisposable
 			LibraryRelativePath = "lib",
 			BinariesDownloadTimeout = TimeSpan.FromSeconds(10),
 		};
-		return new BinariesDownloadTool(Options.Create(options), presenceChecker ?? new AlwaysPresent());
+		return new BinariesDownloadTool(Options.Create(options), presenceChecker ?? new AlwaysPresent(), redactor ?? new InPlaySecretRedactor());
 	}
 
 	private static void MakeExecutable(string path)
@@ -322,7 +375,142 @@ public sealed class BinariesDownloadToolTests : IDisposable
 	}
 
 	/// <summary>
-	/// The concurrency AC's class-killer: two invocations given DIFFERENT job-scoped
+	/// Issue #1783: a stub that mimics the real tool's own "wrong id" behavior --
+	/// exit 0, but the "Binaries to be downloaded" table selects "0 elements" -- must
+	/// be reported as a FAILURE, naming the id that was given, never a silent no-op
+	/// success. This is the class-killer for Option B: reverting the empty-selection
+	/// check makes this assert <c>result.Succeeded</c> is true, which it must not be.
+	/// </summary>
+	[Fact]
+	public async Task ZeroElementsSelected_ExitsZeroButFailsWithActionableNoteNamingTheId()
+	{
+		const string stdout = """
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			0 elements
+			---------------------------------------------------------------------------
+			""";
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 0, stdout: stdout), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"wrong-id-not-a-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsAuthFailure);
+		Assert.Contains("0 elements", result.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains("wrong-id-not-a-bundle", result.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #1783: a nonzero element count is a real selection -- left alone as a success, never treated as empty.</summary>
+	[Fact]
+	public async Task NonZeroElementsSelected_ExitsZeroAndSucceeds()
+	{
+		const string stdout = """
+			Binaries to be downloaded:
+			---------------------------------------------------------------------------
+			ID | Component | Component Full Name | Version | Release Date | Size | Type
+			---------------------------------------------------------------------------
+			b1 | VCENTER | VMware vCenter Server | 9.1.0 | 2026-01-01 | 512 MB | ISO
+			---------------------------------------------------------------------------
+			1 elements
+			""";
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 0, stdout: stdout), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"b1", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.True(result.Succeeded);
+	}
+
+	/// <summary>
+	/// Issue #1785: the real tool's stdout on failure is only a misleading banner
+	/// ("Depot connection failure") -- the actual cause lives in the tool's own log
+	/// file at <c>&lt;identityHome&gt;/log/vdt.log</c>. This proves BOTH halves of the
+	/// fix: the reported failure reason names the real error line from the log (never
+	/// just the banner), and classification uses it too (the disk-failure phrase lives
+	/// ONLY in the log here, never in stdout, so a pre-fix shape that classifies off
+	/// stdout alone would fall through to a generic failure instead of DiskFailed).
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_SurfacesMeaningfulTailFromItsOwnLogFile_NotJustTheBanner()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-log-tail");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+		File.WriteAllText(Path.Combine(logDirectory, "vdt.log"),
+			"""
+			2026-01-01 00:00:00 INFO  Validating depot credentials.
+			2026-01-01 00:00:01 INFO  Depot credentials are valid.
+			2026-01-01 00:00:02 ERROR Permission denied opening product version catalog file.
+			2026-01-01 00:00:02 ERROR Caused by: java.io.FileNotFoundException: /depot/PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json (Permission denied)
+			""");
+		string misleadingBanner =
+			"*Welcome to VCF Download Tool*\nVersion: 9.1.0.0400\n" +
+			"Depot connection failure while downloading catalog. host: dl.broadcom.com:443, http status code: 000\n" +
+			$"Log file: {Path.Combine(logDirectory, "vdt.log")}";
+
+		BinariesDownloadTool tool = CreateTool(RealContractStub(exitCode: 1, stdout: misleadingBanner), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.Contains("Permission denied", result.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains("tool log", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Issue #1785: classification input includes the log tail, not just stdout -- a
+	/// disk-failure phrase that lives ONLY in the tool's own log (never in stdout's
+	/// generic banner) still drives the classifier to <see cref="BinariesDownloadResult.IsDiskFailure"/>.
+	/// A classifier that only ever looked at stdout (the pre-#1785 shape) would fall
+	/// through to a generic, non-specific failure here instead.
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_ClassifiesUsingLogTail_WhenStdoutIsGenericAndLogNamesDisk()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-log-classifies");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+		File.WriteAllText(Path.Combine(logDirectory, "vdt.log"),
+			"2026-01-01 00:00:00 INFO  Writing binary to depot store.\n" +
+			"2026-01-01 00:00:01 ERROR write failed: /vcf/PROD/bundle.tar: No space left on device\n");
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 1, stdout: "*Welcome to VCF Download Tool*\ninternal error: something unexpected went wrong."),
+			out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.True(result.IsDiskFailure);
+		Assert.False(result.IsAuthFailure);
+		Assert.Contains("No space left on device", result.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #1785: a missing/unreadable log file must never mask the underlying failure -- falls back to stdout/stderr alone, exactly as before this issue.</summary>
+	[Fact]
+	public async Task ToolFailure_NoLogFilePresent_StillFailsWithStdoutReason()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-no-log");
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 3, stdout: "Authentication failed: activation code is expired or revoked."), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.True(result.IsAuthFailure);
+		Assert.Contains("activation code", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>The concurrency AC's class-killer: two invocations given DIFFERENT job-scoped
 	/// identity homes and different asset ids must each seed and use ONLY their own
 	/// <c>machine_id</c> -- neither ever observes the other's, proving job-scoped
 	/// identity isolation (issue #1482 AC / grill decision R2-8) independent of
@@ -429,5 +617,120 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		int expectedLength = lineCount * (line.Length + 1);
 		Assert.Equal(expectedLength, result.Stdout.Length);
 		Assert.All(result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries), l => Assert.Equal(line, l));
+	}
+
+	/// <summary>
+	/// Round-1 review finding: the contract stub must itself be id-sensitive (see
+	/// <see cref="IdAwareContractStub"/>'s own doc comment) -- a bundle-shaped id
+	/// resolves a real selection and succeeds; a differently-shaped (external_id/
+	/// relative-path-like) id resolves nothing and fails via the real tool's own
+	/// "0 elements" empty-selection table, never a silent success.
+	/// </summary>
+	[Fact]
+	public async Task IdAwareContractStub_OnlyTheBundleShapedIdSelectsSomething()
+	{
+		const string bundleId = "bundle-9c3f-01";
+		const string externalIdShapedId = "vcf-9.1.0/binaries/vcenter-server.iso";
+		BinariesDownloadTool tool = CreateTool(IdAwareContractStub(bundleId), out _);
+		string depotDir = Path.Combine(_root, "depot");
+		string codeFile = WriteCodeFile();
+
+		BinariesDownloadResult matching = await tool.DownloadAsync(
+			bundleId, depotDir, codeFile, Path.Combine(_root, "identity", "job-match"), "asset-aaa", CancellationToken.None);
+		Assert.True(matching.Succeeded);
+
+		BinariesDownloadResult mismatched = await tool.DownloadAsync(
+			externalIdShapedId, depotDir, codeFile, Path.Combine(_root, "identity", "job-mismatch"), "asset-aaa", CancellationToken.None);
+		Assert.False(mismatched.Succeeded);
+		Assert.Contains("0 elements", mismatched.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains(externalIdShapedId, mismatched.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-1 review (minor 75): the identity home <c>vdt.log</c> is read from can hold
+	/// the download token in its own lines (e.g. an authorization header the real tool
+	/// logs while talking to Broadcom) -- this must never reach the persisted failure
+	/// reason/classification input unredacted, mirroring
+	/// <c>DepotEnrollmentJobHandler.ValidateCodeAsync</c>'s identical "jobs.note is a
+	/// sink too" redaction. Tracks an invented token-shaped secret via
+	/// <see cref="InPlaySecretRedactor"/> (the same mechanism <c>CredentialSecretStore</c>
+	/// uses when it decrypts the Activation Code in production) and asserts it never
+	/// appears in the result.
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_RedactsTrackedSecretInLogTail_BeforeItReachesTheFailureReason()
+	{
+		const string invented = "wpt-1785-download-token-9c3f-invented"; // gitleaks:allow — invented test canary, never a real credential
+		string identityHome = Path.Combine(_root, "identity", "job-redact");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+		File.WriteAllText(Path.Combine(logDirectory, "vdt.log"),
+			$"2026-01-01 00:00:00 INFO  Authorizing with token {invented}.\n" +
+			$"2026-01-01 00:00:01 ERROR Depot connection failure using token {invented}.\n");
+
+		InPlaySecretRedactor redactor = new();
+		using IDisposable handle = redactor.Track(invented);
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 1, stdout: "*Welcome to VCF Download Tool*\nDepot connection failure."), out _, redactor: redactor);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.DoesNotContain(invented, result.FailureReason!, StringComparison.Ordinal);
+		Assert.Contains("Depot connection failure", result.FailureReason!, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-1 review (minor 50): <c>vdt.log</c> is vendor-written and can grow
+	/// unboundedly -- reading it whole (<c>File.ReadAllText</c>) to extract a handful of
+	/// meaningful tail lines was the prior shape. Writes an oversized fake log (well
+	/// past <c>BinariesDownloadTool</c>'s bounded-tail read window) with a unique marker
+	/// at the very START (which a bounded tail read must NEVER see) and the real error
+	/// line only near the END (which it must still surface) -- proving the read is
+	/// bounded, not merely that it succeeds.
+	///
+	/// Round-2 review (minor 100, class-killer): the head marker MUST be
+	/// <c>ERROR</c>-shaped, not <c>INFO</c> -- <see cref="BinariesDownloadTool.ExtractMeaningfulTail"/>
+	/// filters every line through <c>LooksLikeErrorLine</c> before <c>TakeLast(5)</c>, so
+	/// an <c>INFO</c>-shaped marker is never selected however much of the file was read,
+	/// and the prior shape's assertion held identically with the 64 KiB bound removed --
+	/// proven by the reviewer restoring the pre-fix unbounded <c>long start = 0;</c> and
+	/// watching this test still pass. An <c>ERROR</c>-shaped marker means an unbounded
+	/// read WOULD surface it (picked up by <c>LooksLikeErrorLine</c>, kept by
+	/// <c>TakeLast(5)</c> alongside the trailing error line), so <c>Assert.DoesNotContain</c>
+	/// only holds because the bound keeps the reader from ever reaching it.
+	/// </summary>
+	[Fact]
+	public async Task ToolFailure_ReadsOnlyABoundedTailOfAnOversizedLogFile()
+	{
+		string identityHome = Path.Combine(_root, "identity", "job-oversized-log");
+		string logDirectory = Path.Combine(identityHome, "log");
+		Directory.CreateDirectory(logDirectory);
+
+		const string headMarker = "HEAD-MARKER-MUST-NEVER-BE-READ-9c3f";
+		using (StreamWriter writer = new(Path.Combine(logDirectory, "vdt.log")))
+		{
+			writer.WriteLine($"2026-01-01 00:00:00 ERROR {headMarker}");
+			string filler = new string('x', 78);
+			// Comfortably past any sane bounded-tail window (64 KiB) -- ~1 MiB of filler.
+			for (int i = 0; i < 13000; i++)
+			{
+				writer.WriteLine($"2026-01-01 00:00:00 INFO padding-line-{i:D6} {filler}");
+			}
+
+			writer.WriteLine("2026-01-01 23:59:59 ERROR Permission denied writing the last artifact.");
+		}
+
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 1, stdout: "*Welcome to VCF Download Tool*\ngeneric failure."), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.Contains("Permission denied", result.FailureReason!, StringComparison.Ordinal);
+		Assert.DoesNotContain(headMarker, result.FailureReason!, StringComparison.Ordinal);
 	}
 }

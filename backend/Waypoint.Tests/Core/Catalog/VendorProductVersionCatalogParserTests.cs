@@ -58,6 +58,56 @@ public sealed class VendorProductVersionCatalogParserTests
 		Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-fixture-9.1.0.6543-patch.iso");
 	}
 
+	/// <summary>
+	/// Issue #1783: the parser carries each bundle's own <c>id</c> onto
+	/// <see cref="DepotArtifactUpsert.BundleId"/> -- the identifier the real
+	/// vcf-download-tool's <c>binaries download --id</c> actually selects on (#1027
+	/// finding), never the same value as the binary's fileName
+	/// (<see cref="DepotArtifactUpsert.RelativePath"/>). Uses depot-mini's real
+	/// catalog document (bundle <c>b1</c> carries <c>vcsa-patch.iso</c>) rather than a
+	/// hand-typed fixture, per PR #1742's own shared-fixture convention this file
+	/// already follows.
+	/// </summary>
+	[Fact]
+	public void Parse_CarriesBundleIdOntoUpsert_DistinctFromFileName()
+	{
+		using DepotMiniFixture fixture = new();
+
+		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
+
+		DepotArtifactUpsert vcenterBinary = Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-patch.iso");
+		Assert.Equal("b1", vcenterBinary.BundleId);
+		Assert.NotEqual(vcenterBinary.RelativePath, vcenterBinary.BundleId);
+
+		// A second bundle (b2b) of the SAME catalog entry as b2 carries its OWN id --
+		// bundle id is per-bundle, not per-entry/per-component.
+		DepotArtifactUpsert secondBundleBinary = Assert.Single(result, r => r.RelativePath == "PROD/COMP/VCENTER/vcsa-fixture-9.1.0.6543-patch.iso");
+		Assert.Equal("b2b", secondBundleBinary.BundleId);
+	}
+
+	[Fact]
+	public void Parse_BundleWithNoIdField_StillParsesWithNullBundleId()
+	{
+		const string json = """
+			{
+			  "patches": {
+			    "VCENTER": [
+			      {
+			        "productVersion": "8.0.3",
+			        "artifacts": { "bundles": [
+			          { "binaries": [ { "fileName": "no-bundle-id.iso", "checksum": "aa", "size": 100 } ] }
+			        ] }
+			      }
+			    ]
+			  }
+			}
+			""";
+
+		DepotArtifactUpsert upsert = Assert.Single(VendorProductVersionCatalogParser.Parse(json));
+		Assert.Equal("PROD/COMP/VCENTER/no-bundle-id.iso", upsert.RelativePath);
+		Assert.Null(upsert.BundleId);
+	}
+
 	[Fact]
 	public void Parse_SameFileNameAcrossBundles_DeduplicatesByFileName()
 	{

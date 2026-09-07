@@ -29,16 +29,23 @@ namespace Waypoint.Core.Downloads;
 public interface IBinariesDownloadTool
 {
 	/// <summary>
-	/// Runs the bounded noninteractive <c>binaries download --id &lt;externalId&gt;
+	/// Runs the bounded noninteractive <c>binaries download --id &lt;id&gt;
 	/// --depot-store=&lt;depotStorePath&gt; --ceip=DISABLE</c> invocation (issue #1482's
 	/// documented contract) with <c>HOME</c>/<c>XDG_DATA_HOME</c> pointed at
 	/// <paramref name="identityHome"/>, after seeding that home's <c>machine_id</c> from
 	/// <paramref name="assetId"/> (mirrors <see cref="IDepotIdentityTool"/>'s "identity
 	/// follows the code" contract, issue #787). Never prompts; bounded by
 	/// <see cref="ManagedToolOptions"/>'s configured timeout.
+	///
+	/// <paramref name="id"/> MUST be the vendor catalog's bundle id
+	/// (<c>artifacts.bundles[].id</c>), never the artifact's <c>external_id</c>/relative
+	/// path -- issue #1783's live validation proved the real tool resolves an empty
+	/// ("0 elements") selection for the latter and exits 0, which this method's own
+	/// implementation now detects and reports as a failure rather than a silent no-op
+	/// success.
 	/// </summary>
 	Task<BinariesDownloadResult> DownloadAsync(
-		string externalId,
+		string id,
 		string depotStorePath,
 		string activationCodePath,
 		string identityHome,

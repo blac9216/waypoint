@@ -598,8 +598,9 @@ public sealed class SchemaMigrationTests
 	/// alongside; the other two tables get no grant yet (0118's <c>oci_bundles</c>
 	/// precedent for the same shape of gap), proven both directions by
 	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> --
-	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 96;
+	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file. Issue #1783
+	/// (migration 0132) added <c>depot_artifacts.bundle_id</c>, bumping 96 -&gt; 97.</summary>
+	private const int ExpectedMigrationCount = 97;
 
 	private readonly PostgresFixture _fixture;
 

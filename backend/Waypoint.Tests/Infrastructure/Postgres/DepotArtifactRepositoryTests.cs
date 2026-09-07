@@ -286,6 +286,50 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #1783: <c>bundle_id</c> (migration 0132) round-trips through
+	/// upsert/read, and a subsequent upsert that carries no bundle id (e.g. a
+	/// <c>DownloadJobHandler</c>/<c>BinariesDownloadJobHandler</c> present/failed
+	/// transition, which knows nothing about bundle ids) must not null out a
+	/// previously recorded one -- the same <c>COALESCE</c> convention
+	/// <c>Sha256</c>/<c>SizeBytes</c> already use.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_BundleId_RoundTripsAndSurvivesAReUpsertWithNullBundleId()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		Guid firstId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", "{}", BundleId: "bundle-abc"),
+			CancellationToken.None);
+
+		DepotArtifact? afterFirstUpsert = await _repository.GetByIdAsync(firstId, CancellationToken.None);
+		Assert.Equal("bundle-abc", afterFirstUpsert!.BundleId);
+
+		Guid secondId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "present", "{}"),
+			CancellationToken.None);
+
+		Assert.Equal(firstId, secondId);
+		DepotArtifact? afterSecondUpsert = await _repository.GetByIdAsync(secondId, CancellationToken.None);
+		Assert.Equal("bundle-abc", afterSecondUpsert!.BundleId);
+		Assert.Equal("present", afterSecondUpsert.Status);
+	}
+
+	/// <summary>Issue #1783: a row with no bundle id (the offline disk walk, or a pre-migration-0132 connected pull) reads back null, not an empty string or a throw.</summary>
+	[Fact]
+	public async Task UpsertAsync_NoBundleId_ReadsBackAsNull()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		Guid id = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", "{}"),
+			CancellationToken.None);
+
+		DepotArtifact? artifact = await _repository.GetByIdAsync(id, CancellationToken.None);
+		Assert.Null(artifact!.BundleId);
+	}
+
 	private static async Task<string> ReadMigrationSqlAsync(string fileName)
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
