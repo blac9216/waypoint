@@ -1,10 +1,10 @@
 -- Issue #1480 (epic #1184, split from #1054 (closed as design record 2026-08-30));
 -- research: lane #1031 (VKS library lane, ratified). Slot 0111 pre-assigned
 -- 2026-08-30; verified free against both the migrations directory and open PRs at
--- authoring time (main's ledger was at 91, 0129 last merged; #1509/#1389/#1765 hold
--- 0108/0113/0109 respectively and are still in flight -- whichever of this PR and
--- those merges later reconciles the ledger count, per this repo's standing
--- merge-verification convention for concurrent migration slots).
+-- authoring time (main's ledger was at 91, 0129 last merged; #1509/#1389 hold
+-- 0108/0113 respectively and are still in flight; #1765's 0109 has since
+-- landed on main, reconciled by this branch's round-1 rebase -- per this repo's
+-- standing merge-verification convention for concurrent migration slots).
 --
 -- This is the shared dual-backend identity/dimension model for children B/C/D of
 -- #1184's VKS rescope (model-only: no sync logic lands here). #1031 Layer B found a
@@ -21,9 +21,9 @@
 -- from release recency. `---` in the raw name encodes `+` in the upstream version
 -- string (`<k8s>+vmware.<n>-[fips-]vkr.<n>`) -- #1031's ordering finding, since
 -- every VKR catalog entry shares one releaseDate and version-string ordering is
--- the only reliable one; the comparator itself is a later child's concern (see
--- Waypoint.Infrastructure.Downloads.VksItemNameGrammarParser's own hand-off note
--- to #1039, not yet merged).
+-- the only reliable one; ordering itself is a later child's concern, using the
+-- shared Waypoint.Core.Versions.ProductVersionComparer (issue #1039, PR #1767,
+-- landed on main as 16fec7bf) rather than a local comparator.
 --
 -- vks_library_items ------------------------------------------------------------------
 -- One row per library item, from either backend (#1031 Layer D: the signed VCF

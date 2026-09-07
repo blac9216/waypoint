@@ -42,9 +42,15 @@ public sealed partial class VksItemNameGrammarParser : IVksItemNameGrammarParser
 	// series, not one -- `vmware.3-fips.1-tkg.1` (fips revision `.1`) and
 	// `vmware.3.1-tkg.1` (a vmware-build sub-revision, no fips) both occur. Only
 	// the base `vmware.<n>` digits are kept as this model's `vmware_build`
-	// dimension; the trailing `.<n>` (fips-revision or build-sub-revision alike)
-	// is matched so the grammar accepts both shapes but is not itself surfaced as
-	// a column dispatch's schema does not have.
+	// dimension; the trailing `.<n>` -- whether it is a fips revision or a
+	// vmware-build sub-revision -- is matched so the grammar accepts both shapes,
+	// but it is deliberately discarded rather than captured into any column: this
+	// model's schema has no sub-revision dimension for it to populate. Two
+	// upstream items differing only in that trailing `.<n>` therefore land on the
+	// identical `vmware_build` value (the fixture
+	// `ob-10000005-photon-3-k8s-v1.16.15---vmware.3.1-tkg.4` yields
+	// `vmwareBuild == "3"`, dropping the `.1`), which matters to any later
+	// consumer ordering or de-duplicating on that dimension.
 	[GeneratedRegex(
 		@"^ob-(?<buildId>\d+)-(?:tkgs-ova-)?(?<distro>[a-z]+)-(?<distroVersion>[0-9]+(?:\.[0-9]+)*)" +
 		@"(?:-(?<arch>[a-z]+[0-9]+))?(?:-(?:vmi-k8s|k8s))?-v(?<k8sVersion>[0-9]+(?:\.[0-9]+)*)---vmware\.(?<vmwareBuild>[0-9]+)" +
@@ -104,87 +110,4 @@ public sealed partial class VksItemNameGrammarParser : IVksItemNameGrammarParser
 
 		return VksNamingEras.Current;
 	}
-}
-
-/// <summary>
-/// Orders VKR/VKS version strings in the form <c>&lt;k8s&gt;+vmware.&lt;n&gt;-[fips-]vkr.&lt;n&gt;</c>
-/// (research #1031: every VKR catalog entry shares one releaseDate, so
-/// version-string ordering is the only reliable one). This is a small, local
-/// comparator that satisfies only this issue's need to order
-/// <see cref="Waypoint.Core.Downloads.VksItemDimensions"/> rows -- never a general
-/// version-comparison utility.
-///
-/// hand-off: adopt the shared comparator from the product-aware version-comparator
-/// work once merged, rather than growing this local one further.
-/// </summary>
-public static class VksVersionOrdering
-{
-	/// <summary>
-	/// Compares two items' dimensions by k8s version, then vmware build, then FIPS
-	/// (non-FIPS before FIPS is an arbitrary but stable tiebreak -- FIPS is not
-	/// monotonic with recency, #1031), then line build. Any dimension missing on
-	/// either side sorts that side first (least information sorts first, never
-	/// throws).
-	/// </summary>
-	public static int Compare(VksItemDimensions left, VksItemDimensions right)
-	{
-		ArgumentNullException.ThrowIfNull(left);
-		ArgumentNullException.ThrowIfNull(right);
-
-		int k8s = CompareDottedVersions(left.K8sVersion, right.K8sVersion);
-		if (k8s != 0)
-		{
-			return k8s;
-		}
-
-		int vmwareBuild = CompareDottedVersions(left.VmwareBuild, right.VmwareBuild);
-		if (vmwareBuild != 0)
-		{
-			return vmwareBuild;
-		}
-
-		int fips = left.Fips.CompareTo(right.Fips);
-		if (fips != 0)
-		{
-			return fips;
-		}
-
-		return CompareDottedVersions(left.LineBuild, right.LineBuild);
-	}
-
-	private static int CompareDottedVersions(string? left, string? right)
-	{
-		if (left is null && right is null)
-		{
-			return 0;
-		}
-
-		if (left is null)
-		{
-			return -1;
-		}
-
-		if (right is null)
-		{
-			return 1;
-		}
-
-		int[] leftSegments = [.. left.Split('.').Select(ParseSegment)];
-		int[] rightSegments = [.. right.Split('.').Select(ParseSegment)];
-		int length = Math.Max(leftSegments.Length, rightSegments.Length);
-		for (int i = 0; i < length; i++)
-		{
-			int leftValue = i < leftSegments.Length ? leftSegments[i] : 0;
-			int rightValue = i < rightSegments.Length ? rightSegments[i] : 0;
-			int comparison = leftValue.CompareTo(rightValue);
-			if (comparison != 0)
-			{
-				return comparison;
-			}
-		}
-
-		return 0;
-	}
-
-	private static int ParseSegment(string segment) => int.TryParse(segment, out int value) ? value : 0;
 }

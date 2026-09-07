@@ -405,7 +405,8 @@ public sealed class SchemaMigrationTests
 	/// 0111 (issue #1480, epic #1184, split from #1054 (closed as design record
 	/// 2026-08-30); research lane #1031; slot pre-assigned 2026-08-30, verified
 	/// free against both the migrations directory and open PRs at authoring time --
-	/// #1509/#1389/#1765 hold 0108/0113/0109 respectively, still in flight):
+	/// #1509/#1389 hold 0108/0113 respectively, still in flight; #1765's 0109
+	/// has since landed):
 	/// adds <c>vks_library_items</c>, the shared dual-backend VKS/VKR item
 	/// identity/dimension model (depot-fed and public-mirror) parsed by the
 	/// single name grammar #1031 measured against 138/138 live public items across
