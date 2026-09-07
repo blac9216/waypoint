@@ -109,7 +109,18 @@ public sealed record RetentionSweepReport(
 	int EnteredGrace,
 	int AutoPruned,
 	int UntrackedCandidatesSkipped,
-	IReadOnlyList<string> Errors);
+	IReadOnlyList<string> Errors,
+	int OutOfScopeSkipped = 0);
 
-/// <summary>One <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> outcome.</summary>
-public sealed record RetentionPurgeOutcome(Guid RetainedContentStateId, bool Purged, string? Error);
+/// <summary>
+/// One <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> outcome.
+/// <see cref="AlreadyPurged"/> distinguishes the benign "row was already in the
+/// terminal <see cref="RetainedContentStates.Purged"/> state; no action taken" case
+/// (issue #1662) from a genuine failure -- both leave <see cref="Purged"/>
+/// <c>false</c> and set <see cref="Error"/> to a human-readable message, but a
+/// caller folding this into a retry/idempotency count (e.g.
+/// <c>RetentionSweepJobHandler.ExecutePurgeNowAsync</c>) must count the two
+/// differently: an already-purged id is a skip, not a failure, or a purge-now
+/// rerun over an already-completed batch can never succeed.
+/// </summary>
+public sealed record RetentionPurgeOutcome(Guid RetainedContentStateId, bool Purged, string? Error, bool AlreadyPurged = false);

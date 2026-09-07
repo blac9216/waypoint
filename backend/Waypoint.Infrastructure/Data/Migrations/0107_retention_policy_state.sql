@@ -97,7 +97,9 @@ CREATE OR REPLACE TRIGGER trg_download_retained_content_state_updated_at
 COMMENT ON TABLE download_retained_content_state IS
     'Issue #1406: per-artifact retention lifecycle state (tracked/grace/pinned/pending-purge/purged) and pin metadata for one depot_artifacts row. State-transition legality is enforced in Waypoint.Core.Downloads.RetainedContentStateTransitions, not by a DB trigger.';
 COMMENT ON COLUMN download_retained_content_state.pinned_by IS
-    'Actor who pinned this content, or NULL when not pinned. Pin/unpin is a #1453 API concern; this column only carries the resulting state.';
+    'Actor who pinned this content, or NULL when not pinned. Pin/unpin is a #1453 API concern; this column only carries the resulting state. Issue #1624: RetainedContentStateRepository.TransitionAsync clears this (with pinned_at/pin_note) on any transition OUT of pinned, so this column is never stale once the content is no longer pinned.';
+COMMENT ON COLUMN download_retained_content_state.grace_started_at IS
+    'Timestamp the row most recently ENTERED grace, or NULL. Issue #1627: RetainedContentStateRepository.TransitionAsync clears this on any transition OUT of grace, so a tracked/pinned row never carries a stale timestamp from a prior grace period -- read this column only alongside state = ''grace''.';
 
 -- Runner grants: deliberately NONE. This issue introduces the model and
 -- persistence only -- no consumer reads or writes these tables yet, so there is

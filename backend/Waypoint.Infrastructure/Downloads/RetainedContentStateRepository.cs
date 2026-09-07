@@ -99,7 +99,24 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 	public Task TransitionAsync(Guid id, string toState, CancellationToken cancellationToken) =>
 		TransitionAsync(id, toState, DateTimeOffset.UtcNow, cancellationToken);
 
-	public async Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, CancellationToken cancellationToken)
+	public Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, CancellationToken cancellationToken) =>
+		TransitionCoreAsync(id, toState, occurredAt, policyId: null, cancellationToken);
+
+	public Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, Guid policyId, CancellationToken cancellationToken) =>
+		TransitionCoreAsync(id, toState, occurredAt, policyId, cancellationToken);
+
+	/// <summary>
+	/// The shared transition write both public overloads delegate to. Besides the
+	/// state itself, this clears <c>grace_started_at</c> whenever the row LEAVES
+	/// <c>grace</c> (issue #1627 -- otherwise a <c>tracked</c>/<c>pinned</c> row kept
+	/// the timestamp of its previous, no-longer-current grace period) and clears
+	/// <c>pinned_by</c>/<c>pinned_at</c>/<c>pin_note</c> whenever the row LEAVES
+	/// <c>pinned</c> (issue #1624 -- migration 0107's own column comment already
+	/// promises "NULL when not pinned"). <paramref name="policyId"/> non-null writes
+	/// <c>policy_id</c> in the SAME transaction as the state transition (issue
+	/// #1663); null leaves the existing <c>policy_id</c> untouched.
+	/// </summary>
+	private async Task TransitionCoreAsync(Guid id, string toState, DateTimeOffset occurredAt, Guid? policyId, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(toState);
 
@@ -114,18 +131,28 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 				$"Illegal retained-content-state transition '{current.State}' -> '{toState}' for id {id}.");
 		}
 
+		bool leavingGrace = string.Equals(current.State, RetainedContentStates.Grace, StringComparison.Ordinal);
+		bool leavingPinned = string.Equals(current.State, RetainedContentStates.Pinned, StringComparison.Ordinal);
+
 		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE download_retained_content_state SET
 				state = $1,
-				grace_started_at = CASE WHEN $1 = 'grace' THEN $3 ELSE grace_started_at END,
-				purged_at = CASE WHEN $1 = 'purged' THEN $3 ELSE purged_at END
+				policy_id = COALESCE($6, policy_id),
+				grace_started_at = CASE WHEN $1 = 'grace' THEN $3 WHEN $4 THEN NULL ELSE grace_started_at END,
+				purged_at = CASE WHEN $1 = 'purged' THEN $3 ELSE purged_at END,
+				pinned_by = CASE WHEN $5 THEN NULL ELSE pinned_by END,
+				pinned_at = CASE WHEN $5 THEN NULL ELSE pinned_at END,
+				pin_note = CASE WHEN $5 THEN NULL ELSE pin_note END
 			WHERE id = $2
 			""", connection, transaction))
 		{
 			command.Parameters.AddWithValue(toState);
 			command.Parameters.AddWithValue(id);
 			command.Parameters.AddWithValue(occurredAt);
+			command.Parameters.AddWithValue(leavingGrace);
+			command.Parameters.AddWithValue(leavingPinned);
+			command.Parameters.AddWithValue((object?)policyId ?? DBNull.Value);
 			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 

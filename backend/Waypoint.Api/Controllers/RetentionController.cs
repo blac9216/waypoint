@@ -161,10 +161,11 @@ public sealed class RetentionController : ControllerBase
 	/// <summary>
 	/// Unpins content, moving it back to <c>tracked</c> so it re-enters the normal
 	/// grace/auto-prune lifecycle. Same 409 mapping as <see cref="Pin"/> for an illegal
-	/// transition (e.g. content that was never pinned). Deliberately does not clear
-	/// <c>pinned_by</c>/<c>pinned_at</c>/<c>pin_note</c> -- <see cref="IRetainedContentStateRepository.TransitionAsync(Guid,string,CancellationToken)"/>
-	/// never touches those columns; issue #1624 (filed, not this issue's job) tracks
-	/// clearing that stale pin metadata on unpin.
+	/// transition (e.g. content that was never pinned). Clears
+	/// <c>pinned_by</c>/<c>pinned_at</c>/<c>pin_note</c> on this transition (issue
+	/// #1624) -- <see cref="IRetainedContentStateRepository.TransitionAsync(Guid,string,CancellationToken)"/>
+	/// clears those three columns whenever the row leaves <c>pinned</c>, matching
+	/// migration 0107's own column comment ("NULL when not pinned").
 	/// </summary>
 	[HttpPost("{id:guid}/unpin")]
 	[RequireAdminRole]

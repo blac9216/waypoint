@@ -349,6 +349,7 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetainedContentStateRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionPolicyRepository>(),
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IReviewListService>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>(),
 				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
 				serviceProvider.GetRequiredService<ILogger<Downloads.RetentionSweepService>>()));

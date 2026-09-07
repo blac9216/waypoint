@@ -70,6 +70,18 @@ public interface IRetainedContentStateRepository
 	Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Same as <see cref="TransitionAsync(Guid, string, DateTimeOffset, CancellationToken)"/>,
+	/// but also writes <paramref name="policyId"/> to <c>policy_id</c> in the SAME
+	/// transaction as the state transition -- issue #1663: the #1436 sweep's entry
+	/// pass previously wrote the grace transition and the scope-resolved
+	/// <c>policy_id</c> as two separate round trips on two separate connections, so a
+	/// crash/cancellation between them could leave a <c>grace</c> row with a stale or
+	/// null <c>policy_id</c>. Callers that do not have a policy to record in the same
+	/// breath keep using the four-argument overload, which is unaffected by this one.
+	/// </summary>
+	Task TransitionAsync(Guid id, string toState, DateTimeOffset occurredAt, Guid policyId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Sets <c>policy_id</c> on the row identified by <paramref name="id"/> to
 	/// <paramref name="policyId"/>, independent of any state transition -- added for
 	/// #1436's retention sweep, which resolves a <see cref="RetentionSweepRequest.ScopeKey"/>-keyed

@@ -218,4 +218,43 @@ public sealed class RetentionSweepJobHandlerTests
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("pinned", outcome.Note);
 	}
+
+	/// <summary>Issue #1662: a rerun over an all-already-purged batch must succeed (skipped), not fail permanently.</summary>
+	[Fact]
+	public async Task ExecuteAsync_PurgeNowShape_AllAlreadyPurged_Succeeds()
+	{
+		Guid id = Guid.NewGuid();
+		FakeSweepService service = new() { PurgeResultFor = _ => new RetentionPurgeOutcome(id, false, "already purged; no action taken.", AlreadyPurged: true) };
+		RetentionSweepJobHandler handler = CreateHandler(service);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor($$"""{"purge_now_ids": ["{{id}}"], "actor": "operator-1"}"""), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Contains("already purged", outcome.Note, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>Issue #1662: a rerun after a partial success must report only the genuinely-failed ids as errors, not the already-purged ones.</summary>
+	[Fact]
+	public async Task ExecuteAsync_PurgeNowShape_RerunAfterPartialSuccess_ReportsOnlyGenuineFailuresAsErrors()
+	{
+		Guid alreadyPurgedId = Guid.NewGuid();
+		Guid stillFailingId = Guid.NewGuid();
+		FakeSweepService service = new()
+		{
+			PurgeResultFor = id => id == alreadyPurgedId
+				? new RetentionPurgeOutcome(id, false, "already purged; no action taken.", AlreadyPurged: true)
+				: new RetentionPurgeOutcome(id, false, "disk full"),
+		};
+		RetentionSweepJobHandler handler = CreateHandler(service);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor($$"""{"purge_now_ids": ["{{alreadyPurgedId}}", "{{stillFailingId}}"], "actor": "operator-1"}"""),
+			CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind); // purged==0 but alreadyPurged>0, so not "all failed"
+		Assert.DoesNotContain(alreadyPurgedId.ToString(), outcome.Note);
+		Assert.Contains(stillFailingId.ToString(), outcome.Note);
+		Assert.Contains("disk full", outcome.Note);
+	}
 }

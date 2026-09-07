@@ -103,6 +103,7 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 					serviceProvider.GetRequiredService<IRetainedContentStateRepository>(),
 					serviceProvider.GetRequiredService<IRetentionPolicyRepository>(),
 					serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
+					serviceProvider.GetRequiredService<IReviewListService>(),
 					serviceProvider.GetRequiredService<IJobEventPublisher>(),
 					catalogOptions,
 					SweepLogger));

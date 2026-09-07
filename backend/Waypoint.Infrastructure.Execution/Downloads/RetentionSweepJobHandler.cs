@@ -101,6 +101,7 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 		}
 
 		int purged = 0;
+		int alreadyPurged = 0;
 		List<string> errors = [];
 
 		foreach (string rawId in payload.PurgeNowIds!)
@@ -117,22 +118,33 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 			{
 				purged++;
 			}
+			else if (outcome.AlreadyPurged)
+			{
+				// Issue #1662: an id already purged by a prior attempt is a benign
+				// no-op, not a failure -- counting it as an error broke rerun
+				// idempotency: a rerun over an all-already-purged batch reported
+				// purged == 0 && errors.Count > 0 and failed the job again,
+				// permanently, since no further attempt could ever change that
+				// outcome.
+				alreadyPurged++;
+			}
 			else if (outcome.Error is not null)
 			{
 				errors.Add($"{id}: {outcome.Error}");
 			}
 		}
 
-		if (purged == 0 && errors.Count > 0)
+		if (purged == 0 && alreadyPurged == 0 && errors.Count > 0)
 		{
 			return JobExecutionOutcome.Failed(
 				$"immediate purge failed for all {payload.PurgeNowIds!.Count} item(s): {string.Join("; ", errors)}");
 		}
 
+		string alreadyPurgedNote = alreadyPurged > 0 ? $"; {alreadyPurged} already purged (skipped)" : string.Empty;
 		return JobExecutionOutcome.Succeeded(
 			errors.Count == 0
-				? $"Purged {purged} item(s) immediately."
-				: $"Purged {purged} of {payload.PurgeNowIds!.Count} item(s) immediately; errors: {string.Join("; ", errors)}");
+				? $"Purged {purged} item(s) immediately{alreadyPurgedNote}."
+				: $"Purged {purged} of {payload.PurgeNowIds!.Count} item(s) immediately{alreadyPurgedNote}; errors: {string.Join("; ", errors)}");
 	}
 
 	private async Task<JobExecutionOutcome> ExecuteSweepAsync(Guid jobId, RetentionSweepPayload payload, CancellationToken cancellationToken)
@@ -180,6 +192,7 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 		string summary =
 			$"retention sweep entered {report.EnteredGrace} into grace, auto-pruned {report.AutoPruned}" +
 			(report.UntrackedCandidatesSkipped > 0 ? $", skipped {report.UntrackedCandidatesSkipped} untracked candidate(s)" : string.Empty) +
+			(report.OutOfScopeSkipped > 0 ? $", skipped {report.OutOfScopeSkipped} out-of-scope candidate(s)" : string.Empty) +
 			".";
 
 		if (report.Errors.Count > 0)
