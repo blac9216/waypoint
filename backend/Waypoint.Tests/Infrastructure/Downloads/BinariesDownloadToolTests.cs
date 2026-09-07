@@ -690,6 +690,17 @@ public sealed class BinariesDownloadToolTests : IDisposable
 	/// at the very START (which a bounded tail read must NEVER see) and the real error
 	/// line only near the END (which it must still surface) -- proving the read is
 	/// bounded, not merely that it succeeds.
+	///
+	/// Round-2 review (minor 100, class-killer): the head marker MUST be
+	/// <c>ERROR</c>-shaped, not <c>INFO</c> -- <see cref="BinariesDownloadTool.ExtractMeaningfulTail"/>
+	/// filters every line through <c>LooksLikeErrorLine</c> before <c>TakeLast(5)</c>, so
+	/// an <c>INFO</c>-shaped marker is never selected however much of the file was read,
+	/// and the prior shape's assertion held identically with the 64 KiB bound removed --
+	/// proven by the reviewer restoring the pre-fix unbounded <c>long start = 0;</c> and
+	/// watching this test still pass. An <c>ERROR</c>-shaped marker means an unbounded
+	/// read WOULD surface it (picked up by <c>LooksLikeErrorLine</c>, kept by
+	/// <c>TakeLast(5)</c> alongside the trailing error line), so <c>Assert.DoesNotContain</c>
+	/// only holds because the bound keeps the reader from ever reaching it.
 	/// </summary>
 	[Fact]
 	public async Task ToolFailure_ReadsOnlyABoundedTailOfAnOversizedLogFile()
@@ -701,7 +712,7 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		const string headMarker = "HEAD-MARKER-MUST-NEVER-BE-READ-9c3f";
 		using (StreamWriter writer = new(Path.Combine(logDirectory, "vdt.log")))
 		{
-			writer.WriteLine($"2026-01-01 00:00:00 INFO {headMarker}");
+			writer.WriteLine($"2026-01-01 00:00:00 ERROR {headMarker}");
 			string filler = new string('x', 78);
 			// Comfortably past any sane bounded-tail window (64 KiB) -- ~1 MiB of filler.
 			for (int i = 0; i < 13000; i++)
