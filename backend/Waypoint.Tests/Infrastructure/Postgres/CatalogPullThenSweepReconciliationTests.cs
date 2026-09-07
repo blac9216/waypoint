@@ -46,9 +46,10 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <c>CatalogIndexJobHandler.ProcessSweepOutputAsync</c> would.
 ///
 /// A pre-existing row under the LEGACY pre-#1784 bare-fileName identity is seeded
-/// before the pull step, proving <c>CatalogPullJobHandler</c>'s reconciliation delete
-/// (<see cref="IDepotArtifactRepository.DeleteAsync"/>) cleans it up on the very next
-/// pull -- no migration, no one-time backfill.
+/// before the pull step, proving <c>CatalogPullJobHandler</c>'s reconciliation rename
+/// (<see cref="IDepotArtifactRepository.RekeyAsync"/> -- never a delete, design #16
+/// section 2's never-auto-remove policy) folds it onto the new identity on the very
+/// next pull -- no migration, no one-time backfill.
 /// </summary>
 [Collection("Postgres")]
 public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
@@ -83,17 +84,19 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime
 		const string legacyIdentity = "vcsa-patch.iso";
 		await _artifacts.UpsertAsync(new DepotArtifactUpsert(legacyIdentity, "aa11", DepotArtifactStatuses.Indexed, "{}"), CancellationToken.None);
 
-		// "Pull": parse with the real parser, upsert through the real repository,
-		// reconciling any legacy-identity row exactly as CatalogPullJobHandler does.
+		// "Pull": parse with the real parser, reconciling any legacy-identity row onto
+		// the new identity (rename, never delete) BEFORE upserting -- exactly the order
+		// CatalogPullJobHandler uses.
 		IReadOnlyList<DepotArtifactUpsert> pulled = VendorProductVersionCatalogParser.Parse(fixture.CatalogJson);
 		foreach (DepotArtifactUpsert upsert in pulled)
 		{
-			await _artifacts.UpsertAsync(upsert, CancellationToken.None);
 			string legacy = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
 			if (!string.Equals(legacy, upsert.RelativePath, StringComparison.Ordinal))
 			{
-				await _artifacts.DeleteAsync(legacy, CancellationToken.None);
+				await _artifacts.RekeyAsync(legacy, upsert.RelativePath, CancellationToken.None);
 			}
+
+			await _artifacts.UpsertAsync(upsert, CancellationToken.None);
 		}
 
 		(IReadOnlyList<DepotArtifact> afterPull, long afterPullTotal) = await _artifacts.ListAsync(

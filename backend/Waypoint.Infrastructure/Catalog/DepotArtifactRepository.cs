@@ -86,16 +86,24 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	}
 
 	/// <inheritdoc/>
-	public async Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken)
+	public async Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(fromRelativePath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(toRelativePath);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("DELETE FROM depot_artifacts WHERE relative_path = $1", connection);
-		command.Parameters.AddWithValue(relativePath);
-		int deleted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-		return deleted > 0;
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_artifacts
+			SET relative_path = $2
+			WHERE relative_path = $1
+			  AND NOT EXISTS (SELECT 1 FROM depot_artifacts WHERE relative_path = $2)
+			""", connection);
+		command.Parameters.AddWithValue(fromRelativePath);
+		command.Parameters.AddWithValue(toRelativePath);
+		int renamed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		return renamed > 0;
 	}
 
 	/// <inheritdoc/>

@@ -237,19 +237,23 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			int upserted = 0;
 			foreach (DepotArtifactUpsert upsert in parsed)
 			{
-				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
-
 				// Issue #1784 reconciliation: prior to #1784, this parser identified a
 				// binary by its bare fileName (the trailing segment of the NEW
-				// depot-relative identity above); a pre-#1784 pull may have left a row
-				// under that legacy identity. Deleting it here, every pull, is a
-				// no-op once that row is gone -- self-healing the duplicate on the
-				// very next connected pull without a migration or a one-time backfill.
+				// depot-relative identity below); a pre-#1784 pull may have left a row
+				// under that legacy identity. RekeyAsync (never a delete -- design #16
+				// section 2's never-auto-remove policy) renames that legacy row onto the
+				// new identity in place BEFORE the upsert below, so the upsert always has
+				// a row to freshen either way -- self-healing the duplicate on the very
+				// next connected pull without a migration or a one-time backfill, for
+				// every artifact the presence sweep has not already indexed under the new
+				// identity first (the documented remainder: see RekeyAsync's doc comment).
 				string legacyIdentity = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
 				if (!string.Equals(legacyIdentity, upsert.RelativePath, StringComparison.Ordinal))
 				{
-					await _artifacts.DeleteAsync(legacyIdentity, cancellationToken).ConfigureAwait(false);
+					await _artifacts.RekeyAsync(legacyIdentity, upsert.RelativePath, cancellationToken).ConfigureAwait(false);
 				}
+
+				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
 
 				upserted++;
 				if (upserted % 25 == 0)

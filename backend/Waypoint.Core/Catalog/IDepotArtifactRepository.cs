@@ -52,14 +52,25 @@ public interface IDepotArtifactRepository
 		DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Issue #1784 reconciliation: deletes the row at <paramref name="relativePath"/>
-	/// if one exists, returning whether a row was actually removed. The one caller
-	/// today is <c>CatalogPullJobHandler</c>, cleaning up a pre-#1784 row still keyed
-	/// under the connected pull's legacy bare-fileName identity once the SAME artifact
-	/// has been re-parsed under the new depot-relative identity -- a harmless no-op on
-	/// every subsequent pull once that legacy row is gone.
+	/// Issue #1784 reconciliation: RENAMES (never deletes -- design #16 section 2,
+	/// "orphans and out-of-scope content are never auto-removed", the same policy
+	/// <see cref="Waypoint.Core.Downloads.IReviewListService"/>'s own doc comment
+	/// states and <c>ReviewListServiceTests.Interface_HasNoDeleteOrRemoveOrPurgeMethod</c>
+	/// enforces structurally against every interface in this repository's dependency
+	/// graph, this one included) the row at <paramref name="fromRelativePath"/> to
+	/// <paramref name="toRelativePath"/> in place, if a row exists at the FROM identity
+	/// and none already exists at the TO identity -- returns whether the rename
+	/// happened. The one caller today is <c>CatalogPullJobHandler</c>, folding a
+	/// pre-#1784 row still keyed under the connected pull's legacy bare-fileName
+	/// identity onto the SAME artifact's new depot-relative identity, called BEFORE
+	/// <see cref="UpsertAsync"/> so the rename has a row to act on before that upsert
+	/// creates one at the TO identity itself. A harmless no-op once the legacy row is
+	/// gone, or (documented remainder, issue #1784) if the presence sweep already
+	/// created the TO-identity row before this pull ever ran -- that narrower case
+	/// leaves the stale legacy row in place for an explicit admin cleanup rather than
+	/// auto-removing it, matching the never-auto-remove policy above.
 	/// </summary>
-	Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken);
+	Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken);
 }
 
 /// <summary>

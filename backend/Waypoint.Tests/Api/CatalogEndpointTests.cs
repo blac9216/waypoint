@@ -235,9 +235,9 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 		return Task.FromResult(Guid.NewGuid());
 	}
 
-	public Task<bool> DeleteAsync(string relativePath, CancellationToken cancellationToken)
+	public Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken)
 	{
-		_ = (relativePath, cancellationToken);
+		_ = (fromRelativePath, toRelativePath, cancellationToken);
 		return Task.FromResult(false);
 	}
 
