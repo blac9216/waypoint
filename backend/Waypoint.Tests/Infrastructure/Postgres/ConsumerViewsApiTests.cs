@@ -299,6 +299,82 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 	}
 
+	/// <summary>PR #1816 round 1 Note 3: the HTTP-level 403 for PUT was missing while every other verb had one -- the guard itself was already proven reflectively by <c>EndpointRoleMatrixTests</c>, this closes the suite-asymmetry gap.</summary>
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Operator")]
+	public async Task PutView_BelowAdmin_Returns403(string role)
+	{
+		(_, string id) = await CreateViewAsync("To rename", [], isDefault: false);
+
+		HttpRequestMessage put = new(HttpMethod.Put, $"/api/v1/consumer-views/{id}")
+		{
+			Content = JsonBody(new { name = "Renamed" }),
+		};
+		put.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+
+		HttpResponseMessage response = await _client.SendAsync(put);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>PR #1816 round 1 Spec finding 1, DELETE half, over real HTTP: deleting the sole default view is a 409, never a silent 204 that leaves zero defaults.</summary>
+	[Fact]
+	public async Task DeleteView_SoleDefault_Returns409()
+	{
+		(_, string id) = await CreateViewAsync("Only default", [], isDefault: true);
+
+		HttpRequestMessage delete = new(HttpMethod.Delete, $"/api/v1/consumer-views/{id}");
+		delete.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(delete);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		HttpRequestMessage get = new(HttpMethod.Get, $"/api/v1/consumer-views/{id}");
+		get.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage getResponse = await _client.SendAsync(get);
+		Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+	}
+
+	/// <summary>PR #1816 round 1 Spec finding 1, UPDATE/clear half, over real HTTP: a single <c>PUT {"is_default": false}</c> on the sole default view is a 409, never a silent 200 that leaves zero defaults.</summary>
+	[Fact]
+	public async Task PutView_UnsettingIsDefaultOnSoleDefault_Returns409()
+	{
+		(_, string id) = await CreateViewAsync("Only default", [], isDefault: true);
+
+		HttpRequestMessage put = new(HttpMethod.Put, $"/api/v1/consumer-views/{id}")
+		{
+			Content = JsonBody(new { is_default = false }),
+		};
+		put.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(put);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		HttpRequestMessage get = new(HttpMethod.Get, $"/api/v1/consumer-views/{id}");
+		get.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage getResponse = await _client.SendAsync(get);
+		using JsonDocument document = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
+		Assert.True(document.RootElement.GetProperty("is_default").GetBoolean());
+	}
+
+	/// <summary>PR #1816 round 1 Note 4: an empty platform set is explicitly legal over the real HTTP surface too, not just at the repository -- it means "all platforms, no filtering."</summary>
+	[Fact]
+	public async Task PostView_EmptyPlatforms_Returns201WithEmptyPlatforms()
+	{
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/consumer-views")
+		{
+			Content = JsonBody(new { name = "Unfiltered", platforms = Array.Empty<string>() }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Empty(document.RootElement.GetProperty("platforms").EnumerateArray());
+	}
+
 	private static readonly string[] SingleValidPlatform = ["embeddedEsx-7.0-INTL"];
 	private static readonly string[] SingleUnknownPlatform = ["not-a-real-platform"];
 

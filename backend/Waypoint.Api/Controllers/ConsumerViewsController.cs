@@ -114,8 +114,11 @@ public sealed class ConsumerViewsController : ControllerBase
 	/// <summary>
 	/// Partial update, same leave-unspecified-columns-alone convention as
 	/// <see cref="EsxAcquisitionController.UpdateSubscription"/>. Setting
-	/// <c>is_default: true</c> is rejected with 409 unless this row is already the
-	/// default (issue #1464 AC).
+	/// <c>is_default: true</c> is rejected with 409 <c>default_already_set</c> unless
+	/// this row is already the default; explicitly setting <c>is_default: false</c> on
+	/// the sole default row is rejected with 409 <c>default_required</c> (issue #1464
+	/// AC "exactly one default at any time" -- the default can be moved, never
+	/// cleared outright).
 	/// </summary>
 	[HttpPut("{id:guid}")]
 	[RequireAdminRole]
@@ -157,6 +160,10 @@ public sealed class ConsumerViewsController : ControllerBase
 		{
 			throw new ApiException(HttpStatusCode.Conflict, "default_already_set", ex.Message);
 		}
+		catch (ConsumerViewSoleDefaultException ex)
+		{
+			throw new ApiException(HttpStatusCode.Conflict, "default_required", ex.Message);
+		}
 
 		if (updated is null)
 		{
@@ -166,12 +173,27 @@ public sealed class ConsumerViewsController : ControllerBase
 		return Ok(ConsumerViewResponse.FromDomain(updated));
 	}
 
+	/// <summary>
+	/// Deletes a view. The sole default view can never be deleted (409
+	/// <c>default_required</c>, issue #1464 AC "exactly one default at any time") --
+	/// mark a different view as the default first.
+	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireAdminRole]
 	[ProducesResponseType(StatusCodes.Status204NoContent)]
+	[ProducesResponseType(StatusCodes.Status409Conflict)]
 	public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
 	{
-		bool deleted = await _views.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
+		bool deleted;
+		try
+		{
+			deleted = await _views.DeleteAsync(id, cancellationToken).ConfigureAwait(false);
+		}
+		catch (ConsumerViewSoleDefaultException ex)
+		{
+			throw new ApiException(HttpStatusCode.Conflict, "default_required", ex.Message);
+		}
+
 		if (!deleted)
 		{
 			throw ApiException.NotFound("Consumer view not found.", $"Consumer view '{id}' does not exist.");

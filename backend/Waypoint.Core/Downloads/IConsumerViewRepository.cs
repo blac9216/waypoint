@@ -42,7 +42,11 @@ public interface IConsumerViewRepository
 	/// Partial update: a null parameter leaves the corresponding column unchanged
 	/// (same convention as <see cref="IEsxAcquisitionSubscriptionRepository.UpdateAsync"/>).
 	/// Returns null when <paramref name="id"/> does not exist. Throws the same
-	/// conflict exceptions as <see cref="CreateAsync"/> on a name or default clash.
+	/// conflict exceptions as <see cref="CreateAsync"/> on a name or default clash, or
+	/// <see cref="ConsumerViewSoleDefaultException"/> when <paramref name="isDefault"/>
+	/// is explicitly <c>false</c> and this row is currently the sole default (issue
+	/// #1464 AC "exactly one default at any time" -- the default can be moved to a
+	/// different row, never cleared outright).
 	/// </summary>
 	Task<ConsumerView?> UpdateAsync(
 		Guid id,
@@ -51,7 +55,12 @@ public interface IConsumerViewRepository
 		bool? isDefault,
 		CancellationToken cancellationToken);
 
-	/// <summary>Deletes a view. Returns <c>false</c> when <paramref name="id"/> does not exist.</summary>
+	/// <summary>
+	/// Deletes a view. Returns <c>false</c> when <paramref name="id"/> does not exist.
+	/// Throws <see cref="ConsumerViewSoleDefaultException"/> when <paramref name="id"/>
+	/// is the sole default view (issue #1464 AC -- the default row can be moved,
+	/// never deleted outright).
+	/// </summary>
 	Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken);
 }
 
@@ -73,6 +82,25 @@ public sealed class ConsumerViewDefaultConflictException : Exception
 {
 	public ConsumerViewDefaultConflictException()
 		: base("Another consumer view is already marked as the default.")
+	{
+	}
+}
+
+/// <summary>
+/// Thrown by <see cref="IConsumerViewRepository.DeleteAsync"/> and
+/// <see cref="IConsumerViewRepository.UpdateAsync"/> when the requested write would
+/// leave zero consumer views with <c>is_default = true</c> -- deleting the sole
+/// default row, or explicitly clearing <c>is_default</c> on it (issue #1464 AC
+/// "exactly one default at any time"; #1464's Proposed Changes: model
+/// <c>IsDefault</c> as a boolean singleton, "not a special-cased absence"). The
+/// default can only be MOVED -- mark a different row as the new default first (which
+/// <see cref="ConsumerViewDefaultConflictException"/> still polices) -- never removed
+/// outright.
+/// </summary>
+public sealed class ConsumerViewSoleDefaultException : Exception
+{
+	public ConsumerViewSoleDefaultException(string message)
+		: base(message)
 	{
 	}
 }

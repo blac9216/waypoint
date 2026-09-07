@@ -168,4 +168,96 @@ public sealed class ConsumerViewRepositoryTests : IAsyncLifetime
 
 		Assert.False(second.IsDefault);
 	}
+
+	/// <summary>Issue #1464 AC, PR #1816 round 1 Spec finding 1 (repository, bypassing the API): a view with an empty platform set is explicitly legal and round-trips as such -- it means "all platforms, no filtering," the same meaning the seeded default row's empty set carries.</summary>
+	[Fact]
+	public async Task CreateAsync_EmptyPlatforms_RoundTripsAsAllPlatforms()
+	{
+		ConsumerView created = await _repository.CreateAsync("Unfiltered", [], false, CancellationToken.None);
+
+		ConsumerView? fetched = await _repository.GetAsync(created.Id, CancellationToken.None);
+
+		Assert.NotNull(fetched);
+		Assert.Empty(fetched!.Platforms);
+	}
+
+	/// <summary>
+	/// Issue #1464 AC "exactly one default view at any time" (PR #1816 round 1 Spec
+	/// finding 1): the DELETE half, proven by calling the repository directly --
+	/// bypassing the controller's own check entirely, same "database enforces it too"
+	/// convention as <see cref="CreateAsync_SecondDefault_ThrowsDefaultConflict"/>.
+	/// Deleting the sole default row must never succeed; it must throw so the caller
+	/// can map it to 409, never silently leave zero defaults.
+	/// </summary>
+	[Fact]
+	public async Task DeleteAsync_SoleDefault_ThrowsSoleDefaultException()
+	{
+		ConsumerView created = await _repository.CreateAsync("Only default", [], true, CancellationToken.None);
+
+		await Assert.ThrowsAsync<ConsumerViewSoleDefaultException>(
+			() => _repository.DeleteAsync(created.Id, CancellationToken.None));
+
+		Assert.NotNull(await _repository.GetAsync(created.Id, CancellationToken.None));
+	}
+
+	/// <summary>A non-default row deletes normally even while a different row holds the default -- only the sole default row itself is refused.</summary>
+	[Fact]
+	public async Task DeleteAsync_NonDefaultRowWhileAnotherIsDefault_Succeeds()
+	{
+		await _repository.CreateAsync("The default", [], true, CancellationToken.None);
+		ConsumerView other = await _repository.CreateAsync("Not default", [], false, CancellationToken.None);
+
+		bool deleted = await _repository.DeleteAsync(other.Id, CancellationToken.None);
+
+		Assert.True(deleted);
+	}
+
+	/// <summary>
+	/// Issue #1464 AC "exactly one default view at any time" (PR #1816 round 1 Spec
+	/// finding 1): the UPDATE/clear half, proven by calling the repository directly --
+	/// bypassing the controller's own check entirely. A single
+	/// <c>UpdateAsync(isDefault: false)</c> on the sole default row must never succeed;
+	/// it must throw so the caller can map it to 409, never silently leave zero
+	/// defaults.
+	/// </summary>
+	[Fact]
+	public async Task UpdateAsync_ClearingIsDefaultOnSoleDefault_ThrowsSoleDefaultException()
+	{
+		ConsumerView created = await _repository.CreateAsync("Only default", [], true, CancellationToken.None);
+
+		await Assert.ThrowsAsync<ConsumerViewSoleDefaultException>(
+			() => _repository.UpdateAsync(created.Id, name: null, platforms: null, isDefault: false, CancellationToken.None));
+
+		ConsumerView? unchanged = await _repository.GetAsync(created.Id, CancellationToken.None);
+		Assert.NotNull(unchanged);
+		Assert.True(unchanged!.IsDefault);
+	}
+
+	/// <summary>An update that leaves <c>is_default</c> unspecified (null) on the sole default row is NOT a refusal -- only an explicit <c>false</c> is.</summary>
+	[Fact]
+	public async Task UpdateAsync_LeavingIsDefaultUnspecifiedOnSoleDefault_Succeeds()
+	{
+		ConsumerView created = await _repository.CreateAsync("Only default", [], true, CancellationToken.None);
+
+		ConsumerView? updated = await _repository.UpdateAsync(
+			created.Id, name: "Renamed", platforms: null, isDefault: null, CancellationToken.None);
+
+		Assert.NotNull(updated);
+		Assert.True(updated!.IsDefault);
+		Assert.Equal("Renamed", updated.Name);
+	}
+
+	/// <summary>Setting <c>is_default: false</c> on a row that is NOT currently the default is an ordinary no-op update, not a refusal.</summary>
+	[Fact]
+	public async Task UpdateAsync_ClearingIsDefaultOnANonDefaultRow_Succeeds()
+	{
+		await _repository.CreateAsync("The default", [], true, CancellationToken.None);
+		ConsumerView other = await _repository.CreateAsync("Not default", [], false, CancellationToken.None);
+
+		ConsumerView? updated = await _repository.UpdateAsync(
+			other.Id, name: null, platforms: null, isDefault: false, CancellationToken.None);
+
+		Assert.NotNull(updated);
+		Assert.False(updated!.IsDefault);
+	}
 }

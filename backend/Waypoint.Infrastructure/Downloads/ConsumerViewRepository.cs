@@ -105,13 +105,22 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Atomic, race-safe refusal (issue #1464 AC "exactly one default at any
+		// time"): the WHERE clause excludes this row from the update when it is
+		// CURRENTLY the default (is_default) and the requested new value would clear
+		// it (COALESCE($3, is_default) = false -- COALESCE means an unspecified
+		// isDefault ($3 IS NULL) always resolves to the row's own current value, so a
+		// write that never touches is_default can never trip this). A row that exists
+		// but does not match is indistinguishable at this point from a nonexistent
+		// row; ExistsAsync below disambiguates only when needed.
 		await using NpgsqlCommand command = new(
 			$"""
 			UPDATE consumer_views SET
 				name = COALESCE($1, name),
 				platforms = COALESCE($2, platforms),
 				is_default = COALESCE($3, is_default)
-			WHERE id = $4
+			WHERE id = $4 AND NOT (is_default AND COALESCE($3, is_default) = false)
 			RETURNING id, name, platforms, is_default, created_at, updated_at
 			""", connection);
 		command.Parameters.AddWithValue((object?)name ?? DBNull.Value);
@@ -126,22 +135,62 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 		try
 		{
 			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+			if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				return Map(reader);
+			}
 		}
 		catch (PostgresException ex) when (ex.SqlState == "23505")
 		{
 			throw TranslateUniqueViolation(ex, name);
 		}
+
+		// No row was updated: either id does not exist (existing 404 behaviour,
+		// returns null) or the row exists and the refusal above blocked the write
+		// (throw so the controller can map it to 409 default_required).
+		if (isDefault == false && await ExistsAsync(connection, id, cancellationToken).ConfigureAwait(false))
+		{
+			throw new ConsumerViewSoleDefaultException(
+				"This consumer view is the sole default and cannot have is_default cleared. Mark a different view as the default first.");
+		}
+
+		return null;
 	}
 
 	public async Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("DELETE FROM consumer_views WHERE id = $1", connection);
+
+		// Atomic, race-safe refusal (issue #1464 AC): never delete a row that is
+		// CURRENTLY the default -- a single statement, so a concurrent delete of the
+		// same sole default row cannot both succeed.
+		await using NpgsqlCommand command = new(
+			"DELETE FROM consumer_views WHERE id = $1 AND NOT is_default", connection);
 		command.Parameters.AddWithValue(id);
 		int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-		return affected > 0;
+		if (affected > 0)
+		{
+			return true;
+		}
+
+		// Nothing was deleted: either id does not exist (existing 404 behaviour,
+		// returns false) or the row exists and is the default (throw for 409).
+		if (await ExistsAsync(connection, id, cancellationToken).ConfigureAwait(false))
+		{
+			throw new ConsumerViewSoleDefaultException(
+				"This consumer view is the sole default and cannot be deleted. Mark a different view as the default first.");
+		}
+
+		return false;
+	}
+
+	private static async Task<bool> ExistsAsync(NpgsqlConnection connection, Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new("SELECT 1 FROM consumer_views WHERE id = $1", connection);
+		command.Parameters.AddWithValue(id);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result is not null;
 	}
 
 	private static Exception TranslateUniqueViolation(PostgresException ex, string? name)

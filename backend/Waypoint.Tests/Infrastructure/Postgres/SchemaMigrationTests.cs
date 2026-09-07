@@ -705,6 +705,41 @@ public sealed class SchemaMigrationTests
 		Assert.Contains("finished_at IS NOT NULL", definition, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// Issue #1464, PR #1816 round 1 Spec finding 1: migration 0131 must seed the
+	/// well-known default row itself (<see cref="ConsumerView.DefaultViewId"/>) --
+	/// a fresh database has exactly one <c>consumer_views</c> row and it is the
+	/// default, never a zero-default state reachable straight after migration. Uses
+	/// its own fresh database (<see cref="CreateFreshDatabaseAsync"/>), not the
+	/// collection-shared one -- other test classes in this collection
+	/// (<c>ConsumerViewRepositoryTests</c>, <c>ConsumerViewsApiTests</c>) delete every
+	/// row in <c>consumer_views</c> as part of their own setup, and since 0131 is
+	/// already recorded applied on the shared database by then, its
+	/// <c>ON CONFLICT DO NOTHING</c> seed never re-runs there.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_ConsumerViews_SeedsExactlyOneDefaultRow()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+		NpgsqlSchemaMigrator migrator = new(connectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(connectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand countCommand = new("SELECT count(*) FROM consumer_views", connection);
+		long count = (long)(await countCommand.ExecuteScalarAsync())!;
+		Assert.Equal(1, count);
+
+		await using NpgsqlCommand rowCommand = new(
+			"SELECT is_default, platforms FROM consumer_views WHERE id = $1", connection);
+		rowCommand.Parameters.AddWithValue(Waypoint.Core.Downloads.ConsumerView.DefaultViewId);
+		await using NpgsqlDataReader reader = await rowCommand.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.True(reader.GetBoolean(0));
+		Assert.Empty(reader.GetFieldValue<string[]>(1));
+	}
+
 	[Fact]
 	public async Task Migrations_QueueClaimIndex_ExistsAndIsPartial()
 	{

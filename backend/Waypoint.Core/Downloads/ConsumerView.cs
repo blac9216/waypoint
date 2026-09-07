@@ -26,14 +26,21 @@ namespace Waypoint.Core.Downloads;
 /// <param name="Platforms">
 /// Ordered platform keys from the static <see cref="ConsumerViewPlatformVocabulary"/>
 /// (e.g. <c>embeddedEsx-7.0-INTL</c>), validated at write time -- see that class's
-/// doc comment.
+/// doc comment. An EMPTY list is explicitly allowed and means "all platforms, no
+/// filtering" -- the shipped default view (<see cref="DefaultViewId"/>) has an empty
+/// set for exactly this reason, and a non-default view may have one too.
 /// </param>
 /// <param name="IsDefault">
 /// Marks the single view representing the unfiltered/default store -- a boolean
 /// singleton on an ordinary row, never a special-cased absence (issue #1464 AC).
-/// Exactly one row may have this set to <c>true</c> at any time, enforced by
-/// migration 0131's partial unique index AND by
-/// <c>ConsumerViewsController</c>'s write-path check (409 on a second default).
+/// "Exactly one row has this set to <c>true</c> at any time" is two layered
+/// guarantees, not one: migration 0131's partial unique index enforces AT MOST one
+/// (a second <c>is_default: true</c> write is a 409 <c>default_already_set</c> via
+/// <c>ConsumerViewsController</c>'s write-path check); the seeded
+/// <see cref="DefaultViewId"/> row plus the repository/API refusing to delete it or
+/// clear <c>is_default</c> while it is the sole default (409 <c>default_required</c>)
+/// enforce AT LEAST one. Together the default can be MOVED (mark a different row
+/// default first), never removed outright.
 /// </param>
 public sealed record ConsumerView(
 	Guid Id,
@@ -41,7 +48,15 @@ public sealed record ConsumerView(
 	IReadOnlyList<string> Platforms,
 	bool IsDefault,
 	DateTimeOffset CreatedAt,
-	DateTimeOffset UpdatedAt);
+	DateTimeOffset UpdatedAt)
+{
+	/// <summary>
+	/// The well-known id of the default/unfiltered view seeded by migration 0131 --
+	/// see that migration's header for the "at most one" vs "at least one" split this
+	/// row is the "at least one" half of.
+	/// </summary>
+	public static readonly Guid DefaultViewId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+}
 
 /// <summary>
 /// The static ESX platform-key vocabulary reconciled on issue #1156 (the shipped
