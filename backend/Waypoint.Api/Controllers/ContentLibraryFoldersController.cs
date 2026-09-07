@@ -56,8 +56,14 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 	[HttpGet("folders")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(ContentLibraryFolderNode[]), StatusCodes.Status200OK)]
+	[ProducesResponseType(StatusCodes.Status404NotFound)]
 	public async Task<ActionResult<IReadOnlyList<ContentLibraryFolderNode>>> GetTree(Guid libraryId, CancellationToken cancellationToken)
 	{
+		if (!await _folders.LibraryExistsAsync(libraryId, cancellationToken).ConfigureAwait(false))
+		{
+			throw LibraryNotFoundError(libraryId);
+		}
+
 		IReadOnlyList<ContentLibraryFolderWithItems> flat = await _folders.ListWithItemsAsync(libraryId, cancellationToken).ConfigureAwait(false);
 		return Ok(ContentLibraryFolderNode.BuildTree(flat));
 	}

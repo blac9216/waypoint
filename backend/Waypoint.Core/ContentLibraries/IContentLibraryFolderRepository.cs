@@ -39,6 +39,9 @@ public interface IContentLibraryFolderRepository
 	/// <summary>Every folder in the library, flat (the API composes the tree from <see cref="ContentLibraryFolder.ParentFolderId"/>), each with its own directly-assigned item Ids.</summary>
 	Task<IReadOnlyList<ContentLibraryFolderWithItems>> ListWithItemsAsync(Guid libraryId, CancellationToken cancellationToken);
 
+	/// <summary>Whether a content library with this id exists, for the read path's 404-on-unknown-library check (<see cref="ListWithItemsAsync"/> itself never checks).</summary>
+	Task<bool> LibraryExistsAsync(Guid libraryId, CancellationToken cancellationToken);
+
 	/// <summary>Looks up one folder by id, for the API's route-scoped library-ownership check before <see cref="UpdateAsync"/>/<see cref="DeleteAsync"/>.</summary>
 	Task<ContentLibraryFolder?> GetAsync(Guid folderId, CancellationToken cancellationToken);
 

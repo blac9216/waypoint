@@ -130,6 +130,15 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		Assert.Equal("Child", root.GetProperty("children")[0].GetProperty("name").GetString());
 	}
 
+	/// <summary>N2: an unknown library must 404, not 200 with an empty array -- the caller cannot otherwise tell "empty" apart from "deleted or mistyped."</summary>
+	[Fact]
+	public async Task GetTree_UnknownLibrary_Is404()
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/content-libraries/{Guid.NewGuid()}/folders", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
 	[Fact]
 	public async Task Patch_MovingAFolderUnderItsOwnDescendant_Is400()
 	{
