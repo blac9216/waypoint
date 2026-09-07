@@ -166,10 +166,22 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 			_sideEffect = sideEffect;
 		}
 
+		/// <summary>
+		/// Round-1 review (blocker): the exact <c>id</c> argument the handler passed to
+		/// this call -- captured so a caller (the handler-level test below) can assert
+		/// WHICH id reached the tool, closing the gap that made every prior test in this
+		/// suite tautological with respect to the CRITICAL bundle_id-vs-external_id
+		/// regression: the WritingTool constructor already had the only fake plumbing
+		/// that used to observe <c>id</c> before this issue's <c>_relativePath</c>
+		/// refactor removed it (the reviewer's own reverted-line repro).
+		/// </summary>
+		public string? CapturedId { get; private set; }
+
 		public async Task<BinariesDownloadResult> DownloadAsync(
 			string id, string depotStorePath, string activationCodePath, string identityHome, string assetId,
 			CancellationToken cancellationToken)
 		{
+			CapturedId = id;
 			string destination = Path.Combine(depotStorePath, _relativePath);
 			Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 			await File.WriteAllBytesAsync(destination, _bytes, cancellationToken).ConfigureAwait(false);
@@ -323,6 +335,41 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		DepotArtifact? artifact = await GetArtifactAsync(artifactId);
 		Assert.Equal("present", artifact!.Status);
 		Assert.Equal(expectedSha256, artifact.Sha256);
+	}
+
+	/// <summary>
+	/// Round-1 review (blocker): the class-killer for issue #1783's own headline bug --
+	/// reverting <c>BinariesDownloadJobHandler.ExecuteAsync</c>'s
+	/// <c>_tool.DownloadAsync(payload.BundleId, ...)</c> back to
+	/// <c>payload.ExternalId</c> (the pre-#1783 shape) must fail THIS test, not merely
+	/// leave the suite green. <c>externalId</c> and <c>bundleId</c> are deliberately
+	/// distinct invented values below so the two can never coincide by accident, and
+	/// <see cref="WritingTool.CapturedId"/> captures exactly what the handler passed as
+	/// <c>DownloadAsync</c>'s <c>id</c> parameter -- proving forwarding, not merely that
+	/// the payload itself carries a <c>bundle_id</c> field (which
+	/// <c>PostBinariesDownload_JobPayload_CarriesBundleId</c> already covers at the
+	/// enqueue layer, one hop before this handler ever runs).
+	/// </summary>
+	[Fact]
+	public async Task VerifiedDownload_PassesBundleIdAsToolId_NeverExternalId()
+	{
+		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
+		byte[] bytes = "bundle-id-forwarding-e2e-bytes"u8.ToArray();
+		string expectedSha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+		string externalId = "vcf-external-id-" + Guid.NewGuid().ToString("N");
+		string bundleId = "vendor-bundle-id-" + Guid.NewGuid().ToString("N");
+		Assert.NotEqual(externalId, bundleId);
+		Guid artifactId = await SeedArtifactAsync(externalId, expectedSha256, bytes.Length);
+
+		WritingTool tool = new(bytes, externalId);
+		BinariesDownloadJobHandler handler = CreateHandler(tool);
+		ClaimedJob job = await EnqueueBinariesDownloadJobAsync(artifactId, externalId, bundleId);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Equal(bundleId, tool.CapturedId);
+		Assert.NotEqual(externalId, tool.CapturedId);
 	}
 
 	/// <summary>
