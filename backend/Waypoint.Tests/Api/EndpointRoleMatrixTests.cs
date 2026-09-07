@@ -172,6 +172,16 @@ public sealed class EndpointRoleMatrixTests
 		["ContentLibrariesController.Create"] = WaypointRole.Admin,
 		["ContentLibrariesController.Delete"] = WaypointRole.Admin,
 
+		// ContentLibraryFoldersController (issue #1389, migration 0113, RBAC per
+		// decision R2-10 reconciled by issue #1034/PR #1747, closed by #1746):
+		// organize (create/rename-move/assign) is Operator-tier, delete stays
+		// Admin-tier (deletes/purges bucket), reads are Viewer+.
+		["ContentLibraryFoldersController.GetTree"] = WaypointRole.Viewer,
+		["ContentLibraryFoldersController.Create"] = WaypointRole.Operator,
+		["ContentLibraryFoldersController.Update"] = WaypointRole.Operator,
+		["ContentLibraryFoldersController.Delete"] = WaypointRole.Admin,
+		["ContentLibraryFoldersController.AssignItem"] = WaypointRole.Operator,
+
 		// CredentialsController -- reads Viewer+; every write (including the
 		// shared-credential-only Create per ADR-0011) Admin. Update additionally step-up
 		// gates a secret overwrite in-action -- see class doc comment; not re-checked here.

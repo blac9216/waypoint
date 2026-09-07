@@ -107,6 +107,8 @@ public sealed class SchemaMigrationTests
 		"oci_bundles",
 		"push_target_consumers",
 		"content_libraries",
+		"content_library_folders",
+		"content_library_item_folders",
 		"schema_migrations"
 	];
 
@@ -513,8 +515,24 @@ public sealed class SchemaMigrationTests
 	/// vocabulary is <c>Waypoint.Core.Catalog.DepotArtifactStatuses.All</c>, proven
 	/// against this constraint's parsed SQL by
 	/// <c>DepotArtifactStatusesConstraintDriftTests</c> --
+	/// 0113 (issue #1389, epic #1185 "Content libraries", split from design record
+	/// #1056; slot pre-assigned 2026-08-30, verified unused on main and in every open
+	/// PR at branch time): adds <c>content_library_folders</c> (a self-referencing
+	/// operator-defined virtual folder tree per library, DB metadata only -- never
+	/// written to disk -- with a partial unique index closing the NULL-parent
+	/// root-name-uniqueness gap the composite sibling-name UNIQUE constraint alone
+	/// cannot cover, see the migration's own header) and
+	/// <c>content_library_item_folders</c> (single-parent item-to-folder assignment;
+	/// <c>item_id</c> has NO foreign key -- issue #1391/PR #1649 shipped no items
+	/// table, so it carries the caller-supplied Guid identity
+	/// <c>Waypoint.Core.ContentLibraries.ContentLibraryItemWrite.Id</c> already
+	/// establishes, pending #1396). No new runner grants (this repo's #556
+	/// grant-hygiene convention, 0090 precedent): folder create/rename-move and item
+	/// assignment are Operator+ API-side, folder delete is Admin, reads are Viewer+,
+	/// all via <c>ContentLibraryFoldersController</c>; no runner ever gets a grant on
+	/// either table, proven both directions by <c>RunnerRoleGrantDriftTests</c> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 92;
+	private const int ExpectedMigrationCount = 93;
 
 	private readonly PostgresFixture _fixture;
 
