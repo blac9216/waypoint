@@ -7,7 +7,7 @@
  * by the global event stream.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { API_BASE } from "../../lib/api";
+import { API_BASE, ApiError } from "../../lib/api";
 import { connectEventStream, type WaypointEvent } from "../../lib/events";
 import { fetchDownloadQueue, type DownloadQueueItem } from "./catalog";
 
@@ -28,6 +28,15 @@ export interface UseDownloadQueueResult {
 	items: DownloadQueueItem[];
 	/** artifact_id -> latest queue item, for the table's inline per-row progress. */
 	byArtifact: Map<string, DownloadQueueItem>;
+	/**
+	 * Issue #1780: set when the `GET /downloads` REST seed fails, cleared on
+	 * a fresh seed attempt (sign-in) or a successful one. Null means "no seed
+	 * error" — distinct from a genuinely empty queue, which this hook still
+	 * reports as `items: []` with `seedError: null`. SSE keeps running either
+	 * way; this never blocks live progress, it only stops silently presenting
+	 * a failed seed as an honestly empty queue.
+	 */
+	seedError: string | null;
 }
 
 export function useDownloadQueue(
@@ -42,6 +51,7 @@ export function useDownloadQueue(
 	onEvent?: (event: WaypointEvent) => void,
 ): UseDownloadQueueResult {
 	const [items, setItems] = useState<DownloadQueueItem[]>([]);
+	const [seedError, setSeedError] = useState<string | null>(null);
 	const itemsRef = useRef<DownloadQueueItem[]>([]);
 	itemsRef.current = items;
 
@@ -50,17 +60,26 @@ export function useDownloadQueue(
 	useEffect(() => {
 		if (!signedIn) {
 			setItems([]);
+			setSeedError(null);
 			return;
 		}
 		let cancelled = false;
+		setSeedError(null);
 		fetchDownloadQueue()
 			.then((seed) => {
 				if (!cancelled) {
 					setItems(seed);
 				}
 			})
-			.catch(() => {
-				// Best-effort seed; the live stream still drives updates from here.
+			.catch((err: unknown) => {
+				// Issue #1780: previously swallowed entirely (`.catch(() => {})`),
+				// which rendered exactly like a genuinely empty queue — the SSE
+				// stream still runs from here on (below), but a mid-flight
+				// download or a terminal row that never emits another event is
+				// otherwise simply invisible, with no indication anything failed.
+				if (!cancelled) {
+					setSeedError(err instanceof ApiError ? err.message : "Could not load the download queue.");
+				}
 			});
 		return () => {
 			cancelled = true;
@@ -159,5 +178,5 @@ export function useDownloadQueue(
 		byArtifact.set(item.artifact_id, item);
 	}
 
-	return { items, byArtifact };
+	return { items, byArtifact, seedError };
 }

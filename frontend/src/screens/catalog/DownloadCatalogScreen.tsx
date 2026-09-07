@@ -11,14 +11,17 @@
  * nav item; if the user is on the catalog when switching, redirects to
  * Transfer."
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import type { WaypointEvent } from "../../lib/events";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import { useSystem } from "../../lib/system-context";
 import {
+	DISPLAY_STATUS_LABELS,
+	displayStatus,
 	fetchCatalogArtifacts,
+	filterArtifactsBySearch,
 	formatEta,
 	formatRate,
 	formatTransferEstimate,
@@ -46,13 +49,22 @@ const TYPE_OPTIONS: { value: ProductType | ""; label: string }[] = [
 	{ value: "kubernetes", label: "Kubernetes" },
 ];
 
+// Issue #1768: values are the backend's own `DepotArtifactStatuses.All`
+// vocabulary (`indexed`/`downloading`/`present`/`failed`/`missing`) — this
+// filter binds server-side (`ListArtifacts`'s `status` query parameter), so
+// every value offered here must be one the API actually accepts, in this
+// order. Labels are derived through `displayStatus`/`DISPLAY_STATUS_LABELS`
+// (review round 1 finding F1 — a prior version of this comment claimed
+// that already, while the labels underneath were still hand-written
+// literals that could drift from the table's own copy) so the dropdown's
+// text can never drift from `ArtifactTable`'s.
+const STATUS_ORDER: ArtifactStatus[] = ["indexed", "downloading", "present", "failed", "missing"];
 const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	{ value: "", label: "Any status" },
-	{ value: "not_downloaded", label: "Not downloaded" },
-	{ value: "queued", label: "Queued" },
-	{ value: "downloading", label: "Downloading" },
-	{ value: "verified", label: "Verified" },
-	{ value: "failed", label: "Failed" },
+	...STATUS_ORDER.map((value) => ({
+		value,
+		label: DISPLAY_STATUS_LABELS[displayStatus(value) ?? "not_downloaded"],
+	})),
 ];
 
 // Run-level terminal states (docs/api-contract.md's `run.progress` `state`
@@ -143,62 +155,112 @@ export function DownloadCatalogScreen() {
 		setBinariesRunNotice((prev) => (prev && prev.runId === runId ? null : prev));
 	}, []);
 
-	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user), handleQueueEvent);
+	const {
+		items: queueItems,
+		byArtifact,
+		seedError: queueSeedError,
+	} = useDownloadQueue(token, Boolean(user), handleQueueEvent);
 	const catalogPull = useCatalogPull();
 
+	// Issue #1592: a per-load generation counter plus an AbortController,
+	// aborted by the next `load` call, guard against a superseded walk's
+	// result overwriting a newer one. The generation check (not just the
+	// abort) is what actually protects state: a mocked/real fetch can still
+	// resolve after being aborted, so `.then`/`.catch` above also verify this
+	// call is still the latest before touching state.
+	const loadGenerationRef = useRef(0);
+	const loadAbortRef = useRef<AbortController | null>(null);
+
 	const load = useCallback((query: CatalogArtifactsQuery) => {
+		loadAbortRef.current?.abort();
+		const controller = new AbortController();
+		loadAbortRef.current = controller;
+		const generation = ++loadGenerationRef.current;
+		const isCurrent = () => loadGenerationRef.current === generation;
+
 		setLoading(true);
 		setLoadError(null);
-		fetchCatalogArtifacts(query)
+		fetchCatalogArtifacts(query, controller.signal)
 			.then((res) => {
+				if (!isCurrent()) {
+					return;
+				}
 				setArtifacts(res.artifacts);
 				setIndexSyncedAt(res.index_synced_at);
 			})
 			.catch((err: unknown) => {
+				if (!isCurrent() || controller.signal.aborted) {
+					return;
+				}
 				setLoadError(err instanceof ApiError ? err.message : "Could not load the download catalog.");
 			})
-			.finally(() => setLoading(false));
+			.finally(() => {
+				if (isCurrent()) {
+					setLoading(false);
+				}
+			});
 	}, []);
 
-	// Re-fetch whenever a filter changes. Debounced on `search` only — the
-	// selects are discrete choices with no reason to wait.
+	// Re-walks the catalog only when a server-bound filter changes
+	// (`product`/`version`/`status` — `ListArtifacts`'s own query
+	// parameters). `search` has no server query parameter to bind to
+	// (issue #468) and is filtered client-side below over the already-walked
+	// set, so it is deliberately not a dependency here — issue #1592: a
+	// changed search term must never trigger a fresh walk.
 	useEffect(() => {
-		const query: CatalogArtifactsQuery = {
-			search: search.trim() || undefined,
+		load({
 			product: product || undefined,
 			version: version || undefined,
 			status: status || undefined,
+		});
+		// Review round 1 finding F4: without this cleanup, the walk started
+		// above is aborted only by the *next* `load` call, never by unmount —
+		// navigating away mid-walk left up to six serial page requests in
+		// flight, each still calling `setArtifacts`/`setIndexSyncedAt` on an
+		// unmounted component when they resolved. Abort whatever `load` most
+		// recently started so unmount cancels it the same way a superseded
+		// `load` call already does.
+		return () => {
+			loadAbortRef.current?.abort();
 		};
-		const handle = setTimeout(() => load(query), search ? 250 : 0);
-		return () => clearTimeout(handle);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [search, product, version, status, load]);
+	}, [product, version, status, load]);
+
+	// The search-filtered view of the walked superset (issue #1592) — every
+	// downstream computation (filter options, grouping, selection) reads
+	// this, not the raw walk result, matching the pre-#1592 behaviour where
+	// `fetchCatalogArtifacts` itself applied the search filter before
+	// `artifacts` was ever set.
+	const searchedArtifacts = useMemo(() => filterArtifactsBySearch(artifacts, search), [artifacts, search]);
 
 	// Drop any selection that no longer exists in the current filtered result.
 	useEffect(() => {
 		setSelected((prev) => {
-			const ids = new Set(artifacts.map((a) => a.id));
+			const ids = new Set(searchedArtifacts.map((a) => a.id));
 			const next = new Set([...prev].filter((id) => ids.has(id)));
 			return next.size === prev.size ? prev : next;
 		});
-	}, [artifacts]);
+	}, [searchedArtifacts]);
 
 	const productOptions = useMemo(() => {
-		const set = new Set(artifacts.map((a) => a.product));
+		const set = new Set(searchedArtifacts.map((a) => a.product));
 		return Array.from(set).sort((a, b) => friendlyProductName(a).localeCompare(friendlyProductName(b)));
-	}, [artifacts]);
+	}, [searchedArtifacts]);
 
 	const versionOptions = useMemo(() => {
-		const set = new Set(artifacts.map((a) => a.version));
+		const set = new Set(searchedArtifacts.map((a) => a.version));
 		return Array.from(set).sort();
-	}, [artifacts]);
+	}, [searchedArtifacts]);
 
 	// Type (core vs. Kubernetes-stack) is a client-side classification of the
 	// catalog key (see catalog.ts's isKubernetesProduct) — the backend has no
 	// such field to filter on server-side.
 	const typedArtifacts = useMemo(
-		() => (type ? artifacts.filter((a) => isKubernetesProduct(a.product) === (type === "kubernetes")) : artifacts),
-		[artifacts, type],
+		() =>
+			type
+				? searchedArtifacts.filter((a) => isKubernetesProduct(a.product) === (type === "kubernetes"))
+				: searchedArtifacts,
+		[searchedArtifacts, type],
 	);
 
 	const groups = useMemo(() => groupArtifactsByProduct(typedArtifacts), [typedArtifacts]);
@@ -261,9 +323,10 @@ export function DownloadCatalogScreen() {
 				await queueDownloads(ids);
 				clearSelection();
 				// Re-fetch so freshly-queued rows flip to `queued` immediately;
-				// live progress from here on is SSE-only.
+				// live progress from here on is SSE-only. `search` is not a
+				// server query parameter (issue #1592) so it is not part of
+				// this re-walk's query either.
 				load({
-					search: search.trim() || undefined,
 					product: product || undefined,
 					version: version || undefined,
 					status: status || undefined,
@@ -274,7 +337,7 @@ export function DownloadCatalogScreen() {
 				setQueueing(false);
 			}
 		},
-		[canQueue, clearSelection, load, search, product, version, status],
+		[canQueue, clearSelection, load, product, version, status],
 	);
 
 	const retryArtifact = useCallback((id: string) => doQueue([id]), [doQueue]);
@@ -354,7 +417,7 @@ export function DownloadCatalogScreen() {
 		);
 	}
 
-	const selectedArtifacts = artifacts.filter((a) => selected.has(a.id));
+	const selectedArtifacts = searchedArtifacts.filter((a) => selected.has(a.id));
 	const selectedTotalBytes = selectedArtifacts.reduce((sum, a) => sum + a.size_bytes, 0);
 	// Live aggregate rate: sum of currently-downloading jobs' measured
 	// rate, so the estimate reflects real throughput when the queue is
@@ -516,7 +579,7 @@ export function DownloadCatalogScreen() {
 			</div>
 
 			<aside className="catalog-rail">
-				<DownloadQueuePanel byArtifact={byArtifact} artifacts={artifacts} />
+				<DownloadQueuePanel byArtifact={byArtifact} artifacts={searchedArtifacts} seedError={queueSeedError} />
 				<StoresUsagePanel />
 			</aside>
 		</div>
@@ -624,9 +687,11 @@ function formatBytesInline(bytes: number): string {
 function DownloadQueuePanel({
 	byArtifact,
 	artifacts,
+	seedError,
 }: {
 	byArtifact: Map<string, DownloadQueueItem>;
 	artifacts: CatalogArtifact[];
+	seedError: string | null;
 }) {
 	const artifactNameById = useMemo(() => new Map(artifacts.map((a) => [a.id, a.name])), [artifacts]);
 	const active = Array.from(byArtifact.values()).filter((item) => item.state !== "verified");
@@ -634,7 +699,12 @@ function DownloadQueuePanel({
 	return (
 		<div className="catalog-panel">
 			<div className="catalog-panel__title">DOWNLOAD QUEUE</div>
-			{active.length === 0 && <div className="catalog-panel__empty">No active downloads.</div>}
+			{/* Issue #1780: a failed GET /downloads seed is surfaced distinctly
+			    from a genuinely empty queue — the screen's existing error
+			    pattern (`catalog-screen__error`), reused here rather than a new
+			    class, since it is the same "something failed, here is why" shape. */}
+			{seedError && <div className="catalog-screen__error">{seedError}</div>}
+			{!seedError && active.length === 0 && <div className="catalog-panel__empty">No active downloads.</div>}
 			<ul className="catalog-queue-list">
 				{active.map((item) => (
 					<li key={item.job_id} className="catalog-queue-item">

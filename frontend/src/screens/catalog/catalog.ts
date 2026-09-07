@@ -15,7 +15,66 @@
 
 import { apiGet, apiGetPaged, apiPost } from "../../lib/api";
 
-export type ArtifactStatus = "not_downloaded" | "queued" | "downloading" | "verified" | "failed";
+/**
+ * Issue #1768: the wire vocabulary for `depot_artifacts.status`, exactly the
+ * closed set `Waypoint.Core.Catalog.DepotArtifactStatuses.All` enumerates
+ * (`backend/Waypoint.Core/Catalog/DepotArtifact.cs`, authoritative against
+ * migration 0129's `depot_artifacts_status_check`) — this union previously
+ * declared `"not_downloaded" | "queued" | "verified"`, none of which the
+ * backend has ever written, and omitted `"indexed"`/`"present"`/`"missing"`,
+ * which it does. `artifactStatus.test.ts` parses `DepotArtifact.cs` at test
+ * time so this list cannot drift from the backend again unnoticed (the same
+ * posture `livejobs/runTypes.test.ts` established for `RunTypes.cs`).
+ */
+export type ArtifactStatus = "indexed" | "downloading" | "present" | "failed" | "missing";
+
+/**
+ * UI-only rendering vocabulary, deliberately kept out of `ArtifactStatus`:
+ * `displayStatus` below maps every backend value to one of these for the
+ * table/filter to show a human label, without ever pretending the backend
+ * writes `"not_downloaded"`/`"verified"` — that conflation is exactly what
+ * issue #1768 found and removed from `ArtifactStatus` itself.
+ */
+export type DisplayStatus = "not_downloaded" | "downloading" | "verified" | "failed" | "missing";
+
+/** Operator-facing label for each `DisplayStatus` — the single source both
+ * `ArtifactTable`'s status cell and `DownloadCatalogScreen`'s status filter
+ * dropdown derive their copy from, so the two can never drift from each
+ * other the way the dropdown's hand-written labels once could (review
+ * round 1 finding F1). */
+export const DISPLAY_STATUS_LABELS: Record<DisplayStatus, string> = {
+	not_downloaded: "Not downloaded",
+	downloading: "Downloading",
+	verified: "Verified",
+	failed: "Failed",
+	missing: "Missing",
+};
+
+/**
+ * `status` arrives from `apiGetPaged` as an unvalidated wire string, typed
+ * `ArtifactStatus` only by assertion — a value outside the closed union
+ * (backend drift `artifactStatus.test.ts`'s guard hasn't caught, or simply
+ * a response older than that guard) still reaches here at runtime even
+ * though the switch below is exhaustive over the *type*. Returning `null`
+ * for that case (rather than falling through to `undefined`) lets callers
+ * render the raw wire value instead of silently mislabeling an unknown
+ * status as its opposite — `ArtifactTable.tsx`'s previous `not downloaded`
+ * fallback, which review round 1 finding F2 flagged as exactly that trap.
+ */
+export function displayStatus(status: ArtifactStatus): DisplayStatus | null {
+	switch (status) {
+		case "indexed":
+			return "not_downloaded";
+		case "present":
+			return "verified";
+		case "downloading":
+		case "failed":
+		case "missing":
+			return status;
+		default:
+			return null;
+	}
+}
 
 export interface CatalogArtifact {
 	id: string;
@@ -163,8 +222,15 @@ export interface CatalogArtifactsResponse {
 	index_synced_at: string | null;
 }
 
+/**
+ * Issue #1792 F6: `search` is deliberately absent — `fetchCatalogArtifacts`
+ * below has never bound it to a server query parameter (`ListArtifacts`
+ * doesn't read one), so keeping it in this type let a future caller pass
+ * `{ search: "x" }` and get an unfiltered result with no type error to warn
+ * them. `filterArtifactsBySearch` below is the only supported way to apply
+ * a search term, over the already-walked superset this fetches.
+ */
 export interface CatalogArtifactsQuery {
-	search?: string;
 	product?: string;
 	version?: string;
 	status?: ArtifactStatus;
@@ -196,14 +262,14 @@ const ARTIFACTS_PAGE_LIMIT = 200;
  * `status` DO bind server-side (`ListArtifacts`'s query parameters) and are
  * still sent as query params.
  */
-function fetchCatalogArtifactsPage(query: CatalogArtifactsQuery, offset: number) {
+function fetchCatalogArtifactsPage(query: CatalogArtifactsQuery, offset: number, signal?: AbortSignal) {
 	const params = new URLSearchParams();
 	if (query.product) params.set("product", query.product);
 	if (query.version) params.set("version", query.version);
 	if (query.status) params.set("status", query.status);
 	params.set("limit", String(ARTIFACTS_PAGE_LIMIT));
 	params.set("offset", String(offset));
-	return apiGetPaged<CatalogArtifact>(`/catalog/artifacts?${params.toString()}`);
+	return apiGetPaged<CatalogArtifact>(`/catalog/artifacts?${params.toString()}`, { signal });
 }
 
 /**
@@ -213,15 +279,39 @@ function fetchCatalogArtifactsPage(query: CatalogArtifactsQuery, offset: number)
  * indexed catalog, not one page of it). Pages sequentially — the endpoint
  * has no documented concurrent-request guarantee, and this keeps `offset`
  * math trivial — accumulating until the running total meets the
- * `X-Total-Count` the first response reports, or a page comes back short
- * (defensive: the total could legitimately shrink between requests if the
- * catalog is re-indexed mid-fetch).
+ * `X-Total-Count` each page's own response reports (not just the first
+ * page's — a prior doc comment here claimed the first response's total was
+ * authoritative, which does not match the code below; kept accurate now
+ * per issue #1592), or a page comes back short (defensive: the total could
+ * legitimately shrink between requests if the catalog is re-indexed
+ * mid-fetch).
+ *
+ * `signal`, when given, aborts every in-flight page request — issue #1592:
+ * callers doing a stale-response guard on a superseded walk need every page
+ * request cancelled, not just a single top-level fetch.
+ *
+ * Issue #1592's two other smaller notes are won't-fix here, not overlooked:
+ * `apiGetPaged`'s `totalCount = items.length` fallback when `X-Total-Count`
+ * is absent is documented, tested defence-in-depth (`api.test.ts`) against a
+ * header the controller always sets today, and a non-numeric header yielding
+ * `NaN` still terminates correctly via the `items.length < ARTIFACTS_PAGE_LIMIT`
+ * short-page check below — fixing either would guard against a controller
+ * regression this frontend has no way to detect anyway.
+ *
+ * `search` is deliberately not filtered in here: it has no server query
+ * parameter to bind to (`ListArtifacts` never reads it), so filtering it
+ * client-side against the walked superset belongs to the caller
+ * (`filterArtifactsBySearch` below), applied to already-walked results
+ * rather than triggering a fresh walk on every keystroke.
  */
-export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
+export function fetchCatalogArtifacts(
+	query: CatalogArtifactsQuery = {},
+	signal?: AbortSignal,
+): Promise<CatalogArtifactsResponse> {
 	const collected: CatalogArtifact[] = [];
 
 	async function loadFrom(offset: number): Promise<CatalogArtifact[]> {
-		const { items, totalCount } = await fetchCatalogArtifactsPage(query, offset);
+		const { items, totalCount } = await fetchCatalogArtifactsPage(query, offset, signal);
 		collected.push(...items);
 		const nextOffset = offset + items.length;
 		if (items.length < ARTIFACTS_PAGE_LIMIT || nextOffset >= totalCount) {
@@ -230,13 +320,22 @@ export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promis
 		return loadFrom(nextOffset);
 	}
 
-	return loadFrom(0).then((artifacts) => {
-		const search = query.search?.trim().toLowerCase();
-		const filtered = search
-			? artifacts.filter((a) => a.name.toLowerCase().includes(search) || a.sha256.toLowerCase().includes(search))
-			: artifacts;
-		return { artifacts: filtered, index_synced_at: null };
-	});
+	return loadFrom(0).then((artifacts) => ({ artifacts, index_synced_at: null }));
+}
+
+/**
+ * Client-side `search` filter (issue #1592) over an already-walked artifact
+ * set — matches `catalog.ts`'s prior inline behaviour (name or sha256,
+ * case-insensitive substring) but is now applied by the caller against
+ * in-memory state rather than re-walking the whole catalog on every
+ * keystroke.
+ */
+export function filterArtifactsBySearch(artifacts: CatalogArtifact[], search?: string): CatalogArtifact[] {
+	const trimmed = search?.trim().toLowerCase();
+	if (!trimmed) {
+		return artifacts;
+	}
+	return artifacts.filter((a) => a.name.toLowerCase().includes(trimmed) || a.sha256.toLowerCase().includes(trimmed));
 }
 
 export interface CatalogSyncResponse {
