@@ -573,16 +573,14 @@ beyond what those two documents already specify.
 `docs/api-contract.md`'s new "RBAC map — download domain" table is the wire-facing
 reconciliation of owner grill decision R2-10 against shipped controllers, checked
 attribute-by-attribute rather than inferred. It is not repeated here; this paragraph
-states the one finding worth a security-document callout. **One divergence is flagged,
-not silently resolved**: R2-10 names "Operator: ad-hoc downloads, library
-upload/organize," but the in-flight content-library folder/organize surface
-(`ContentLibraryFoldersController`, issue #1389, no PR opened at the time of this
-reconciliation) gates every write — including folder-only reassignment, which carries
-no destructive or persistent-configuration weight beyond the library's own existing
-scope — at Admin. This is documented as shipped-pending-review, not corrected in this
-doc-only PR (the branch is another agent's live work tonight); deferred issue #1746
-tracks resolving it either by widening the branch's authorization before merge or by
-amending R2-10 if Admin-only organize turns out to be the intended floor.
+states the one finding worth a security-document callout. **The divergence flagged in
+earlier drafts of this document is now resolved**: R2-10 names "Operator: ad-hoc
+downloads, library upload/organize," and the content-library folder/organize surface
+(`ContentLibraryFoldersController`, issues #1389/#1746, PR #1770) gates folder
+create/rename/move and item reassignment at Operator+, matching R2-10 directly. Folder
+delete is gated at Admin — grouped with the ruling's "deletes/purges" Admin bucket
+rather than the organize verbs, per the orchestrator's amendment to #1746's AC1 — and
+reads remain Viewer+.
 
 ## Residual risks (accepted, documented)
 
