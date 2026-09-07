@@ -60,8 +60,10 @@ public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 	/// the most recent sweep observe at this path" -- there is no other write path that
 	/// could regress it to a stale size the way a partial-information caller could on
 	/// the catalog table, so refreshing to the latest observation, unknown-size
-	/// included, is the more honest semantic here. <see cref="UnknownCatalogFileRepositoryTests.RecordSeenAsync_SamePathTwice_TouchesLastSeenAtAndKeepsOneRow"/>
-	/// pins this overwrite behavior.
+	/// included, is the more honest semantic here.
+	/// <see cref="UnknownCatalogFileRepositoryTests.RecordSeenAsync_ReTouchWithNullSize_WipesPreviouslyRecordedSize"/>
+	/// pins this overwrite behavior -- a re-touch with a null size wipes a
+	/// previously recorded one; it fails under a <c>COALESCE</c> rewrite.
 	///
 	/// Issue #1495 AC3: a genuinely new unknown file (not a re-touch of one already
 	/// on record) emits <see cref="JobEventTypes.SystemNotice"/> through the same

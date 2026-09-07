@@ -91,6 +91,31 @@ public sealed class UnknownCatalogFileRepositoryTests : IAsyncLifetime
 		Assert.True(matching[0].LastSeenAt >= firstSeen.LastSeenAt);
 	}
 
+	/// <summary>
+	/// Issue #1613 AC2: pins the deliberate unconditional overwrite semantic the
+	/// doc comment on <see cref="UnknownCatalogFileRepository.RecordSeenAsync"/>
+	/// describes -- a re-touch with <c>sizeBytes: null</c> wipes a previously
+	/// recorded, non-null size rather than preserving it (the opposite of
+	/// <see cref="DepotArtifactRepository.UpsertAsync"/>'s
+	/// <c>COALESCE(EXCLUDED.x, depot_artifacts.x)</c> convention). This test must
+	/// fail if the SQL is changed to <c>COALESCE(EXCLUDED.size_bytes,
+	/// unknown_catalog_files.size_bytes)</c>: under that form the stored size would
+	/// stay 1024 instead of becoming null.
+	/// </summary>
+	[Fact]
+	public async Task RecordSeenAsync_ReTouchWithNullSize_WipesPreviouslyRecordedSize()
+	{
+		string relativePath = $"unknown/{Guid.NewGuid():N}.iso";
+
+		await _repository.RecordSeenAsync(relativePath, 1024, CancellationToken.None);
+
+		await _repository.RecordSeenAsync(relativePath, null, CancellationToken.None);
+
+		IReadOnlyList<UnknownCatalogFile> afterSecond = await _repository.ListAsync(CancellationToken.None);
+		UnknownCatalogFile matching = Assert.Single(afterSecond, item => item.RelativePath == relativePath);
+		Assert.Null(matching.SizeBytes);
+	}
+
 	[Fact]
 	public async Task RecordSeenAsync_TwoDifferentPaths_YieldsTwoRows()
 	{
