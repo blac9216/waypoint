@@ -90,6 +90,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 
 		List<string> warnings = [];
 		List<EsxPatchStoreVendorHealth> vendorHealth = [];
+		List<EsxPatchStoreUnresolvedReference> unresolvedReferences = [];
 		SortedSet<string> vendorCodes = new(StringComparer.Ordinal);
 		foreach (string indexVendorCode in ParseConsolidatedIndexVendorCodes(hostupdateRoot, warnings))
 		{
@@ -113,7 +114,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			}
 
 			vendorCodes.Add(vendorCode);
-			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings, vendorHealth);
+			ParseVendorMetadataIndex(vendorDir, vendorCode, bundles, warnings, vendorHealth, unresolvedReferences);
 		}
 
 		EsxPatchStoreMetadata metadata = new(
@@ -124,7 +125,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			Bundles: bundles,
 			Warnings: warnings,
 			RootReadable: rootReadable,
-			VendorHealth: vendorHealth);
+			VendorHealth: vendorHealth,
+			UnresolvedReferences: unresolvedReferences);
 
 		return EsxPatchStoreParseResult.Ok(metadata);
 	}
@@ -212,7 +214,8 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 	/// genuine absence and is precisely what missing-detection must still see.
 	/// </summary>
 	private static void ParseVendorMetadataIndex(
-		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth)
+		string vendorDir, string vendorCode, List<EsxPatchStoreMetadataBundle> bundles, List<string> warnings, List<EsxPatchStoreVendorHealth> vendorHealth,
+		List<EsxPatchStoreUnresolvedReference> unresolvedReferences)
 	{
 		string indexPath = Path.Combine(vendorDir, ConsolidatedMetadataIndexFileName);
 		if (!File.Exists(indexPath))
@@ -264,6 +267,7 @@ public sealed class EsxPatchStoreMetadataParser : IEsxPatchStoreMetadataParser
 			if (!File.Exists(zipPath))
 			{
 				warnings.Add($"Vendor '{vendorCode}': metadata zip '{fileName}' referenced by the index was not found on disk.");
+				unresolvedReferences.Add(new EsxPatchStoreUnresolvedReference(vendorCode, fileName));
 				continue;
 			}
 

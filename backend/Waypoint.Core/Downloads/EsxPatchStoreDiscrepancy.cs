@@ -33,8 +33,14 @@ public enum EsxPatchStoreDiscrepancyType
 /// One discrepancy record persisted by <see cref="IEsxPatchStoreReconciler"/>
 /// (migration 0091's <c>esx_patch_store_discrepancies</c>), surfaced as a first-class
 /// row rather than merely logged (issue #1447 Proposed Changes). <see cref="Key"/> is
-/// the parser's content key for <see cref="EsxPatchStoreDiscrepancyType.Missing"/>, or
-/// <c>"{VendorCode}/{fileName}"</c> for <see cref="EsxPatchStoreDiscrepancyType.Orphan"/>.
+/// the parser's content key for a <see cref="EsxPatchStoreDiscrepancyType.Missing"/>
+/// row opened from a previously indexed bundle that vanished (<see cref="VendorCode"/>
+/// null on that row), or <c>"{VendorCode}/{fileName}"</c> (with <see cref="VendorCode"/>
+/// set, distinguishing it from the content-key form) for a
+/// <see cref="EsxPatchStoreDiscrepancyType.Missing"/> row opened from an
+/// <see cref="EsxPatchStoreUnresolvedReference"/> -- content that is referenced but
+/// has never arrived (issue #1701) -- and for every
+/// <see cref="EsxPatchStoreDiscrepancyType.Orphan"/> row.
 /// <see cref="ResolvedAt"/> is set when a later reconciliation pass no longer observes
 /// the condition (a missing bundle reappears, an orphan is picked up by metadata) --
 /// bookkeeping on the alert's own lifecycle only; the row itself is never deleted, and

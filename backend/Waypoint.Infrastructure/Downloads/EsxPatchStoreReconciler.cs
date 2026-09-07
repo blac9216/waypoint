@@ -211,6 +211,78 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 				$"Missing-discrepancy detection skipped for {skippedMissing} previously indexed key(s) under vendor(s) {vendorDetail}: that vendor's parse this run left it degraded, so its absence from the current bundle list cannot be trusted as a real removal. See ParserWarnings for the read failure; a healthy parse of that vendor will detect real missing content on a later run.");
 		}
 
+		// Issue #1701: a metadata entry naming a zip that has NEVER been on disk has
+		// no content key of its own (identity is the zip's own SHA-256) and so can
+		// never enter the seenContentKeys/index model above -- without this, it is
+		// surfaced only as ephemeral EsxPatchStoreMetadata.Warnings prose, never as a
+		// first-class discrepancy. Keyed on "{VendorCode}/{fileName}" (mirroring the
+		// orphan key shape) rather than on warning prose (round-4 review F4: the
+		// reconciler must never key on warning text). Same degraded-vendor gate as
+		// the content-key missing diff above: a vendor whose index could not be read
+		// opens (and resolves) nothing here either.
+		//
+		// Excludes any vendor/filename this store has EVER indexed with a content key
+		// (previouslyIndexedVendorZipKeys): that shape is "was here, vanished" -- the
+		// content-key missing diff above already opens (and, on reappearance,
+		// resolves) exactly one row for it. Without this exclusion, a zip that was
+		// indexed on an earlier run and later deleted from disk (while its vendor
+		// index still names it) would open a SECOND, redundant Missing row here on
+		// top of the content-key one for the same underlying gap.
+		HashSet<string> previouslyIndexedVendorZipKeys =
+			await ListIndexedVendorZipKeysAsync(connection, storeRoot, cancellationToken).ConfigureAwait(false);
+		HashSet<string> currentUnresolvedReferenceKeys = new(StringComparer.Ordinal);
+		HashSet<string> vendorsWithSkippedUnresolvedReferences = new(StringComparer.Ordinal);
+		foreach (EsxPatchStoreUnresolvedReference reference in metadata.UnresolvedReferences)
+		{
+			string key = $"{reference.VendorCode}/{reference.FileName}";
+			if (previouslyIndexedVendorZipKeys.Contains(key))
+			{
+				continue;
+			}
+
+			if (rootDegraded || degradedVendorCodes.Contains(reference.VendorCode))
+			{
+				vendorsWithSkippedUnresolvedReferences.Add(reference.VendorCode);
+				continue;
+			}
+
+			currentUnresolvedReferenceKeys.Add(key);
+
+			if (await RecordDiscrepancyAsync(
+				connection, storeRoot, EsxPatchStoreDiscrepancyType.Missing, key,
+				reference.VendorCode, reference.FileName,
+				detail: $"'{reference.FileName}' is referenced by vendor '{reference.VendorCode}''s consolidated metadata index but has never been found on disk.",
+				cancellationToken).ConfigureAwait(false))
+			{
+				newMissing++;
+			}
+		}
+
+		foreach ((string previouslyUnresolvedKey, string previouslyUnresolvedVendorCode) in
+			await ListOpenUnresolvedReferenceKeysAsync(connection, storeRoot, cancellationToken).ConfigureAwait(false))
+		{
+			if (currentUnresolvedReferenceKeys.Contains(previouslyUnresolvedKey)
+				|| rootDegraded
+				|| degradedVendorCodes.Contains(previouslyUnresolvedVendorCode))
+			{
+				continue;
+			}
+
+			if (await ResolveDiscrepancyAsync(connection, storeRoot, EsxPatchStoreDiscrepancyType.Missing, previouslyUnresolvedKey, cancellationToken).ConfigureAwait(false))
+			{
+				resolved++;
+			}
+		}
+
+		if (!rootDegraded && vendorsWithSkippedUnresolvedReferences.Count > 0)
+		{
+			string vendorDetail = string.Join(", ", vendorsWithSkippedUnresolvedReferences
+				.Order(StringComparer.Ordinal)
+				.Select(code => $"{code} ({DescribeVendorDegradation(metadata.VendorHealth, code)})"));
+			reconcilerWarnings.Add(
+				$"Unresolved-reference missing-discrepancy detection skipped for vendor(s) {vendorDetail}: that vendor's parse this run left it degraded, so a referenced-but-absent zip under it cannot be trusted as a real gap. See ParserWarnings for the read failure; a healthy parse of that vendor will detect this on a later run.");
+		}
+
 		int newOrphan = 0;
 		HashSet<string> vendorsWithSkippedOrphanScan = new(StringComparer.Ordinal);
 		if (rootDegraded)
@@ -426,6 +498,55 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 	{
 		await using NpgsqlCommand command = new("SELECT content_key, vendor_code FROM esx_patch_store_index WHERE store_root = $1", connection);
 		command.Parameters.AddWithValue(storeRoot);
+
+		List<(string, string)> keys = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			keys.Add((reader.GetString(0), reader.GetString(1)));
+		}
+
+		return keys;
+	}
+
+	/// <summary>
+	/// Every "{vendor_code}/{zip_relative_path}" this store has EVER indexed with a
+	/// content key (issue #1701) -- used to exclude the "was here, vanished" shape
+	/// (already covered by the content-key missing diff) from the unresolved-reference
+	/// diff, so the same underlying gap is never opened as two separate Missing rows.
+	/// </summary>
+	private static async Task<HashSet<string>> ListIndexedVendorZipKeysAsync(NpgsqlConnection connection, string storeRoot, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new("SELECT vendor_code, zip_relative_path FROM esx_patch_store_index WHERE store_root = $1", connection);
+		command.Parameters.AddWithValue(storeRoot);
+
+		HashSet<string> keys = new(StringComparer.Ordinal);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			keys.Add($"{reader.GetString(0)}/{reader.GetString(1)}");
+		}
+
+		return keys;
+	}
+
+	/// <summary>
+	/// Every open <see cref="EsxPatchStoreDiscrepancyType.Missing"/> row this store has
+	/// previously recorded from an <see cref="EsxPatchStoreUnresolvedReference"/>
+	/// (issue #1701), paired with its vendor code. Distinguished from a content-key
+	/// Missing row by <c>vendor_code IS NOT NULL</c> -- <see cref="RecordDiscrepancyAsync"/>'s
+	/// content-key call site above always passes <c>vendorCode: null</c>, while every
+	/// unresolved-reference row sets it, so the two Missing-row shapes never collide.
+	/// </summary>
+	private static async Task<List<(string Key, string VendorCode)>> ListOpenUnresolvedReferenceKeysAsync(NpgsqlConnection connection, string storeRoot, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT key, vendor_code FROM esx_patch_store_discrepancies
+			WHERE store_root = $1 AND discrepancy_type = $2 AND resolved_at IS NULL AND vendor_code IS NOT NULL
+			""", connection);
+		command.Parameters.AddWithValue(storeRoot);
+		command.Parameters.AddWithValue(DiscrepancyTypeKey(EsxPatchStoreDiscrepancyType.Missing));
 
 		List<(string, string)> keys = [];
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);

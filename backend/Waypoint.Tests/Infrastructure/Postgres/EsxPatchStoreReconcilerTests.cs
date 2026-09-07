@@ -150,6 +150,32 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		return (count, discType, resolved);
 	}
 
+	private async Task<(int Discrepancies, string? DiscrepancyType, bool Resolved, string? VendorCode)> ReadDiscrepancyByKeyAsync(EsxPatchStoreDiscrepancyType type, string key)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT discrepancy_type, resolved_at, vendor_code FROM esx_patch_store_discrepancies WHERE store_root = $1 AND discrepancy_type = $2 AND key = $3", connection);
+		command.Parameters.AddWithValue(_root);
+		command.Parameters.AddWithValue(type == EsxPatchStoreDiscrepancyType.Missing ? "missing" : "orphan");
+		command.Parameters.AddWithValue(key);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		int count = 0;
+		string? discType = null;
+		bool resolved = false;
+		string? vendorCode = null;
+		while (await reader.ReadAsync())
+		{
+			count++;
+			discType = reader.GetString(0);
+			resolved = !reader.IsDBNull(1);
+			vendorCode = reader.IsDBNull(2) ? null : reader.GetString(2);
+		}
+
+		return (count, discType, resolved, vendorCode);
+	}
+
 	private async Task<int> CountIndexRowsAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
@@ -297,6 +323,98 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		Assert.Equal(0, report.NewOrphanCount);
 		(int _, string? _, bool resolvedAfter) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
 		Assert.True(resolvedAfter);
+	}
+
+	// ----- issue #1701: referenced-but-never-present zip -------------------------
+
+	[Fact]
+	public async Task ReconcileAsync_ReferencedZipNeverPresent_RecordsMissingDiscrepancy_WithoutWarningProseMatching()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+
+		// vmw's index names a zip that has never been downloaded -- no content key
+		// of its own, so this content can never enter the seenContentKeys/index model
+		// the loop above is keyed on.
+		WriteVendorMetadataIndex(_hostupdateDir, "vmw", "vmw-ESXi-9.1-metadata.zip");
+
+		EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.Equal(0, report.IndexedCount);
+		Assert.Equal(1, report.NewMissingCount);
+		Assert.Contains(report.ParserWarnings, w => w.Contains("vmw-ESXi-9.1-metadata.zip") && w.Contains("not found"));
+
+		(int count, string? type, bool resolved, string? vendorCode) =
+			await ReadDiscrepancyByKeyAsync(EsxPatchStoreDiscrepancyType.Missing, "vmw/vmw-ESXi-9.1-metadata.zip");
+		Assert.Equal(1, count);
+		Assert.Equal("missing", type);
+		Assert.False(resolved);
+		Assert.Equal("vmw", vendorCode);
+	}
+
+	[Fact]
+	public async Task ReconcileAsync_UnresolvedReferenceZipArrives_ResolvesTheDiscrepancy_WithoutRowDeletion()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		WriteVendorMetadataIndex(_hostupdateDir, "vmw", "vmw-ESXi-9.1-metadata.zip");
+		await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		(int _, string? _, bool resolvedBefore, string? _) =
+			await ReadDiscrepancyByKeyAsync(EsxPatchStoreDiscrepancyType.Missing, "vmw/vmw-ESXi-9.1-metadata.zip");
+		Assert.False(resolvedBefore);
+
+		// The referenced zip finally arrives (e.g. a resumed/completed transfer).
+		string vendorDir = Path.Combine(_hostupdateDir, "vmw");
+		WriteMetadataZip(Path.Combine(vendorDir, "vmw-ESXi-9.1-metadata.zip"));
+
+		EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.Equal(1, report.ResolvedCount);
+		Assert.Equal(1, report.IndexedCount);
+		(int count, string? _, bool resolvedAfter, string? _) =
+			await ReadDiscrepancyByKeyAsync(EsxPatchStoreDiscrepancyType.Missing, "vmw/vmw-ESXi-9.1-metadata.zip");
+		Assert.Equal(1, count);
+		Assert.True(resolvedAfter);
+	}
+
+	[Fact]
+	public async Task ReconcileAsync_DegradedVendorParse_GatesUnresolvedReferenceMissingDetectionForThatVendor()
+	{
+		// vmw's index parses fine overall, but carries two entries: one with no
+		// usable location (EsxPatchStoreVendorHealthKind.UnresolvableEntry -- a
+		// degraded-vendor finding) and one naming a zip never downloaded (the
+		// #1701 unresolved-reference case). Both are produced in the SAME parse for
+		// the SAME vendor -- confirms the same degraded-vendor gate the content-key
+		// missing diff already has also covers unresolved references: a vendor
+		// carrying ANY degraded finding this run opens no unresolved-reference
+		// Missing discrepancy either.
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = Path.Combine(_hostupdateDir, "vmw");
+		Directory.CreateDirectory(vendorDir);
+		File.WriteAllText(
+			Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"),
+			"""
+			<metadataList>
+				<metadata>
+					<productId>ESXi900</productId>
+					<version>9.1.0</version>
+					<channelName>vmw-ESXi-9.1</channelName>
+				</metadata>
+				<metadata>
+					<productId>ESXi900</productId>
+					<version>9.1.0</version>
+					<url>vmw-ESXi-9.1-metadata.zip</url>
+					<channelName>vmw-ESXi-9.1</channelName>
+				</metadata>
+			</metadataList>
+			""");
+
+		EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.Equal(0, report.NewMissingCount);
+		(int count, string? _, bool _, string? _) =
+			await ReadDiscrepancyByKeyAsync(EsxPatchStoreDiscrepancyType.Missing, "vmw/vmw-ESXi-9.1-metadata.zip");
+		Assert.Equal(0, count);
+		Assert.Contains(report.ReconcilerWarnings, w => w.Contains("vmw") && w.Contains("degraded"));
 	}
 
 	// ----- round-1 review finding 1: degraded parse must not flood false missing ----

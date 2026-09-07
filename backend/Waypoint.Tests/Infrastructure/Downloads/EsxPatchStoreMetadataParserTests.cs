@@ -320,6 +320,12 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		// must never set vendor health -- round-2 review finding F4's "do not
 		// classify the genuine-absence shapes" instruction.
 		Assert.Empty(result.Metadata.VendorHealth);
+
+		// Issue #1701: the genuine absence is captured structurally, not just as
+		// warning prose, so a reconciler can key a Missing discrepancy on it.
+		EsxPatchStoreUnresolvedReference reference = Assert.Single(result.Metadata.UnresolvedReferences);
+		Assert.Equal("vmw", reference.VendorCode);
+		Assert.Equal("vmw-ESXi-9.1-metadata.zip", reference.FileName);
 	}
 
 	[Fact]
