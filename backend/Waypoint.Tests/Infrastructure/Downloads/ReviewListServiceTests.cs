@@ -19,6 +19,7 @@ using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Pagination;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
@@ -122,6 +123,43 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 			}
 			return Task.CompletedTask;
 		}
+	}
+
+	/// <summary>
+	/// <see cref="IDepotArtifactRepository.GetByIdAsync"/> reports null for the
+	/// out-of-scope row's own <c>depot_artifact_id</c> -- the "unreachable in
+	/// practice" branch issue #1688 asks for an observable signal on, since a
+	/// silent drop from this never-auto-removed list is the exact failure mode the
+	/// list exists to prevent.
+	/// </summary>
+	private sealed class NullArtifactRepository : IDepotArtifactRepository
+	{
+		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("not needed for this test");
+
+		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
+			Task.FromResult<DepotArtifact?>(null);
+
+		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("not needed for this test");
+	}
+
+	[Fact]
+	public async Task ListAsync_UnresolvableOutOfScopeArtifact_RaisesAlertAndIsSkippedNotSilentlyDropped()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("photon/unresolvable-out-of-scope.iso");
+		await _reviewList.ReportOutOfScopeAsync(artifactId, "retired lane", CancellationToken.None);
+		_events.EmittedPayloads.Clear(); // drop the out_of_scope_reported alert raised by the report call above
+
+		ReviewListService reviewListWithUnresolvableArtifacts = new(
+			_fixture.ConnectionString, _unknownCatalogFiles, new NullArtifactRepository(), _events);
+
+		IReadOnlyList<ReviewListEntry> entries = await reviewListWithUnresolvableArtifacts.ListAsync(CancellationToken.None);
+
+		Assert.Empty(entries); // still skipped -- no path/size to show
+		string payload = Assert.Single(_events.EmittedPayloads);
+		Assert.Contains("download.retention.review_list_entry_unresolved", payload);
+		Assert.Contains(artifactId.ToString(), payload);
 	}
 
 	[Fact]
@@ -248,6 +286,7 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 			states,
 			policies,
 			_artifacts,
+			_reviewList,
 			new RecordingEventPublisher(),
 			Options.Create(new Waypoint.Core.Catalog.CatalogOptions { DepotPath = _depotRoot }),
 			NullLogger<RetentionSweepService>.Instance);
@@ -272,5 +311,51 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 		// attempt would have logged a "depot artifact not found" error -- confirming
 		// the sweep took the untracked-skip branch, not a purge branch, for this id.
 		Assert.Empty(report.Errors);
+	}
+
+	/// <summary>
+	/// Issue #1687: the guarantee above holds for the untracked case only by
+	/// accident of current wiring -- a tracked, grace-expired out-of-scope artifact
+	/// (which #1673's discovery pass, once it lands, will produce) would otherwise
+	/// be swept exactly like any other candidate. Real <see cref="ReviewListService"/>
+	/// and <see cref="RetentionSweepService"/> against the same database, per
+	/// #1440's own "integration test running both services together" AC.
+	/// </summary>
+	[Fact]
+	public async Task RunSweepAsync_TrackedGraceExpiredOutOfScopeArtifact_IsSkippedNotPruned()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("photon/tracked-and-out-of-scope.iso");
+		await _reviewList.ReportOutOfScopeAsync(artifactId, "retired lane", CancellationToken.None);
+
+		RetentionPolicyRepository policies = new(_fixture.ConnectionString);
+		await policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+		Guid stateId = await states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		// Grace window already well past due -- if the sweep did not consult the
+		// review list at all, this row would be pruned.
+		await states.TransitionAsync(stateId, RetainedContentStates.Grace, DateTimeOffset.UtcNow.AddDays(-30), CancellationToken.None);
+
+		RetentionSweepService sweep = new(
+			states,
+			policies,
+			_artifacts,
+			_reviewList,
+			new RecordingEventPublisher(),
+			Options.Create(new Waypoint.Core.Catalog.CatalogOptions { DepotPath = _depotRoot }),
+			NullLogger<RetentionSweepService>.Instance);
+
+		RetentionSweepReport report = await sweep.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned);
+		Assert.Equal(1, report.OutOfScopeSkipped);
+		Assert.Equal(0, report.UntrackedCandidatesSkipped); // a distinct reason -- this row IS tracked
+		Assert.Empty(report.Errors);
+
+		RetainedContentState? state = await states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not purged
+
+		IReadOnlyList<ReviewListEntry> entriesAfterSweep = await _reviewList.ListAsync(CancellationToken.None);
+		Assert.Contains(entriesAfterSweep, e => e.Kind == ReviewListEntryKind.OutOfScope && e.DepotArtifactId == artifactId);
 	}
 }

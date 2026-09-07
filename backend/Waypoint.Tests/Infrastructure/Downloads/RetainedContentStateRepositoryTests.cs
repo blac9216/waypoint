@@ -257,6 +257,83 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 		Assert.Equal(RetainedContentStates.Purged, state!.State);
 	}
 
+	/// <summary>Issue #1624: migration 0107's own column comment promises "NULL when not pinned"; leaving pinned MUST clear it.</summary>
+	[Fact]
+	public async Task TransitionAsync_PinnedToTracked_ClearsPinMetadata()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-unpin-to-tracked");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.PinAsync(id, "operator-1", "keep for audit", CancellationToken.None);
+
+		await _repository.TransitionAsync(id, RetainedContentStates.Tracked, CancellationToken.None);
+
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Tracked, state!.State);
+		Assert.Null(state.PinnedBy);
+		Assert.Null(state.PinnedAt);
+		Assert.Null(state.PinNote);
+	}
+
+	/// <summary>Same clearing contract as the tracked case above, for the other legal exit from pinned.</summary>
+	[Fact]
+	public async Task TransitionAsync_PinnedToGrace_ClearsPinMetadata()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-unpin-to-grace");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.PinAsync(id, "operator-1", "keep for audit", CancellationToken.None);
+
+		await _repository.TransitionAsync(id, RetainedContentStates.Grace, CancellationToken.None);
+
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State);
+		Assert.Null(state.PinnedBy);
+		Assert.Null(state.PinnedAt);
+		Assert.Null(state.PinNote);
+	}
+
+	/// <summary>Issue #1627: a row leaving grace must not carry a stale grace_started_at into its next state.</summary>
+	[Fact]
+	public async Task TransitionAsync_GraceToTracked_ClearsGraceStartedAt()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-grace-to-tracked");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.TransitionAsync(id, RetainedContentStates.Grace, CancellationToken.None);
+		RetainedContentState? inGrace = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.NotNull(inGrace!.GraceStartedAt);
+
+		await _repository.TransitionAsync(id, RetainedContentStates.Tracked, CancellationToken.None);
+
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Tracked, state!.State);
+		Assert.Null(state.GraceStartedAt);
+	}
+
+	/// <summary>Issue #1663: the grace transition and a resolved policy_id land in one write.</summary>
+	[Fact]
+	public async Task TransitionAsync_WithPolicyId_WritesStateAndPolicyIdTogether()
+	{
+		RetentionPolicyRepository policyRepository = new(_fixture.ConnectionString);
+		Guid policyId = await policyRepository.UpsertAsync(
+			"retained-content-atomic-policy", 30, 0, "review", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-atomic-transition");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+		await _repository.TransitionAsync(id, RetainedContentStates.Grace, DateTimeOffset.UtcNow, policyId, CancellationToken.None);
+
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State);
+		Assert.Equal(policyId, state.PolicyId);
+	}
+
 	[Fact]
 	public async Task ListByStateAsync_ReturnsOnlyMatchingState()
 	{

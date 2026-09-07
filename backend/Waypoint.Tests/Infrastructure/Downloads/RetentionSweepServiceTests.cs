@@ -105,10 +105,12 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		FakeTimeProvider clock,
 		RecordingEventPublisher? events = null,
 		IDepotArtifactRepository? artifacts = null,
-		IRetentionPolicyRepository? policies = null) => new(
+		IRetentionPolicyRepository? policies = null,
+		IReviewListService? reviewList = null) => new(
 		_states,
 		policies ?? _policies,
 		artifacts ?? new DepotArtifactRepository(_fixture.ConnectionString),
+		reviewList ?? new FakeReviewListService(),
 		events ?? new RecordingEventPublisher(),
 		Options.Create(new CatalogOptions { DepotPath = _depotRoot }),
 		NullLogger<RetentionSweepService>.Instance,
@@ -126,6 +128,34 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 			}
 			return Task.CompletedTask;
 		}
+	}
+
+	/// <summary>
+	/// A minimal <see cref="IReviewListService"/> stand-in for tests that only need
+	/// <see cref="IsOutOfScopeAsync"/> (issue #1687) -- everything reported here is
+	/// in-memory, never touching <c>download_out_of_scope_content</c>, so a test can
+	/// mark a depot-artifact id out-of-scope without needing the real
+	/// <see cref="Waypoint.Infrastructure.Downloads.ReviewListService"/>'s own
+	/// storage. Defaults (no ids marked) mean "nothing is out-of-scope", matching
+	/// every existing test's expectations before this type existed.
+	/// </summary>
+	private sealed class FakeReviewListService : IReviewListService
+	{
+		private readonly HashSet<Guid> _outOfScopeIds = [];
+
+		public void MarkOutOfScope(Guid depotArtifactId) => _outOfScopeIds.Add(depotArtifactId);
+
+		public Task<IReadOnlyList<ReviewListEntry>> ListAsync(CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<ReviewListEntry>>([]);
+
+		public Task ReportOutOfScopeAsync(Guid depotArtifactId, string reason, CancellationToken cancellationToken)
+		{
+			_outOfScopeIds.Add(depotArtifactId);
+			return Task.CompletedTask;
+		}
+
+		public Task<bool> IsOutOfScopeAsync(Guid depotArtifactId, CancellationToken cancellationToken) =>
+			Task.FromResult(_outOfScopeIds.Contains(depotArtifactId));
 	}
 
 	/// <summary>
@@ -375,6 +405,7 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		Assert.False(outcome.Purged);
 		Assert.NotNull(outcome.Error);
+		Assert.True(outcome.AlreadyPurged); // issue #1662: a benign no-op, distinguishable from a real failure
 	}
 
 	// -- Finding 1 (round 1 review): a failed physical delete must not transition the
@@ -619,6 +650,58 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
 		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not purged
 	}
+
+	// -- Issue #1661: a row left at pending-purge by a failed delete is never listed
+	// by anything (ListByStateAsync's only other caller passes 'grace'), so it must
+	// be revisited by a later sweep, and the residual error reported on every pass
+	// while it persists, not only the first.
+
+	[Fact]
+	public async Task RunSweepAsync_PendingPurgeRowFromFailedDelete_IsRevisitedAndReachesPurgedOnceTheFaultClears()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("pending-purge-revisit-target");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("pending-purge-revisit-target");
+
+		MissingArtifactRepository faultyArtifacts = new(new DepotArtifactRepository(_fixture.ConnectionString), artifactId);
+		RetentionSweepService failingSweep = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), artifacts: faultyArtifacts);
+
+		RetentionSweepReport firstReport = await failingSweep.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+		Assert.Equal(0, firstReport.AutoPruned);
+		Assert.NotEmpty(firstReport.Errors);
+		RetainedContentState? afterFirst = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.PendingPurge, afterFirst!.State);
+
+		// Same fault still present: the residual error must be reported again, not
+		// only on the sweep that first hit it.
+		RetentionSweepReport secondReportSameFault = await failingSweep.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+		Assert.Equal(0, secondReportSameFault.AutoPruned);
+		Assert.NotEmpty(secondReportSameFault.Errors);
+		RetainedContentState? afterSecondSameFault = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.PendingPurge, afterSecondSameFault!.State);
+
+		// Fault clears (an operator retry, or the transient condition passing) --
+		// the very next sweep, with zero new candidates, must pick the row up on its
+		// own via the pending-purge revisit pass.
+		RetentionSweepService recoveredSweep = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)));
+		RetentionSweepReport thirdReport = await recoveredSweep.RunSweepAsync(new RetentionSweepRequest([], ListingVerified: true), CancellationToken.None);
+
+		Assert.Equal(1, thirdReport.AutoPruned);
+		Assert.Empty(thirdReport.Errors);
+		RetainedContentState? finalState = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, finalState!.State);
+	}
+
+	// Issue #1663's atomic-write test lives in RetainedContentStateRepositoryTests
+	// (TransitionAsync_WithPolicyId_WritesStateAndPolicyIdTogether) -- repository-
+	// layer behavior, no sweep needed. Issue #1687's out-of-scope-skip test lives in
+	// ReviewListServiceTests (RunSweepAsync_TrackedGraceExpiredOutOfScopeArtifact_IsSkippedNotPruned)
+	// as the real two-service integration test #1440's own AC calls for; the
+	// FakeReviewListService above still backs every other test in this file via
+	// CreateService's default.
 
 	private void WriteDepotFile(string relativePath) =>
 		File.WriteAllText(Path.Combine(_depotRoot, relativePath), "fixture bytes");

@@ -102,7 +102,21 @@ public sealed class ReviewListService : IReviewListService
 			if (artifact is null)
 			{
 				// The FK is ON DELETE CASCADE, so this should be unreachable in
-				// practice; skip defensively rather than surface a null path.
+				// practice -- but this is a safety-critical, never-auto-removed
+				// list, and silently skipping means the row disappears from the one
+				// surface whose entire purpose is that nothing disappears (issue
+				// #1688). Raise the same SystemNotice ReportOutOfScopeAsync uses for
+				// a genuinely new entry, so an impossible state is loud rather than
+				// silent, then skip the row (there is still no path/size to show).
+				if (_events is not null)
+				{
+					string unresolvedPayload = JsonSerializer.Serialize(new
+					{
+						kind = "download.retention.review_list_entry_unresolved",
+						depot_artifact_id = depotArtifactId,
+					});
+					await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, unresolvedPayload, cancellationToken).ConfigureAwait(false);
+				}
 				continue;
 			}
 
@@ -150,5 +164,15 @@ public sealed class ReviewListService : IReviewListService
 			});
 			await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
 		}
+	}
+
+	public async Task<bool> IsOutOfScopeAsync(Guid depotArtifactId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"SELECT EXISTS (SELECT 1 FROM download_out_of_scope_content WHERE depot_artifact_id = $1)", connection);
+		command.Parameters.AddWithValue(depotArtifactId);
+		return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 	}
 }

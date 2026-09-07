@@ -91,4 +91,15 @@ public interface IReviewListService
 	/// (issue #1440 AC: "New review-list entries raise an alert").
 	/// </summary>
 	Task ReportOutOfScopeAsync(Guid depotArtifactId, string reason, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// True when <paramref name="depotArtifactId"/> has a live
+	/// <c>download_out_of_scope_content</c> row -- issue #1687: lets
+	/// <c>RetentionSweepService</c>'s auto-prune pass treat presence on the review
+	/// list as an explicit skip reason for a <em>tracked</em> artifact, rather than
+	/// relying on the artifact happening to have no
+	/// <c>download_retained_content_state</c> row at all (the untracked case, which
+	/// is a structurally different reason to skip). Pure read, no side effect.
+	/// </summary>
+	Task<bool> IsOutOfScopeAsync(Guid depotArtifactId, CancellationToken cancellationToken);
 }

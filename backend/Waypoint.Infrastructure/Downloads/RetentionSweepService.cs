@@ -27,6 +27,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 	private readonly IRetainedContentStateRepository _states;
 	private readonly IRetentionPolicyRepository _policies;
 	private readonly IDepotArtifactRepository _artifacts;
+	private readonly IReviewListService _reviewList;
 	private readonly IJobEventPublisher _events;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly TimeProvider _clock;
@@ -36,6 +37,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		IRetainedContentStateRepository states,
 		IRetentionPolicyRepository policies,
 		IDepotArtifactRepository artifacts,
+		IReviewListService reviewList,
 		IJobEventPublisher events,
 		IOptions<CatalogOptions> catalogOptions,
 		ILogger<RetentionSweepService> logger,
@@ -44,6 +46,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		ArgumentNullException.ThrowIfNull(states);
 		ArgumentNullException.ThrowIfNull(policies);
 		ArgumentNullException.ThrowIfNull(artifacts);
+		ArgumentNullException.ThrowIfNull(reviewList);
 		ArgumentNullException.ThrowIfNull(events);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(logger);
@@ -51,6 +54,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		_states = states;
 		_policies = policies;
 		_artifacts = artifacts;
+		_reviewList = reviewList;
 		_events = events;
 		_catalogOptions = catalogOptions;
 		_logger = logger;
@@ -109,10 +113,18 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 
 			try
 			{
-				await _states.TransitionAsync(current.Id, RetainedContentStates.Grace, _clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+				// Issue #1663: when a resolved entry policy exists, the grace
+				// transition and the policy_id write happen in ONE transaction (the
+				// five-argument TransitionAsync overload) rather than two separate
+				// round trips -- a crash/cancellation between them can no longer
+				// leave the row in grace with a stale or null policy_id.
 				if (entryPolicy is not null)
 				{
-					await _states.SetPolicyAsync(current.Id, entryPolicy.Id, cancellationToken).ConfigureAwait(false);
+					await _states.TransitionAsync(current.Id, RetainedContentStates.Grace, _clock.GetUtcNow(), entryPolicy.Id, cancellationToken).ConfigureAwait(false);
+				}
+				else
+				{
+					await _states.TransitionAsync(current.Id, RetainedContentStates.Grace, _clock.GetUtcNow(), cancellationToken).ConfigureAwait(false);
 				}
 				await RaiseGraceAlertAsync(depotArtifactId, current.Id, cancellationToken).ConfigureAwait(false);
 				enteredGrace++;
@@ -128,8 +140,17 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		// and are structurally never returned here -- "pinned content is never pruned"
 		// holds by construction, not by an extra check.
 		int autoPruned = 0;
+		int outOfScopeSkipped = 0;
 		IReadOnlyList<RetainedContentState> graceRows = await _states
 			.ListByStateAsync(RetainedContentStates.Grace, cancellationToken).ConfigureAwait(false);
+
+		// Snapshotted up front, alongside graceRows, so a row this same call's own
+		// grace-pass newly fails into pending-purge (below) is reported exactly once
+		// -- by that pass, not double-processed again here in the same call. A row
+		// already at pending-purge from an EARLIER call (issue #1661) is exactly what
+		// this snapshot captures.
+		IReadOnlyList<RetainedContentState> pendingPurgeRowsFromEarlierCalls = await _states
+			.ListByStateAsync(RetainedContentStates.PendingPurge, cancellationToken).ConfigureAwait(false);
 
 		foreach (RetainedContentState row in graceRows)
 		{
@@ -139,6 +160,18 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			{
 				// Defensive: TransitionAsync always stamps grace_started_at on entry to
 				// grace, so this should be unreachable; skip rather than crash the pass.
+				continue;
+			}
+
+			// Issue #1687: a tracked, grace-expired candidate that has since been
+			// reported on the review list (download_out_of_scope_content) is an
+			// explicit skip, not silence-by-accident -- the prior guarantee held
+			// only for the untracked case (no download_retained_content_state row
+			// at all); a tracked-but-out-of-scope row would otherwise be swept like
+			// any other candidate.
+			if (await _reviewList.IsOutOfScopeAsync(row.DepotArtifactId, cancellationToken).ConfigureAwait(false))
+			{
+				outOfScopeSkipped++;
 				continue;
 			}
 
@@ -191,13 +224,44 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			}
 		}
 
+		// Pending-purge revisit pass (issue #1661): a row a prior sweep/purge-now
+		// left at pending-purge because the physical delete failed is otherwise
+		// never listed by anything (ListByStateAsync's only other caller above
+		// passes 'grace'), so without this pass the row drops out of every
+		// subsequent sweep and the failed delete is reported exactly once, forever.
+		// Re-attempting via the same PurgeRowInternalAsync path is safe to repeat:
+		// a pending-purge row's own transition prefix (tracked -> grace ->
+		// pending-purge) is already behind it, so this call only re-attempts the
+		// delete + the pending-purge -> purged transition. The residual error is
+		// re-added to Errors on every pass while the underlying problem persists,
+		// not only the first time it was seen. Walks the snapshot taken above (not
+		// a fresh list) so a row this same call's grace-pass just failed into
+		// pending-purge is not immediately re-attempted a second time within the
+		// same RunSweepAsync call.
+		foreach (RetainedContentState row in pendingPurgeRowsFromEarlierCalls)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+
+			RetentionPurgeOutcome outcome = await PurgeRowInternalAsync(row, "retention-sweep", "revisiting pending-purge row from a prior failed delete", cancellationToken)
+				.ConfigureAwait(false);
+			if (outcome.Purged)
+			{
+				autoPruned++;
+			}
+			else if (outcome.Error is not null)
+			{
+				errors.Add(outcome.Error);
+			}
+		}
+
 		return new RetentionSweepReport(
 			Skipped: false,
 			SkippedReason: null,
 			EnteredGrace: enteredGrace,
 			AutoPruned: autoPruned,
 			UntrackedCandidatesSkipped: untrackedSkipped,
-			Errors: errors);
+			Errors: errors,
+			OutOfScopeSkipped: outOfScopeSkipped);
 	}
 
 	public async Task<RetentionPurgeOutcome> PurgeImmediatelyAsync(
@@ -236,7 +300,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 	{
 		if (string.Equals(row.State, RetainedContentStates.Purged, StringComparison.Ordinal))
 		{
-			return new RetentionPurgeOutcome(row.Id, false, "already purged; no action taken.");
+			return new RetentionPurgeOutcome(row.Id, false, "already purged; no action taken.", AlreadyPurged: true);
 		}
 
 		if (string.Equals(row.State, RetainedContentStates.Pinned, StringComparison.Ordinal))
