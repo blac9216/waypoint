@@ -15,9 +15,11 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
+using Waypoint.Core.Logging;
 
 namespace Waypoint.Infrastructure.Downloads;
 
@@ -41,13 +43,16 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 
 	private readonly IOptions<ManagedToolOptions> _options;
 	private readonly IManagedToolPresenceChecker _presenceChecker;
+	private readonly ISecretRedactor _redactor;
 
-	public BinariesDownloadTool(IOptions<ManagedToolOptions> options, IManagedToolPresenceChecker presenceChecker)
+	public BinariesDownloadTool(IOptions<ManagedToolOptions> options, IManagedToolPresenceChecker presenceChecker, ISecretRedactor redactor)
 	{
 		ArgumentNullException.ThrowIfNull(options);
 		ArgumentNullException.ThrowIfNull(presenceChecker);
+		ArgumentNullException.ThrowIfNull(redactor);
 		_options = options;
 		_presenceChecker = presenceChecker;
+		_redactor = redactor;
 	}
 
 	public async Task<BinariesDownloadResult> DownloadAsync(
@@ -125,7 +130,17 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 		// the reported failure reason, so a misleading tool banner (e.g. "Depot
 		// connection failure") is never the only text an operator or the classifier
 		// ever sees.
-		string? logTail = TryReadToolLogTail(identityHome);
+		//
+		// Round-1 review finding: the identity home this tail is read from (job-scoped,
+		// seeded with this job's own machine_id/asset_id and pointed at by --depot-
+		// download-activation-code-file's Activation Code) can hold the download token
+		// in its own log lines -- redacted here through the SAME ISecretRedactor the
+		// rest of the pipeline uses (docs/security.md control 1: "the logging pipeline
+		// ... redacts every occurrence before any line reaches a sink"), mirroring
+		// DepotEnrollmentJobHandler.ValidateCodeAsync's identical "jobs.note is a sink
+		// too" redaction -- BEFORE the tail enters either the classifier input or the
+		// persisted failure reason, never after.
+		string? logTail = TryReadToolLogTail(identityHome) is { } rawTail ? _redactor.Redact(rawTail) : null;
 
 		// A completed nonzero exit is classified honestly (issue #1482 AC: "Auth vs
 		// network vs disk vs vendor-throttle failures are classified distinctly, never
@@ -173,6 +188,15 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 	}
 
 	/// <summary>
+	/// Bound on how much of <c>vdt.log</c>'s tail is ever read into memory (round-1
+	/// review finding: the file is vendor-written, unbounded, and this handler never
+	/// truncates it -- a multi-GB log the tool leaves behind must never be pulled into
+	/// process memory whole by <see cref="TryReadToolLogTail"/> just to extract a
+	/// handful of meaningful lines from its end).
+	/// </summary>
+	private const int LogTailReadBytes = 64 * 1024;
+
+	/// <summary>
 	/// Issue #1785: reads and extracts a meaningful tail from the real tool's own log
 	/// file at <c>&lt;identityHome&gt;/log/vdt.log</c> -- the same relative shape
 	/// <c>DepotIdentityToolTests</c>' fixtures assert for the shared enrollment identity
@@ -180,7 +204,9 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 	/// home follows identically since both point <c>HOME</c> at their own root. Best
 	/// effort: a missing or unreadable log file must never mask the underlying failure,
 	/// so any read failure here returns null and the caller falls back to stdout/stderr
-	/// alone, exactly as before this issue.
+	/// alone, exactly as before this issue. Only the last <see cref="LogTailReadBytes"/>
+	/// bytes are ever read (round-1 review finding), never the whole file -- the
+	/// meaningful-line extraction below only ever needs the end of the file anyway.
 	/// </summary>
 	private static string? TryReadToolLogTail(string identityHome)
 	{
@@ -192,7 +218,24 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 				return null;
 			}
 
-			return ExtractMeaningfulTail(File.ReadAllText(logPath));
+			using FileStream stream = new(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+			long start = Math.Max(0, stream.Length - LogTailReadBytes);
+			stream.Seek(start, SeekOrigin.Begin);
+
+			byte[] buffer = new byte[stream.Length - start];
+			int totalRead = 0;
+			while (totalRead < buffer.Length)
+			{
+				int read = stream.Read(buffer, totalRead, buffer.Length - totalRead);
+				if (read == 0)
+				{
+					break;
+				}
+
+				totalRead += read;
+			}
+
+			return ExtractMeaningfulTail(Encoding.UTF8.GetString(buffer, 0, totalRead));
 		}
 		catch (IOException)
 		{
