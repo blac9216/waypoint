@@ -248,6 +248,12 @@ public static class ServiceCollectionExtensions
 		// whether depot-fetch may run at all (connected mode + configured URL).
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolDepotFetcher, Downloads.HttpManagedToolDepotFetcher>();
 
+		// Issue #1509: the Photon repomd/photon_versions.json metadata boundary --
+		// same unconditional registration as the two boundaries above (no
+		// connection-string dependency of its own; PhotonRepoDiscoveryJobHandler is
+		// what decides when discovery runs).
+		services.AddSingleton<Waypoint.Core.Downloads.Photon.IPhotonRepoMetadataSource, Downloads.Photon.HttpPhotonRepoMetadataSource>();
+
 		// Issue #1470: a pure filesystem/JSON read of the already-authenticated
 		// vendor catalog document -- no connection-string dependency, so it is
 		// registered unconditionally like the HTTP boundary above rather than inside
@@ -324,6 +330,11 @@ public static class ServiceCollectionExtensions
 			// repository above.
 			services.AddSingleton<Waypoint.Core.Downloads.IRetainedContentStateRepository>(new Downloads.RetainedContentStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IRetentionPolicyRepository>(new Downloads.RetentionPolicyRepository(connectionString));
+
+			// Issue #1509 (migration 0130): the Photon lane's discovered-repo index,
+			// written only by PhotonRepoDiscoveryJobHandler (AddWaypointExecution).
+			services.AddSingleton<Waypoint.Core.Downloads.Photon.IPhotonIndexRepository>(
+				new Downloads.Photon.PhotonIndexRepository(connectionString));
 
 			// Issue #1440: the review-list mechanism (migration 0128) -- orphans
 			// (existing IUnknownCatalogFileRepository, resolved above) plus

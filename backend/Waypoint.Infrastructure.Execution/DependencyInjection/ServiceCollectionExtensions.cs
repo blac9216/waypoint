@@ -154,6 +154,12 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Waypoint.Core.Downloads.IRetentionSweepService, Waypoint.Infrastructure.Downloads.RetentionSweepService>();
 		services.AddSingleton<IJobHandler, Downloads.RetentionSweepJobHandler>();
 
+		// Issue #1509 (epic #1184): the Photon RPM-repo metadata discovery job --
+		// registers in the SAME change that adds "photon-repo-discovery" to
+		// DownloadRunnerJobTypes.Allowed below, per that allowlist's own doc comment
+		// (issue #619's convention).
+		services.AddSingleton<IJobHandler, Downloads.Photon.PhotonRepoDiscoveryJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 		// Issue #738: resolves a vCenter execution item's frozen catalog execution
