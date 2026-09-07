@@ -176,11 +176,11 @@ Describe 'Invoke-WaypointCatalogIndex presence sweep (issue #1503)' {
 		script:Assert-NoPresenceUnknownOverlap -Results $script:Results
 	}
 
-	It 'reports the on-disk catalog document and the unrelated stray file as the only genuinely unknown files (#1634 tracks reducing this noise)' {
+	It 'reports the unrelated stray file as the only genuinely unknown file (issue #1634: the on-disk catalog document is catalog-adjacent infrastructure, never unknown)' {
 		$Unknown = @($script:Results | Where-Object { $_.RecordType -eq 'UnknownFile' })
 		$Unknown.RelativePath | Should -Contain 'stray/unexpected-file.bin'
-		$Unknown.RelativePath | Should -Contain 'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'
-		$Unknown.Count | Should -Be 2
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'
+		$Unknown.Count | Should -Be 1
 	}
 
 	It 'invokes the shared WaypointLogging adapter for its own progress messages (issue #719 override preserved)' {
@@ -215,23 +215,133 @@ Describe 'Invoke-WaypointCatalogIndex on a fully and correctly staged depot (rou
 '@
 
 		$script:StagedManifest = [ordered]@{
-			'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'                       = @{ Size = 5000; Hash = 'BBBB' }
-			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'      = @{ Size = 10; Hash = 'X' }
+			'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'                        = @{ Size = 5000; Hash = 'BBBB' }
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'       = @{ Size = 10; Hash = 'X' }
+			# Issue #1640: the minimum shape Test-ZipExpandTreeComplete requires --
+			# without these two, this "fully staged" tree would now report 'missing'.
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/manifest/tree.json'        = @{ Size = 5; Hash = 'M' }
+			'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/package-pool/pkg-1.rpm'    = @{ Size = 5; Hash = 'P' }
 			'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'  = @{ Size = 1; Hash = 'CAT' }
 		}
 
 		$script:StagedResults = script:Invoke-Sweep -CatalogJson $script:StagedCatalogJson -Manifest $script:StagedManifest
 	}
 
-	It 'emits no UnknownFile record for the staged zip or any file of its expanded tree' {
+	It 'emits no UnknownFile record for the staged zip or any file of its expanded tree, and reports the zip present' {
 		$Unknown = @($script:StagedResults | Where-Object { $_.RecordType -eq 'UnknownFile' })
 		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip'
 		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/1111aaaa/9.1.0.5210/installed-file1.dat'
-		$Unknown.Count | Should -Be 1
+		# Issue #1634: the catalog document is now catalog-adjacent infrastructure,
+		# never unknown -- nothing else in this fixture is genuinely unknown.
+		$Unknown.Count | Should -Be 0
+
+		$ZipRow = $script:StagedResults | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-full-a-updaterepo.zip' }
+		$ZipRow.Status | Should -Be 'present'
 	}
 
 	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record (round-3 finding 2 invariant)' {
 		script:Assert-NoPresenceUnknownOverlap -Results $script:StagedResults
+	}
+}
+
+Describe 'Invoke-WaypointCatalogIndex zip-expand tree verification standard (issue #1640)' {
+
+	# A single stray file under the expand prefix used to be enough to report the
+	# whole expanded tree 'present'. This pins the chosen minimum-shape standard: a
+	# tree missing either its manifest/ or its package-pool/ subdirectory is reported
+	# 'missing', not 'present', even though something IS on disk under the prefix.
+	BeforeAll {
+		$script:IncompleteTreeCatalogJson = @'
+{
+  "patches": {
+    "VCENTER": [
+      {
+        "productVersion": "9.1.0.5210.25573614",
+        "artifacts": { "bundles": [ { "id": "b1", "binaries": [
+          { "fileName": "vcsa-incomplete-updaterepo.zip", "checksum": "EEEE", "size": 4000,
+            "metadata": [ { "tag": "zip-expand",
+              "configuration": { "key": "relative", "value": "vmw/3333cccc/9.1.0.5210" } } ] }
+        ] } ] }
+      }
+    ]
+  }
+}
+'@
+
+		# Only a stray truncated file lives under the expand prefix -- neither
+		# manifest/ nor package-pool/ exists. Pre-#1640, prefix-presence alone made
+		# this report 'present'.
+		$script:IncompleteTreeManifest = [ordered]@{
+			'PROD/COMP/VCENTER/vmw/3333cccc/9.1.0.5210/truncated-stray-file.dat'  = @{ Size = 1; Hash = 'T' }
+			'PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json'  = @{ Size = 1; Hash = 'CAT' }
+		}
+
+		$script:IncompleteTreeResults = script:Invoke-Sweep -CatalogJson $script:IncompleteTreeCatalogJson -Manifest $script:IncompleteTreeManifest
+	}
+
+	It 'reports a zip-expand tree missing its manifest/ and package-pool/ subdirectories as missing, not present' {
+		$Row = $script:IncompleteTreeResults | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-incomplete-updaterepo.zip' }
+		$Row | Should -Not -BeNullOrEmpty
+		$Row.Status | Should -Be 'missing'
+	}
+
+	It 'still consumes the incomplete tree''s own files, never reporting them as unknown' {
+		$Unknown = @($script:IncompleteTreeResults | Where-Object { $_.RecordType -eq 'UnknownFile' })
+		$Unknown.RelativePath | Should -Not -Contain 'PROD/COMP/VCENTER/vmw/3333cccc/9.1.0.5210/truncated-stray-file.dat'
+	}
+
+	It 'never reports any path as both an ArtifactPresence record and an UnknownFile record (round-3 finding 2 invariant)' {
+		script:Assert-NoPresenceUnknownOverlap -Results $script:IncompleteTreeResults
+	}
+}
+
+Describe 'Invoke-WaypointCatalogIndex mismatch-reason classification (issue #1635)' {
+
+	# Distinguishes "downloaded and corrupt" (a file exists on disk but disagrees
+	# with the catalog) from "never downloaded" (no file on disk at all) via the
+	# additive MismatchReason field, without widening the Status vocabulary.
+	BeforeAll {
+		$script:MismatchCatalogJson = @'
+{
+  "patches": {
+    "VCENTER": [
+      {
+        "productVersion": "9.1.0.5210.25573614",
+        "artifacts": { "bundles": [ { "id": "b1", "binaries": [
+          { "fileName": "vcsa-size-corrupt.iso", "checksum": "AAAA", "size": 100 },
+          { "fileName": "vcsa-hash-corrupt.iso", "checksum": "BBBB", "size": 200 },
+          { "fileName": "vcsa-absent.iso", "checksum": "CCCC", "size": 300 }
+        ] } ] }
+      }
+    ]
+  }
+}
+'@
+
+		$script:MismatchManifest = [ordered]@{
+			'PROD/COMP/VCENTER/vcsa-size-corrupt.iso' = @{ Size = 999; Hash = 'AAAA' }
+			'PROD/COMP/VCENTER/vcsa-hash-corrupt.iso' = @{ Size = 200; Hash = 'WRONG' }
+		}
+
+		$script:MismatchResults = script:Invoke-Sweep -CatalogJson $script:MismatchCatalogJson -Manifest $script:MismatchManifest
+	}
+
+	It 'reports size-mismatch for a corrupt file that disagrees on size' {
+		$Row = $script:MismatchResults | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-size-corrupt.iso' }
+		$Row.Status | Should -Be 'missing'
+		$Row.MismatchReason | Should -Be 'size-mismatch'
+	}
+
+	It 'reports hash-mismatch for a corrupt file that disagrees on hash only' {
+		$Row = $script:MismatchResults | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-hash-corrupt.iso' }
+		$Row.Status | Should -Be 'missing'
+		$Row.MismatchReason | Should -Be 'hash-mismatch'
+	}
+
+	It 'reports no MismatchReason for a catalog entry with no file on disk at all (never downloaded)' {
+		$Row = $script:MismatchResults | Where-Object { $_.RecordType -eq 'ArtifactPresence' -and $_.RelativePath -eq 'PROD/COMP/VCENTER/vcsa-absent.iso' }
+		$Row.Status | Should -Be 'missing'
+		$Row.MismatchReason | Should -BeNullOrEmpty
 	}
 }
 

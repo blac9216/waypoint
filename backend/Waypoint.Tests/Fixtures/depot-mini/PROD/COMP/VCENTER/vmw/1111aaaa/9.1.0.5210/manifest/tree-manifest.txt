@@ -1,0 +1,1 @@
+invented tree manifest marker (issue #1640: a real expanded updaterepo tree's own manifest/ subdirectory)

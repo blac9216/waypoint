@@ -498,6 +498,28 @@ that the catalog does not know about surfaces as an unknown file rather than a n
 artifact. A disconnected instance's catalog rows arrive via transferred metadata
 (ADR-0010) -- the same identity model on both sides of the air gap.
 
+Three presence-sweep refinements (issues #1634/#1635/#1640, `WaypointCatalogIndex.psm1`'s
+own doc comment carries the full rule for each):
+
+- **Catalog-infrastructure allowlist (#1634).** The catalog document itself, its
+  detached signature, the vendor tool's own metadata directory (CA certificates,
+  `downloadConfig.xml`), the sibling store roots ADR-0029 documents alongside the
+  depot's `PROD` tree, and any root-level marker file are never reported as unknown --
+  they were never a catalog artifact in the first place, so a fresh sweep against an
+  otherwise-empty depot does not flood the unknown-file surface with the depot's own
+  infrastructure.
+- **Missing vs. mismatched (#1635).** The `depot_artifacts.status` vocabulary stays
+  `present`/`missing` (no schema change forced by this module); an `ArtifactPresence`
+  record additively carries `MismatchReason` (`size-mismatch`/`hash-mismatch`/`$null`)
+  so a consumer that reads it can distinguish "downloaded and corrupt" from "never
+  downloaded" without widening the status vocabulary.
+- **Zip-expand tree verification (#1640).** An expanded updaterepo tree is `present`
+  only when the on-disk manifest contains at least one file under both the tree's own
+  `manifest/` and `package-pool/` subdirectories -- a documented minimum-shape check,
+  not a full per-file verification (the catalog carries no per-file manifest for an
+  expanded tree to verify against). A single stray or truncated file under the expand
+  prefix is no longer enough to clear a multi-GB tree as complete.
+
 Every lane (ESX/patch, Photon, VMware Tools, VKS, content-library sync) indexes its own
 metadata unconditionally; downloading bytes always requires an explicit ad-hoc request
 (Operator role) or a **Subscription** (Admin role). A Subscription is built from a

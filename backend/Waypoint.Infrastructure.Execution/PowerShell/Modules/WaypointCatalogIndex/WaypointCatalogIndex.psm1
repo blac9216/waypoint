@@ -65,6 +65,50 @@
 # larger surface than this M-sized issue's fixtures cover; the zip-expand-directory
 # and upgrade_info.xml cases above are the two nested-path exceptions #1026/#1027
 # actually ratified, and are handled explicitly).
+#
+# Issue #1634 -- catalog-infrastructure allowlist (chosen rule: module allowlist, not
+# a downstream filter, so the noise never reaches unknown_catalog_files (migration
+# 0100, never-auto-deleted per decision Q11) in the first place). A manifest entry is
+# treated as catalog infrastructure -- excluded from unknown-file enumeration without
+# being treated as a catalog artifact either -- when ANY of:
+#   - its relative path equals the authenticated catalog document itself
+#     (CatalogRelativePath) or that document's detached signature (same directory,
+#     basename unchanged, extension changed to .sig -- ADR-0015's
+#     "productVersionCatalog.sig" sibling-file naming);
+#   - its relative path starts with "<DepotRoot>/metadata/" (PROD/metadata/) -- the
+#     vendor tool's own catalog/trust/config directory, which the catalog document
+#     above already lives under; the depot's CA certificates and downloadConfig.xml
+#     are the same kind of tool-owned infrastructure and are covered by this same
+#     prefix rather than named individually, since their exact filenames are not
+#     part of any documented contract this module can pin;
+#   - its relative path starts with one of the sibling store roots ADR-0029 documents
+#     alongside the depot's PROD tree (see Get-CatalogInfrastructureStoreRoots below)
+#     -- separate stores this sweep does not index at all;
+#   - its relative path has no directory component (a bare filename directly at
+#     DepotPath root) -- covers the depot activation-code file and any other
+#     root-level marker the vendor tool writes outside PROD/.
+# See Test-CatalogInfrastructureFile.
+#
+# Issue #1635 -- missing vs. mismatched (corrupt). Decision: the depot_artifacts.status
+# vocabulary (migration 0100) stays 'present'/'missing' -- widening it is a schema
+# change #1512's job-handler wiring (in review, PR #1805) would have to consume, and
+# is out of this module's own scope to force. Instead, an ArtifactPresence record
+# additively carries a MismatchReason field: $null for an ordinary absent file or a
+# genuine match, and 'size-mismatch'/'hash-mismatch' when a file DOES exist on disk at
+# the entry's depot-relative path but disagrees with the catalog's recorded size/hash
+# -- "downloaded and corrupt" is thereby distinguishable from "never downloaded" by
+# any consumer that reads the field, without changing the Status vocabulary or
+# requiring a migration. See Test-CatalogEntryPresent.
+#
+# Issue #1640 -- zip-expand tree verification standard. Decision: require a minimum
+# shape, not a full manifest/hash walk (the catalog carries no per-file manifest for
+# an expanded tree to walk against) -- an expanded tree is 'present' only when the
+# on-disk manifest contains at least one file under BOTH
+# "<ExpandPrefix>manifest/" AND "<ExpandPrefix>package-pool/" (the real depot's own
+# expanded-updaterepo layout, per this issue's own text). A tree matching the expand
+# prefix but missing either subdirectory is reported 'missing', not 'present' --  a
+# single stray or truncated file left under the prefix is no longer enough to clear a
+# multi-GB tree as complete. See Test-ZipExpandTreeComplete.
 
 $Script:VcfDownloadManagerCommonPath = $env:WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH
 
@@ -90,6 +134,20 @@ $Script:DefaultCatalogRelativePath = 'PROD/metadata/productVersionCatalog/v1/pro
 # unknown at once (round-2 finding 1).
 $Script:DepotRoot = 'PROD'
 $Script:ComponentBinariesDir = 'COMP'
+
+# Issue #1634: sibling store roots ADR-0029 documents alongside the depot's PROD tree
+# (issue depot volume topology) -- separate stores this sweep does not index, so a
+# file under any of them is catalog-adjacent infrastructure, never an unknown file.
+$Script:CatalogAdjacentStoreRoots = @(
+	'ContentLibrary',
+	'Photon',
+	'Transfer',
+	'UMDS',
+	'VKS',
+	'VMTools',
+	'VCSA',
+	'umds-patch-store'
+)
 
 function Invoke-WaypointCatalogIndex {
 	<#
@@ -125,10 +183,17 @@ function Invoke-WaypointCatalogIndex {
 	      the live CatalogIndexJobHandler.TryParseArtifact reads ExternalId, not
 	      RelativePath, as the upsert identity -- kept equal to RelativePath so the
 	      current handler stays functional pending #1512's wiring rework), Sha256,
-	      SizeBytes, Status ('present'/'missing'), Product, Version. Matches #1488's
-	      DepotArtifactUpsert identity fields exactly.
+	      SizeBytes, Status ('present'/'missing'), MismatchReason (issue #1635; $null,
+	      or 'size-mismatch'/'hash-mismatch' when Status is 'missing' because a file
+	      DOES exist on disk at this path but disagrees with the catalog's recorded
+	      size/hash -- distinguishes "downloaded and corrupt" from "never downloaded"
+	      additively, without widening the Status vocabulary), Product, Version.
+	      Matches #1488's DepotArtifactUpsert identity fields exactly (plus the
+	      additive MismatchReason field, which #1512's wiring may or may not consume).
 	      'UnknownFile' -- RelativePath, SizeBytes. A file present on disk that
-	      matches no catalog entry and is not a recognized catalog-adjacent exception.
+	      matches no catalog entry and is not a recognized catalog-adjacent exception
+	      (issue #1503) or catalog-infrastructure file (issue #1634;
+	      Test-CatalogInfrastructureFile).
 	#>
 	[CmdletBinding()]
 	param(
@@ -226,6 +291,12 @@ function Invoke-WaypointCatalogIndex {
 				[void]$ConsumedRelativePaths.Add($ExpandedRelativePath)
 			}
 
+			# Issue #1640: prefix-presence alone (any file under the expand prefix)
+			# used to be enough to report the whole expanded tree 'present' -- a single
+			# stray or truncated file was enough to clear a multi-GB tree. Require the
+			# documented minimum shape instead (Test-ZipExpandTreeComplete).
+			$ExpandTreeStatus = if (Test-ZipExpandTreeComplete -Manifest $Manifest -ExpandPrefix $ExpandPrefix) { 'present' } else { 'missing' }
+
 			# Round-3 review finding 1: the expanded tree is consumed above, but the zip
 			# binary's OWN depot-relative path must be consumed too -- a correctly staged
 			# depot holds the zip alongside its expanded tree, and without this the zip
@@ -236,7 +307,7 @@ function Invoke-WaypointCatalogIndex {
 				-RelativePath $DepotRelativePath `
 				-Sha256 $CatalogEntry.Sha256 `
 				-SizeBytes $CatalogEntry.SizeBytes `
-				-Status 'present' `
+				-Status $ExpandTreeStatus `
 				-Product $CatalogEntry.Product `
 				-Version $CatalogEntry.Version
 			continue
@@ -244,12 +315,14 @@ function Invoke-WaypointCatalogIndex {
 
 		$DiskEntry = $Manifest[$DepotRelativePath]
 		$Status = Test-CatalogEntryPresent -CatalogEntry $CatalogEntry -DiskEntry $DiskEntry
+		$MismatchReason = Get-CatalogEntryMismatchReason -CatalogEntry $CatalogEntry -DiskEntry $DiskEntry -Status $Status
 
 		New-ArtifactPresenceRecord -ConsumedRelativePaths $ConsumedRelativePaths `
 			-RelativePath $DepotRelativePath `
 			-Sha256 $CatalogEntry.Sha256 `
 			-SizeBytes $CatalogEntry.SizeBytes `
 			-Status $Status `
+			-MismatchReason $MismatchReason `
 			-Product $CatalogEntry.Product `
 			-Version $CatalogEntry.Version
 
@@ -276,6 +349,14 @@ function Invoke-WaypointCatalogIndex {
 	$UnknownCount = 0
 	foreach ($RelativePath in $Manifest.Keys) {
 		if ($ConsumedRelativePaths.Contains($RelativePath)) {
+			continue
+		}
+
+		# Issue #1634: catalog-infrastructure files (the catalog document itself, its
+		# signature, the depot's metadata directory, sibling store roots, and any
+		# root-level marker file) are never emitted as unknown -- they were never a
+		# catalog artifact in the first place, so they belong in neither shape.
+		if (Test-CatalogInfrastructureFile -RelativePath $RelativePath -CatalogRelativePath $CatalogRelativePath) {
 			continue
 		}
 
@@ -470,6 +551,14 @@ function New-ArtifactPresenceRecord {
 		[ValidateSet('present', 'missing')]
 		[string]$Status,
 
+		# Issue #1635: additive field, $null unless Status is 'missing' because a file
+		# DOES exist on disk at RelativePath but disagrees with the catalog's recorded
+		# size/hash -- see Get-CatalogEntryMismatchReason.
+		[Parameter()]
+		[AllowNull()]
+		[AllowEmptyString()]
+		[string]$MismatchReason,
+
 		[Parameter()]
 		[AllowNull()]
 		$Product,
@@ -482,14 +571,15 @@ function New-ArtifactPresenceRecord {
 	[void]$ConsumedRelativePaths.Add($RelativePath)
 
 	return [pscustomobject]@{
-		RecordType   = 'ArtifactPresence'
-		RelativePath = $RelativePath
-		ExternalId   = $RelativePath
-		Sha256       = $Sha256
-		SizeBytes    = $SizeBytes
-		Status       = $Status
-		Product      = $Product
-		Version      = $Version
+		RecordType      = 'ArtifactPresence'
+		RelativePath    = $RelativePath
+		ExternalId      = $RelativePath
+		Sha256          = $Sha256
+		SizeBytes       = $SizeBytes
+		Status          = $Status
+		MismatchReason  = $MismatchReason
+		Product         = $Product
+		Version         = $Version
 	}
 }
 
@@ -525,6 +615,136 @@ function Test-CatalogEntryPresent {
 	}
 
 	return 'present'
+}
+
+<#
+.SYNOPSIS
+    Issue #1635: classifies WHY an ordinary (non-zip-expand) catalog entry reported by
+    Test-CatalogEntryPresent as 'missing' is missing -- a file that does not exist on
+    disk at all ($null MismatchReason, the ordinary "never downloaded" case) versus a
+    file that DOES exist at the entry's depot-relative path but disagrees with the
+    catalog's recorded size or hash ('size-mismatch'/'hash-mismatch', "downloaded and
+    corrupt"). Returns $null for Status 'present' too (nothing to explain). Size is
+    checked before hash, matching Test-CatalogEntryPresent's own check order, so the
+    two functions never disagree about which disqualifying fact fired first.
+#>
+function Get-CatalogEntryMismatchReason {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[psobject]$CatalogEntry,
+
+		[Parameter()]
+		[AllowNull()]
+		$DiskEntry,
+
+		[Parameter(Mandatory)]
+		[ValidateSet('present', 'missing')]
+		[string]$Status
+	)
+
+	if ($Status -ne 'missing' -or -not $DiskEntry) {
+		return $null
+	}
+
+	if ($null -ne $CatalogEntry.SizeBytes -and $null -ne $DiskEntry.Size -and $CatalogEntry.SizeBytes -ne $DiskEntry.Size) {
+		return 'size-mismatch'
+	}
+
+	if (-not [string]::IsNullOrWhiteSpace($CatalogEntry.Sha256) -and -not [string]::IsNullOrWhiteSpace($DiskEntry.Hash) -and $CatalogEntry.Sha256 -ine $DiskEntry.Hash) {
+		return 'hash-mismatch'
+	}
+
+	return $null
+}
+
+<#
+.SYNOPSIS
+    Issue #1640: the verification standard for a zip-expand catalog entry's expanded
+    tree. Prefix-presence alone (any manifest key starting with ExpandPrefix) used to
+    be enough to report the whole tree 'present' -- a single stray or truncated file
+    left under the prefix was enough to clear a multi-GB expanded updaterepo tree.
+    This requires the minimum shape the real depot's own expanded layout always
+    carries: at least one on-disk file under BOTH "<ExpandPrefix>manifest/" and
+    "<ExpandPrefix>package-pool/". Neither subdirectory's contents are hashed or
+    counted -- this is a documented minimum-shape check, not a full per-file manifest
+    verification (the catalog carries no per-file manifest for an expanded tree to
+    verify against).
+#>
+function Test-ZipExpandTreeComplete {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[System.Collections.IDictionary]$Manifest,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ExpandPrefix
+	)
+
+	$ManifestSubdirectoryPrefix = "${ExpandPrefix}manifest/"
+	$PackagePoolSubdirectoryPrefix = "${ExpandPrefix}package-pool/"
+
+	$HasManifestDirectory = $false
+	$HasPackagePoolDirectory = $false
+	foreach ($Key in $Manifest.Keys) {
+		if (-not $HasManifestDirectory -and $Key.StartsWith($ManifestSubdirectoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+			$HasManifestDirectory = $true
+		}
+		if (-not $HasPackagePoolDirectory -and $Key.StartsWith($PackagePoolSubdirectoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+			$HasPackagePoolDirectory = $true
+		}
+		if ($HasManifestDirectory -and $HasPackagePoolDirectory) {
+			break
+		}
+	}
+
+	return $HasManifestDirectory -and $HasPackagePoolDirectory
+}
+
+<#
+.SYNOPSIS
+    Issue #1634: true when RelativePath is catalog-adjacent infrastructure -- never a
+    catalog artifact, and therefore never reported as an unknown file either. See this
+    module's own header comment ("Issue #1634 -- catalog-infrastructure allowlist")
+    for the full rule and its rationale.
+#>
+function Test-CatalogInfrastructureFile {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$RelativePath,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$CatalogRelativePath
+	)
+
+	$NormalizedRelativePath = $RelativePath.Replace('\', '/')
+	$NormalizedCatalogPath = $CatalogRelativePath.Replace('\', '/')
+	$CatalogSignaturePath = [System.IO.Path]::ChangeExtension($NormalizedCatalogPath, 'sig').Replace('\', '/')
+
+	if ($NormalizedRelativePath -ieq $NormalizedCatalogPath -or $NormalizedRelativePath -ieq $CatalogSignaturePath) {
+		return $true
+	}
+
+	$MetadataPrefix = "$Script:DepotRoot/metadata/"
+	if ($NormalizedRelativePath.StartsWith($MetadataPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+		return $true
+	}
+
+	foreach ($StoreRoot in $Script:CatalogAdjacentStoreRoots) {
+		if ($NormalizedRelativePath.StartsWith("$StoreRoot/", [System.StringComparison]::OrdinalIgnoreCase)) {
+			return $true
+		}
+	}
+
+	if ($NormalizedRelativePath -notmatch '/') {
+		return $true
+	}
+
+	return $false
 }
 
 Export-ModuleMember -Function Invoke-WaypointCatalogIndex

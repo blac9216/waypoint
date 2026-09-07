@@ -43,6 +43,7 @@ and would pass either way).
 | `hostupdate/hardlink-hostupdate/` staging-tree directory | `EsxPatchStoreMetadataParser.StagingTreeDirName` (issue #1164) -- "the tool's download-time staging tree ... skipped and warned about rather than treated as an empty/unknown vendor" |
 | `PROD/metadata/upgrade_info.xml` | #1027 comment (same URL as above), finding 7: "a vendor-signed `upgrade_info.xml` ... enumerates upgrade entries"; `WaypointCatalogIndex.psm1`'s own upgrade_info.xml exception (never unknown) |
 | `stray/unexpected-file.bin` (deliberate unknown file, outside `PROD/`) | issue #1696 dispatch requirement; a real depot share can carry operator junk beside the depot root itself |
+| `vmw/1111aaaa/9.1.0.5210/manifest/` and `.../package-pool/` (zip a's expanded tree) | issue #1640: a real expanded updaterepo tree carries its own `manifest/` and `package-pool/` subdirectories; `Test-ZipExpandTreeComplete` requires both non-empty before reporting a zip-expand entry `present`, so zip a's tree needed this shape to keep reporting `present` under the new standard |
 
 ## Hash/size strategy: template rewrite, computed from the fixture's own bytes
 
