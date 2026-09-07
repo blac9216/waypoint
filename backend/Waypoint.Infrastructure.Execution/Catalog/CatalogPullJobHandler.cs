@@ -234,25 +234,38 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			// (still self-healing, same as before -- the next successful pull re-parses,
 			// re-indexes, and re-promotes from scratch) while the facts this handler
 			// records about what it fetched are never ahead of what it wrote to disk.
+			// Issue #1784/#1818 reconciliation: prior to #1784, this parser identified
+			// a binary by its bare fileName (the trailing segment of each entry's NEW
+			// depot-relative identity below); a pre-#1784 pull may have left a row
+			// under that legacy identity. Derive every artifact's candidate
+			// legacy-identity -> new-identity pair up front (a Dictionary naturally
+			// dedupes -- two artifacts never share a bare fileName under this
+			// catalog's own uniqueness) and reconcile the WHOLE batch in one bounded
+			// call, not one per artifact (#1818: the per-artifact shape this replaced
+			// issued one round trip per artifact on EVERY pull -- 1291 on the owner's
+			// live stack -- because the guard fires on identity SHAPE, not on whether
+			// a legacy row exists; RekeyManyAsync's own first step is the query that
+			// actually checks existence, so a steady-state pull with zero legacy rows
+			// costs one query, not N). RekeyManyAsync also folds issue #1804's
+			// collision case (the presence sweep already created the new-identity row
+			// before this pull ever ran) rather than leaving it stale -- see its own
+			// doc comment. Called BEFORE the upsert loop below so a rename has a row
+			// to act on before UpsertAsync creates one at the TO identity itself.
+			Dictionary<string, string> legacyRenames = new(StringComparer.Ordinal);
+			foreach (DepotArtifactUpsert candidate in parsed)
+			{
+				string legacyIdentity = candidate.RelativePath[(candidate.RelativePath.LastIndexOf('/') + 1)..];
+				if (!string.Equals(legacyIdentity, candidate.RelativePath, StringComparison.Ordinal))
+				{
+					legacyRenames[legacyIdentity] = candidate.RelativePath;
+				}
+			}
+
+			await _artifacts.RekeyManyAsync(legacyRenames, cancellationToken).ConfigureAwait(false);
+
 			int upserted = 0;
 			foreach (DepotArtifactUpsert upsert in parsed)
 			{
-				// Issue #1784 reconciliation: prior to #1784, this parser identified a
-				// binary by its bare fileName (the trailing segment of the NEW
-				// depot-relative identity below); a pre-#1784 pull may have left a row
-				// under that legacy identity. RekeyAsync (never a delete -- design #16
-				// section 2's never-auto-remove policy) renames that legacy row onto the
-				// new identity in place BEFORE the upsert below, so the upsert always has
-				// a row to freshen either way -- self-healing the duplicate on the very
-				// next connected pull without a migration or a one-time backfill, for
-				// every artifact the presence sweep has not already indexed under the new
-				// identity first (the documented remainder: see RekeyAsync's doc comment).
-				string legacyIdentity = upsert.RelativePath[(upsert.RelativePath.LastIndexOf('/') + 1)..];
-				if (!string.Equals(legacyIdentity, upsert.RelativePath, StringComparison.Ordinal))
-				{
-					await _artifacts.RekeyAsync(legacyIdentity, upsert.RelativePath, cancellationToken).ConfigureAwait(false);
-				}
-
 				await _artifacts.UpsertAsync(upsert, cancellationToken).ConfigureAwait(false);
 
 				upserted++;

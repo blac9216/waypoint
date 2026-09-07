@@ -47,7 +47,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <see cref="CatalogPullJobHandler"/> (not a hand-rolled re-implementation of its
 /// parse/reconcile/upsert sequence -- PR #1805 round-1 review finding 2: a prior
 /// version of this test copied the handler's legacy-identity derivation inline, which
-/// meant nothing here actually exercised <see cref="IDepotArtifactRepository.RekeyAsync"/>'s
+/// meant nothing here actually exercised <see cref="IDepotArtifactRepository.RekeyManyAsync"/>'s
 /// real call site) with a <see cref="FakeMetadataPuller"/> standing in for the vendor
 /// tool process (writes the fixture's own catalog document to the staged depot path)
 /// and a <see cref="FakeCatalogVerifier"/> standing in for signature authentication
@@ -63,7 +63,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// before the pull step, proving the handler's own reconciliation rename (never a
 /// delete, design #16 section 2's never-auto-remove policy) folds it onto the new
 /// identity on the very next pull -- no migration, no one-time backfill. Because the
-/// pull now runs through the handler's own code path, a fake whose <c>RekeyAsync</c>
+/// pull now runs through the handler's own code path, a fake whose <c>RekeyManyAsync</c>
 /// throws makes this test fail (verified by splice at fix time, restored -- see the
 /// round-1 Fixes Applied comment); before this rewrite, the same splice left the test
 /// green, which was exactly the defect.
@@ -134,8 +134,8 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, ID
 		await _artifacts.UpsertAsync(new DepotArtifactUpsert(legacyIdentity, "aa11", DepotArtifactStatuses.Indexed, "{}"), CancellationToken.None);
 
 		// "Pull": the REAL CatalogPullJobHandler, over the depot-mini fixture's own
-		// catalog document -- exercises the handler's own RekeyAsync call site, not a
-		// copy of it.
+		// catalog document -- exercises the handler's own RekeyManyAsync call site,
+		// not a copy of it.
 		JobExecutionOutcome pullOutcome = await RunPullAsync(fixture.CatalogJson);
 		Assert.Equal(JobOutcomeKind.Succeeded, pullOutcome.Kind);
 
@@ -177,15 +177,63 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, ID
 		Assert.Equal(DepotArtifactStatuses.Missing, nsxMissing.Status);
 	}
 
-	/// <summary>Drives the real handler for the "pull" half of the scenario, standing in only for the vendor tool process and signature authentication (neither affects catalog identity).</summary>
-	private async Task<JobExecutionOutcome> RunPullAsync(string catalogJson)
+	/// <summary>
+	/// Issue #1818: over depot-mini's 20-artifact catalog, with ZERO legacy-identity
+	/// rows present (a steady-state stack -- every prior pull already reconciled
+	/// them), the pre-#1818 per-artifact shape called <c>RekeyAsync</c> 20 times
+	/// (the guard fires on identity SHAPE, not on whether a legacy row exists -- see
+	/// <see cref="IDepotArtifactRepository.RekeyManyAsync"/>'s own doc comment).
+	/// <see cref="CountingArtifactRepository"/> wraps the real repository and counts
+	/// calls to <see cref="IDepotArtifactRepository.RekeyManyAsync"/> only (never
+	/// per-artifact) -- asserts exactly 1, not 20.
+	/// </summary>
+	[Fact]
+	public async Task Pull_OverDepotMini_WithZeroLegacyRows_CallsRekeyManyAsyncOnceNotOncePerArtifact()
+	{
+		using DepotMiniFixture fixture = new();
+		CountingArtifactRepository counting = new(_artifacts);
+
+		JobExecutionOutcome pullOutcome = await RunPullAsync(fixture.CatalogJson, counting);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, pullOutcome.Kind);
+		Assert.Equal(1, counting.RekeyManyAsyncCallCount); // one bounded call, not one per artifact (20).
+
+		(IReadOnlyList<DepotArtifact> afterPull, long afterPullTotal) = await _artifacts.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, CancellationToken.None);
+		Assert.Equal(20, afterPullTotal);
+		_ = afterPull;
+	}
+
+	/// <summary>Wraps a real <see cref="IDepotArtifactRepository"/>, counting only <see cref="RekeyManyAsync"/> calls -- proves the pull path's batching, not its per-artifact upsert count.</summary>
+	private sealed class CountingArtifactRepository(IDepotArtifactRepository inner) : IDepotArtifactRepository
+	{
+		public int RekeyManyAsyncCallCount { get; private set; }
+
+		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) =>
+			inner.UpsertAsync(artifact, cancellationToken);
+
+		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken)
+		{
+			RekeyManyAsyncCallCount++;
+			return inner.RekeyManyAsync(renames, cancellationToken);
+		}
+
+		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
+			inner.GetByIdAsync(id, cancellationToken);
+
+		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
+			inner.ListAsync(filter, page, cancellationToken);
+	}
+
+	/// <summary>Drives the real handler for the "pull" half of the scenario, standing in only for the vendor tool process and signature authentication (neither affects catalog identity). <paramref name="artifacts"/> defaults to the real repository -- overridable so a test can wrap it (e.g. <see cref="CountingArtifactRepository"/>).</summary>
+	private async Task<JobExecutionOutcome> RunPullAsync(string catalogJson, IDepotArtifactRepository? artifacts = null)
 	{
 		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath };
 		CatalogOptions catalogOptions = new() { DepotPath = _depotPath };
 		CatalogPullStateRepository pullState = new(_fixture.ConnectionString);
 		CatalogPullJobHandler handler = new(
 			new ValidatedEnrollmentRepository(), new NoOpIdentityTool(), new FakeMetadataPuller(catalogJson), new FakeCatalogVerifier(),
-			_artifacts, pullState, _secretStore, _credentials, _redactor, Options.Create(catalogOptions), Options.Create(toolOptions));
+			artifacts ?? _artifacts, pullState, _secretStore, _credentials, _redactor, Options.Create(catalogOptions), Options.Create(toolOptions));
 
 		Guid runId = await _jobs.CreateRunAsync("catalog-pull", "{}", credentialId: null, "test-actor", CancellationToken.None);
 		JobSpec spec = new("catalog-pull", 1, TargetId: null, TargetName: "depot", Payload: "{}");

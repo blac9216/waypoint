@@ -168,7 +168,7 @@ public sealed class ResumeProtocolTests
 			DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			Task.FromResult<(IReadOnlyList<DepotArtifact>, long)>(([Row], 1));
 
-		public Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) => throw new NotSupportedException();
 	}
 
 	/// <summary>

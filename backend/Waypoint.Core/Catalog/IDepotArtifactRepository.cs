@@ -52,25 +52,37 @@ public interface IDepotArtifactRepository
 		DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Issue #1784 reconciliation: RENAMES (never deletes -- design #16 section 2,
-	/// "orphans and out-of-scope content are never auto-removed", the same policy
-	/// <see cref="Waypoint.Core.Downloads.IReviewListService"/>'s own doc comment
-	/// states and <c>ReviewListServiceTests.Interface_HasNoDeleteOrRemoveOrPurgeMethod</c>
+	/// Issue #1784/#1818/#1804 reconciliation, batched: <paramref name="renames"/> is
+	/// every candidate legacy-identity -&gt; new-identity pair a connected pull derives
+	/// for the artifacts it just parsed (its keys are the pre-#1784 bare-fileName
+	/// identity, its values the new depot-relative identity -- see
+	/// <c>CatalogPullJobHandler</c>, the one caller). Issues a BOUNDED number of
+	/// statements regardless of how many pairs are passed (#1818: the per-artifact
+	/// shape this replaced issued one round trip per artifact on every pull, 1291 on
+	/// the owner's live stack, even though the guard that triggered it fires on every
+	/// artifact's identity SHAPE, not on whether a legacy row actually exists) --
+	/// first one query for which of the candidate FROM identities actually have a
+	/// non-superseded row (almost always none, once a stack's first post-#1784 pull
+	/// has run), returning immediately with 0 if none do, then a bounded number of
+	/// set-based statements that act only on the FROM identities that query found.
+	/// For each such row: RENAMES it onto its TO identity in place if the TO identity
+	/// has no row yet (never deletes -- design #16 section 2's never-auto-remove
+	/// policy, the same policy <see cref="Waypoint.Core.Downloads.IReviewListService"/>'s
+	/// own doc comment states and
+	/// <c>ReviewListServiceTests.Interface_HasNoDeleteOrRemoveOrPurgeMethod</c>
 	/// enforces structurally against every interface in this repository's dependency
-	/// graph, this one included) the row at <paramref name="fromRelativePath"/> to
-	/// <paramref name="toRelativePath"/> in place, if a row exists at the FROM identity
-	/// and none already exists at the TO identity -- returns whether the rename
-	/// happened. The one caller today is <c>CatalogPullJobHandler</c>, folding a
-	/// pre-#1784 row still keyed under the connected pull's legacy bare-fileName
-	/// identity onto the SAME artifact's new depot-relative identity, called BEFORE
-	/// <see cref="UpsertAsync"/> so the rename has a row to act on before that upsert
-	/// creates one at the TO identity itself. A harmless no-op once the legacy row is
-	/// gone, or (documented remainder, issue #1784) if the presence sweep already
-	/// created the TO-identity row before this pull ever ran -- that narrower case
-	/// leaves the stale legacy row in place for an explicit admin cleanup rather than
-	/// auto-removing it, matching the never-auto-remove policy above.
+	/// graph, this one included); or, if the TO identity already has a row (issue
+	/// #1804's collision case -- the presence sweep created it before this pull ever
+	/// ran), folds the legacy row's still-valid facts into the surviving TO row
+	/// (COALESCE-only, never clobbering a fact the TO row already has -- the same
+	/// convention <see cref="UpsertAsync"/> uses) and marks the legacy row
+	/// <c>superseded_at</c> (migration 0134) rather than deleting it, matching the
+	/// same never-auto-remove policy. Returns the total number of legacy rows
+	/// reconciled (renamed or merged-and-superseded), across all pairs. Called BEFORE
+	/// <see cref="UpsertAsync"/> so a rename has a row to act on before that upsert
+	/// creates one at the TO identity itself.
 	/// </summary>
-	Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken);
+	Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken);
 }
 
 /// <summary>

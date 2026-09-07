@@ -302,7 +302,7 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) => _inner.UpsertAsync(artifact, cancellationToken);
 
-		public Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken) => _inner.RekeyAsync(fromRelativePath, toRelativePath, cancellationToken);
+		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) => _inner.RekeyManyAsync(renames, cancellationToken);
 
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => _inner.GetByIdAsync(id, cancellationToken);
 
