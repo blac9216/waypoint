@@ -94,11 +94,25 @@ public interface IRetentionSweepService
 /// <see cref="RetentionPolicyScopes.Default"/> when null/blank or unresolvable);
 /// already-tracked rows already carry their own resolved <c>policy_id</c> and ignore
 /// this field entirely during the auto-prune pass.
+///
+/// <see cref="ManualDownloadDepotArtifactIds"/> (issue #1798, epic #1182): the
+/// caller-supplied set of tracked depot-artifact ids the auto-prune pass evaluates
+/// against the row's resolved policy's <see cref="ManualDownloadRetentionDialResolver"/>
+/// dial, rather than the normal grace-window elapsed check alone -- the same
+/// caller-supplies-candidates seam this type's doc comment already documents for
+/// <see cref="SupersededOrOutOfWindowDepotArtifactIds"/>: there is no real
+/// manual/ad-hoc download candidate query yet (issue #1798's own Discovery), so this
+/// service takes the set as an explicit input. Defaults to empty, so every existing
+/// caller that has no manual-download candidates to name is unaffected. A row named
+/// here is evaluated at the auto-prune pass -- the point where the sweep is about to
+/// decide whether to prune it -- not retroactively at grace-entry time; see this
+/// issue's PR body for that assumption.
 /// </summary>
 public sealed record RetentionSweepRequest(
 	IReadOnlyList<Guid> SupersededOrOutOfWindowDepotArtifactIds,
 	bool ListingVerified,
-	string? ScopeKey = null);
+	string? ScopeKey = null,
+	IReadOnlyList<Guid>? ManualDownloadDepotArtifactIds = null);
 
 /// <summary>
 /// The outcome of one <see cref="IRetentionSweepService.RunSweepAsync"/> pass.
@@ -112,7 +126,12 @@ public sealed record RetentionSweepReport(
 	int AutoPruned,
 	int UntrackedCandidatesSkipped,
 	IReadOnlyList<string> Errors,
-	int OutOfScopeSkipped = 0);
+	int OutOfScopeSkipped = 0,
+	// Issue #1798: a manual/ad-hoc download whose scope policy's
+	// ManualDownloadRetentionDialResolver.SkipsAutoPrune dial (Keep or Review)
+	// exempted it from this pass's auto-prune, counted separately from
+	// OutOfScopeSkipped since it is a different skip reason.
+	int ManualDownloadDialSkipped = 0);
 
 /// <summary>
 /// One <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> outcome.

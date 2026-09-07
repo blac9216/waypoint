@@ -141,6 +141,13 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		// holds by construction, not by an extra check.
 		int autoPruned = 0;
 		int outOfScopeSkipped = 0;
+		int manualDownloadDialSkipped = 0;
+
+		// Issue #1798: caller-supplied manual/ad-hoc download candidates (see this
+		// request field's doc comment) -- a HashSet so the auto-prune pass below can
+		// test membership without re-scanning the list per row.
+		HashSet<Guid> manualDownloadCandidates = [.. request.ManualDownloadDepotArtifactIds ?? []];
+
 		IReadOnlyList<RetainedContentState> graceRows = await _states
 			.ListByStateAsync(RetainedContentStates.Grace, cancellationToken).ConfigureAwait(false);
 
@@ -196,6 +203,34 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 				if (policy is null)
 				{
 					errors.Add($"no retention policy resolvable for retained-content-state '{row.Id}'; grace window cannot be evaluated.");
+					continue;
+				}
+			}
+
+			// Issue #1798: a candidate the caller has named as a manual/ad-hoc
+			// download is governed by the resolved policy's ManualDownloadDial,
+			// evaluated HERE -- the auto-prune decision point -- against the same
+			// `policy` this pass already resolved above, rather than re-resolved at
+			// grace-entry time (see RetentionSweepRequest.ManualDownloadDepotArtifactIds'
+			// doc comment for that assumption). Review additionally surfaces the row
+			// on the review list via the same IReviewListService.ReportOutOfScopeAsync
+			// #1687 already wired for the out-of-scope skip above -- both are
+			// "never auto-removed, surfaced for explicit Admin disposition" per
+			// ADR-0034/approved design #16 section 2.
+			if (manualDownloadCandidates.Contains(row.DepotArtifactId))
+			{
+				ManualDownloadDial dial = ManualDownloadRetentionDialResolver.Resolve(policy);
+				if (ManualDownloadRetentionDialResolver.RequiresReview(dial))
+				{
+					await _reviewList.ReportOutOfScopeAsync(
+						row.DepotArtifactId,
+						"manual download retention dial set to 'review'",
+						cancellationToken).ConfigureAwait(false);
+				}
+
+				if (ManualDownloadRetentionDialResolver.SkipsAutoPrune(dial))
+				{
+					manualDownloadDialSkipped++;
 					continue;
 				}
 			}
@@ -261,7 +296,8 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			AutoPruned: autoPruned,
 			UntrackedCandidatesSkipped: untrackedSkipped,
 			Errors: errors,
-			OutOfScopeSkipped: outOfScopeSkipped);
+			OutOfScopeSkipped: outOfScopeSkipped,
+			ManualDownloadDialSkipped: manualDownloadDialSkipped);
 	}
 
 	public async Task<RetentionPurgeOutcome> PurgeImmediatelyAsync(

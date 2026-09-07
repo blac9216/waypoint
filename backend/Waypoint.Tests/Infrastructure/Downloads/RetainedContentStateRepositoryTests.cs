@@ -241,6 +241,35 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1820: migration 0107's grace_started_at column comment promises "a
+	/// tracked/pinned row never carries a stale timestamp from a prior grace
+	/// period" -- but <c>PinAsync</c> is a second, independent writer of <c>state</c>
+	/// that bypasses <c>TransitionAsync</c>/<c>TransitionCoreAsync</c> (the only place
+	/// that promise was previously honored) and <c>CanPin</c> explicitly permits
+	/// <c>grace -&gt; pinned</c>. Proves the fix directly against real Postgres:
+	/// grace -&gt; pin leaves grace_started_at NULL.
+	/// </summary>
+	[Fact]
+	public async Task PinAsync_FromGrace_ClearsGraceStartedAt()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-pin-from-grace");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.TransitionAsync(id, RetainedContentStates.Grace, CancellationToken.None);
+
+		RetainedContentState? inGrace = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.NotNull(inGrace!.GraceStartedAt);
+
+		await _repository.PinAsync(id, "operator-1", "pinning out of grace", CancellationToken.None);
+
+		RetainedContentState? pinned = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.NotNull(pinned);
+		Assert.Equal(RetainedContentStates.Pinned, pinned!.State);
+		Assert.Null(pinned.GraceStartedAt);
+	}
+
+	/// <summary>
 	/// PR #1621 finding 4: <c>LoadForUpdateAsync</c> must take a real row lock so the
 	/// read-check-write in <see cref="RetainedContentStateRepository.TransitionAsync"/>
 	/// is atomic against a second concurrent caller doing the same thing (the future

@@ -34,7 +34,10 @@ namespace Waypoint.Infrastructure.Downloads;
 /// entry in <c>candidate_depot_artifact_ids</c> is parsed and validated before the
 /// sweep runs at all -- a payload with even one malformed guid is rejected up front,
 /// with zero deletions or state transitions, rather than running the (destructive)
-/// sweep first and reporting the parse failure afterwards.
+/// sweep first and reporting the parse failure afterwards. An optional
+/// <c>manual_download_depot_artifact_ids</c> array (issue #1798) names candidates the
+/// caller has identified as manual/ad-hoc downloads -- same parse-before-run
+/// contract, forwarded to <see cref="RetentionSweepRequest.ManualDownloadDepotArtifactIds"/>.
 ///
 /// <b>Immediate purge</b> (skips the grace window for named rows, delegated to
 /// <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> -- the trigger #1453's
@@ -168,6 +171,22 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 			}
 		}
 
+		// Issue #1798: the manual/ad-hoc download candidates this sweep should
+		// evaluate against the resolved scope policy's ManualDownloadDial -- same
+		// parse-before-run contract as candidate_depot_artifact_ids above.
+		List<Guid> manualDownloadCandidates = [];
+		foreach (string rawId in payload.ManualDownloadDepotArtifactIds ?? [])
+		{
+			if (Guid.TryParse(rawId, out Guid parsed))
+			{
+				manualDownloadCandidates.Add(parsed);
+			}
+			else
+			{
+				parseErrors.Add($"'{rawId}' is not a valid manual-download depot artifact id.");
+			}
+		}
+
 		// Every candidate guid must parse before the sweep runs at all -- the sweep
 		// deletes real depot bytes, so a malformed payload (one bad guid among
 		// otherwise-valid ones) must fail fast with zero side effects rather than
@@ -181,7 +200,7 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 		}
 
 		RetentionSweepReport report = await _sweep.RunSweepAsync(
-			new RetentionSweepRequest(candidates, payload.ListingVerified.Value, payload.ScopeKey), cancellationToken).ConfigureAwait(false);
+			new RetentionSweepRequest(candidates, payload.ListingVerified.Value, payload.ScopeKey, manualDownloadCandidates), cancellationToken).ConfigureAwait(false);
 
 		if (report.Skipped)
 		{
@@ -193,6 +212,7 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 			$"retention sweep entered {report.EnteredGrace} into grace, auto-pruned {report.AutoPruned}" +
 			(report.UntrackedCandidatesSkipped > 0 ? $", skipped {report.UntrackedCandidatesSkipped} untracked candidate(s)" : string.Empty) +
 			(report.OutOfScopeSkipped > 0 ? $", skipped {report.OutOfScopeSkipped} out-of-scope candidate(s)" : string.Empty) +
+			(report.ManualDownloadDialSkipped > 0 ? $", skipped {report.ManualDownloadDialSkipped} manual-download-dialed candidate(s)" : string.Empty) +
 			".";
 
 		if (report.Errors.Count > 0)
@@ -212,5 +232,9 @@ public sealed partial class RetentionSweepJobHandler : IJobHandler
 		string? ScopeKey,
 		List<string>? PurgeNowIds,
 		string? Actor,
-		string? Reason);
+		string? Reason,
+		// Issue #1798: manual/ad-hoc download candidates evaluated against the
+		// resolved scope policy's ManualDownloadDial -- see this type's own doc
+		// comment for the scheduled-sweep payload shape.
+		List<string>? ManualDownloadDepotArtifactIds = null);
 }

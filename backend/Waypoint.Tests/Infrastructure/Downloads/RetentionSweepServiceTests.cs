@@ -703,6 +703,85 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 	// FakeReviewListService above still backs every other test in this file via
 	// CreateService's default.
 
+	// -- Issue #1798: ManualDownloadDial actually governs the auto-prune pass for a
+	// caller-named manual/ad-hoc download candidate.
+
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadKeepDial_IsNotAutoPruned()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Keep, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-keep-dial");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-keep-dial");
+
+		// A clock far past any plausible grace window -- if the Keep dial did not
+		// exempt this manual candidate, elapsed-time-alone logic would prune it.
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned);
+		Assert.Equal(1, report.ManualDownloadDialSkipped);
+		Assert.Empty(report.Errors);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not pruned
+		Assert.True(File.Exists(Path.Combine(_depotRoot, "manual-download-keep-dial")));
+	}
+
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadReviewDial_IsNotAutoPrunedAndSurfacedOnReviewList()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-review-dial");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-review-dial");
+
+		FakeReviewListService reviewList = new();
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), reviewList: reviewList);
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned);
+		Assert.Equal(1, report.ManualDownloadDialSkipped);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not pruned
+
+		Assert.True(await reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None)); // surfaced for explicit Admin disposition
+	}
+
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadAutoPruneDial_IsPrunedNormally()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-auto-prune-dial");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-auto-prune-dial");
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(1, report.AutoPruned);
+		Assert.Equal(0, report.ManualDownloadDialSkipped);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, state!.State);
+	}
+
 	private void WriteDepotFile(string relativePath) =>
 		File.WriteAllText(Path.Combine(_depotRoot, relativePath), "fixture bytes");
 }

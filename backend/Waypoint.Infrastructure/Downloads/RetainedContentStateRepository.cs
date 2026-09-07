@@ -198,13 +198,22 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 				$"Cannot pin retained content in state '{current.State}' for id {id}.");
 		}
 
+		// Issue #1820: PinAsync is a second, independent writer of `state` -- it does
+		// not route through TransitionAsync/TransitionCoreAsync, so it must clear
+		// grace_started_at itself on a grace -> pinned pin, or a pinned row would
+		// carry the previous grace period's stale timestamp, contradicting migration
+		// 0107's own column comment ("a tracked/pinned row never carries a stale
+		// timestamp from a prior grace period").
+		bool leavingGrace = string.Equals(current.State, RetainedContentStates.Grace, StringComparison.Ordinal);
+
 		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE download_retained_content_state SET
 				state = $1,
 				pinned_by = $2,
 				pinned_at = now(),
-				pin_note = $3
+				pin_note = $3,
+				grace_started_at = CASE WHEN $5 THEN NULL ELSE grace_started_at END
 			WHERE id = $4
 			""", connection, transaction))
 		{
@@ -212,6 +221,7 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 			command.Parameters.AddWithValue(pinnedBy);
 			command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
 			command.Parameters.AddWithValue(id);
+			command.Parameters.AddWithValue(leavingGrace);
 			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
