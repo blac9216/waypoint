@@ -69,6 +69,11 @@ lane below has no implementing code on `main` yet and is marked
 | RP-05 401/403 non-retryable | Documented contract: a 401/403 fails without retry. Covered as pinning the CURRENT (defective) behavior — a real pwsh7 `HttpResponseException` is not recognized by `Save-WebFile`'s `WebException`-typed guard, so the request is actually retried with backoff; see deferred bug #1799. | covered | #1411 |
 | RP-06 Content-Range mismatch | A 206 response whose `Content-Range` start disagrees with the requested offset throws rather than silently appending at the wrong offset. | covered | #1411 |
 
+`ExpectedSize` note: the RP-01…RP-04/RP-06 tests pass `ExpectedSize` explicitly,
+bypassing `Save-WebFile`'s own `Invoke-WebRequest -Method Head` size lookup that the
+production caller (`DownloadJobHandler`) relies on — see deferred issue #1800. The
+resume decision logic is covered; its production size-discovery entry path is not.
+
 ## TC-01…TC-30: primary test cases
 
 | Case | Waypoint contract | Owning epic | Status | Issue |
