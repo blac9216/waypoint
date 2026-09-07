@@ -390,8 +390,8 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 	/// compares its native <c>uuid</c> by raw byte value, which matches ordinal
 	/// comparison of each id's canonical (RFC 4122) hex text -- the same text both
 	/// Postgres and <see cref="Guid.ToString()"/> render -- so that ordinal
-	/// comparison, not <see cref="Guid.CompareTo"/> (a different, .NET-internal
-	/// field order), is the correct oracle for the SQL side.
+	/// comparison is a correct oracle for the SQL side -- as, on .NET 8, is
+	/// <see cref="Guid.CompareTo"/>, which yields that identical order.
 	/// </summary>
 	[Fact]
 	public async Task ListByStateAsync_RowsShareOneCreatedAt_OrdersByCreatedAtThenId()
