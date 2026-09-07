@@ -40,9 +40,10 @@ namespace Waypoint.Tests.Core.Catalog;
 /// legitimately declare or reuse the vocabulary for something other than
 /// <c>depot_artifacts.status</c> (each with its own reason at the exclusion site) --
 /// PR #1805 round-1 review finding note 7: unlike the prior hardcoded
-/// call-site allowlist, a NEW file added to any of these four directories is
-/// automatically picked up by the glob and scanned, so it cannot silently escape this
-/// test the way a file omitted from a fixed list could. The drift guard
+/// call-site allowlist, a NEW file added at the top level of any of these four
+/// directories (the glob is <c>TopDirectoryOnly</c>) is automatically picked up and
+/// scanned, so it cannot silently escape this test the way a file omitted from a
+/// fixed list could. The drift guard
 /// <see cref="Waypoint.Tests.Infrastructure.Postgres.DepotArtifactStatusesConstraintDriftTests"/>
 /// remains the backstop for the vocabulary itself, not for every call site's literal-
 /// vs-constant hygiene.
