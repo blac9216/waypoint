@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -34,10 +34,8 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// guard for both vocabularies, but the two tests below resolve the authoritative
 /// value set two different ways (PR #1832 review round 1, F6):
 /// <see cref="RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet"/>
-/// parses it straight out of the embedded migration SQL (the
-/// <c>SchemaMigrationTests.Migration0050_/Migration0051_CheckConstraintValueList(s)_
-/// MatchTheCSharpClosedVocabulary</c>/<c>OciBundleStatusesConstraintDriftTests</c>
-/// convention), while
+/// parses it straight out of the embedded migration SQL, table-scoped via the shared
+/// <see cref="ConstraintDriftScan"/> helper (issue #1814), while
 /// <see cref="CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet"/>
 /// reads it live out of <c>pg_get_constraintdef</c> after actually applying every
 /// migration (issue #1660) -- see that test's own doc comment for why. Both compare
@@ -71,9 +69,10 @@ public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
 	[Fact]
 	public void RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet()
 	{
-		string migration0103 = ReadMigrationSql("0103_repo_credential_purpose.sql");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"repo_credential_bindings", "repo_credential_bindings_store_check", "store");
 
-		Assert.Equal(RepoStores.All, ParseCheckInList(migration0103, "repo_credential_bindings_store_check"));
+		Assert.Equal(RepoStores.All, constraintValues);
 	}
 
 	/// <summary>
@@ -122,37 +121,4 @@ public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
 		Assert.Equal(CredentialTypes.All, schemaTypes);
 	}
 
-	/// <summary>The raw text of one embedded migration resource, matched by its filename suffix.</summary>
-	private static string ReadMigrationSql(string fileName)
-	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string resourceName = Assert.Single(
-			assembly.GetManifestResourceNames().Where(name => name.EndsWith(fileName, StringComparison.Ordinal)));
-		using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-		using StreamReader reader = new(stream);
-		return reader.ReadToEnd();
-	}
-
-	/// <summary>
-	/// Extracts the single-quoted value list of a named <c>CONSTRAINT ... CHECK (col IN
-	/// ('a', 'b', ...))</c> from migration SQL, in file order (matching the C# constants'
-	/// own declaration order -- unlike <c>SchemaMigrationTests.ParseCheckInList</c>, this
-	/// does NOT sort, since <see cref="RepoStores.All"/> is asserted in declaration order).
-	/// This helper is safe for <c>repo_credential_bindings_store_check</c> because that
-	/// constraint has exactly one declaration (0103) -- no "latest across migrations"
-	/// resolution is needed, so the ordering hazard #1660 fixed for the widened
-	/// <c>credentials_credential_type_check</c> guard above does not apply here.
-	/// </summary>
-	private static List<string> ParseCheckInList(string sql, string constraintName)
-	{
-		Match constraint = Regex.Match(
-			sql,
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\([^)]*\bIN\s*\(([^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Assert.True(constraint.Success, $"Could not locate an IN-list CHECK named '{constraintName}'.");
-
-		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
-		Assert.NotEmpty(values);
-		return [.. values.Select(m => m.Groups[1].Value)];
-	}
 }
