@@ -57,16 +57,23 @@ public sealed class HttpPhotonImageListingSource : IPhotonImageListingSource
 		_httpClientFactory = httpClientFactory;
 	}
 
-	public async Task<IReadOnlyList<PhotonImageListingEntry>?> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken)
+	public async Task<PhotonImageListingResult> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(channelBaseUrl);
 
 		string listingUrl = channelBaseUrl.TrimEnd('/') + "/";
-		byte[]? bytes = await GetBoundedAsync(listingUrl, MaxListingBytes, cancellationToken).ConfigureAwait(false);
-		if (bytes is null)
+		ListingFetch fetch = await FetchListingAsync(listingUrl, MaxListingBytes, cancellationToken).ConfigureAwait(false);
+		if (fetch.NotFound)
 		{
-			return null;
+			return PhotonImageListingResult.Absent;
 		}
+
+		if (fetch.Bytes is null)
+		{
+			return PhotonImageListingResult.Indeterminate(fetch.Error!);
+		}
+
+		byte[] bytes = fetch.Bytes;
 
 		// System.Text.Encoding.UTF8 (unlike Encoding.GetEncoding with a throwing decoder
 		// fallback) never throws on invalid bytes -- it substitutes U+FFFD -- so this
@@ -98,11 +105,16 @@ public sealed class HttpPhotonImageListingSource : IPhotonImageListingSource
 		foreach (string fileName in fileNames)
 		{
 			string fileUrl = $"{channelBaseUrl.TrimEnd('/')}/{fileName}";
+			// A failed HEAD leaves SizeBytes/ETag null: the LISTING is the evidence the
+			// file exists, so the entry is still indexed -- with its optional metadata
+			// absent rather than guessed. That is not the finding-2 collapse: nothing
+			// here is reported as an absence, and the two nullable columns are
+			// documented as optional in migration 0135.
 			(long? sizeBytes, string? etag) = await HeadAsync(fileUrl, cancellationToken).ConfigureAwait(false);
 			entries.Add(new PhotonImageListingEntry(fileName, sizeBytes, etag));
 		}
 
-		return entries;
+		return PhotonImageListingResult.Found(entries);
 	}
 
 	/// <summary>
@@ -164,7 +176,16 @@ public sealed class HttpPhotonImageListingSource : IPhotonImageListingSource
 		}
 	}
 
-	private async Task<byte[]?> GetBoundedAsync(string url, int maxBytes, CancellationToken cancellationToken)
+	/// <summary>
+	/// One listing fetch's raw outcome: the document bytes, or an explicit 404
+	/// (<see cref="NotFound"/> -- the channel is genuinely not published), or an
+	/// <see cref="Error"/> naming why the document could not be obtained. Never
+	/// collapses the last two: an under-indexed sweep must be distinguishable from a
+	/// complete one (finding 2, the shape issue #1835 exists to remove).
+	/// </summary>
+	private sealed record ListingFetch(byte[]? Bytes, bool NotFound, string? Error);
+
+	private async Task<ListingFetch> FetchListingAsync(string url, int maxBytes, CancellationToken cancellationToken)
 	{
 		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpPhotonImageListingSource));
 		try
@@ -172,9 +193,19 @@ public sealed class HttpPhotonImageListingSource : IPhotonImageListingSource
 			using HttpResponseMessage response = await client
 				.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
 
+			if (response.StatusCode == HttpStatusCode.NotFound)
+			{
+				return new ListingFetch(null, NotFound: true, null);
+			}
+
 			if (!response.IsSuccessStatusCode)
 			{
-				return null;
+				// 403, 5xx, 405, ... -- the server answered, but not with a listing. This
+				// says nothing about whether the channel is published, so it must never
+				// be reported as an unpublished channel.
+				return new ListingFetch(null, NotFound: false,
+					$"channel listing at '{url}' returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}) -- " +
+					"whether this channel is published could not be determined.");
 			}
 
 			await using Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -187,19 +218,23 @@ public sealed class HttpPhotonImageListingSource : IPhotonImageListingSource
 				total += read;
 				if (total > maxBytes)
 				{
-					return null;
+					return new ListingFetch(null, NotFound: false,
+						$"channel listing at '{url}' exceeded the {maxBytes}-byte size cap -- " +
+						"the document was served but rejected on this type's own byte bound, not absent.");
 				}
 				buffer.Write(chunk, 0, read);
 			}
-			return buffer.ToArray();
+			return new ListingFetch(buffer.ToArray(), NotFound: false, null);
 		}
-		catch (HttpRequestException)
+		catch (HttpRequestException exception)
 		{
-			return null;
+			return new ListingFetch(null, NotFound: false,
+				$"channel listing at '{url}' failed at the transport layer: {exception.Message}");
 		}
 		catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
 		{
-			return null;
+			return new ListingFetch(null, NotFound: false,
+				$"channel listing at '{url}' timed out before the document was read.");
 		}
 	}
 }

@@ -50,19 +50,19 @@ public sealed class PhotonImageDiscoveryJobHandlerTests
 	{
 		public List<string> ListingRequests { get; } = [];
 
-		/// <summary>Returned for any channel base URL not overridden in <see cref="EntriesByChannelBaseUrl"/>.</summary>
-		public IReadOnlyList<PhotonImageListingEntry>? DefaultEntries { get; set; } =
-			[new PhotonImageListingEntry("photon-5.0-x86_64.iso", 123456, "\"etag\"")];
+		/// <summary>Returned for any channel base URL not overridden in <see cref="ResultsByChannelBaseUrl"/>.</summary>
+		public PhotonImageListingResult DefaultResult { get; set; } = PhotonImageListingResult.Found(
+			[new PhotonImageListingEntry("photon-5.0-x86_64.iso", 123456, "\"etag\"")]);
 
-		public Dictionary<string, IReadOnlyList<PhotonImageListingEntry>?> EntriesByChannelBaseUrl { get; } = [];
+		public Dictionary<string, PhotonImageListingResult> ResultsByChannelBaseUrl { get; } = [];
 
-		public Task<IReadOnlyList<PhotonImageListingEntry>?> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken)
+		public Task<PhotonImageListingResult> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken)
 		{
 			ListingRequests.Add(channelBaseUrl);
 			return Task.FromResult(
-				EntriesByChannelBaseUrl.TryGetValue(channelBaseUrl, out IReadOnlyList<PhotonImageListingEntry>? entries)
-					? entries
-					: DefaultEntries);
+				ResultsByChannelBaseUrl.TryGetValue(channelBaseUrl, out PhotonImageListingResult? result)
+					? result
+					: DefaultResult);
 		}
 	}
 
@@ -153,13 +153,21 @@ public sealed class PhotonImageDiscoveryJobHandlerTests
 		}
 	}
 
+	/// <summary>
+	/// A channel the vendor never published (an explicit 404 on its listing) is a
+	/// normal, expected outcome: no row, no error, and -- the half round-1 finding 2
+	/// turns on -- an UNQUALIFIED success note, because the mirror really is fully
+	/// indexed. Compare
+	/// <see cref="ExecuteAsync_ChannelIndeterminate_IsSurfacedAsAFaultNotAsUnpublished"/>,
+	/// which feeds the same handler the other outcome and asserts the opposite.
+	/// </summary>
 	[Fact]
-	public async Task ExecuteAsync_ChannelUnpublished_ProducesNoRowAndIsNotAnError()
+	public async Task ExecuteAsync_ChannelDefinitivelyAbsent_ProducesNoRowAndIsNotAnError()
 	{
 		FakeVersionSource versionSource = new();
 		FakeImageSource imageSource = new();
 		string rcChannelUrl = $"{BaseUrl}/5.0/{PhotonImageDiscoveryJobHandler.ChannelDirectoryName(PhotonImageChannels.Rc)}";
-		imageSource.EntriesByChannelBaseUrl[rcChannelUrl] = null;
+		imageSource.ResultsByChannelBaseUrl[rcChannelUrl] = PhotonImageListingResult.Absent;
 		FakeIndexRepository repository = new();
 		PhotonImageDiscoveryJobHandler handler = new(
 			versionSource, imageSource, repository, NullLogger<PhotonImageDiscoveryJobHandler>.Instance);
@@ -169,6 +177,70 @@ public sealed class PhotonImageDiscoveryJobHandlerTests
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.DoesNotContain(repository.Upserted, e => e.Channel == PhotonImageChannels.Rc);
 		Assert.Equal(PhotonImageChannels.All.Count - 1, repository.Upserted.Count);
+		Assert.DoesNotContain("INDEXING INCOMPLETE", outcome.Note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-1 review finding 2: a channel whose listing could not be determined (a 5xx
+	/// here; a 403, transport failure, timeout or over-cap document take the same arm)
+	/// must NOT read as "channel unpublished". The sweep is incomplete by an unknown
+	/// number of files, so the outcome names the channel and says so, rather than
+	/// riding on the global <c>indexed == 0</c> gate that one file from any other
+	/// channel already satisfies. Mutating the handler to route
+	/// <see cref="PhotonImageListingKind.Indeterminate"/> down the Absent arm turns
+	/// this test red while
+	/// <see cref="ExecuteAsync_ChannelDefinitivelyAbsent_ProducesNoRowAndIsNotAnError"/>
+	/// stays green -- which is exactly the distinction the contract exists to make.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_ChannelIndeterminate_IsSurfacedAsAFaultNotAsUnpublished()
+	{
+		FakeVersionSource versionSource = new();
+		FakeImageSource imageSource = new();
+		string rcChannelUrl = $"{BaseUrl}/5.0/{PhotonImageDiscoveryJobHandler.ChannelDirectoryName(PhotonImageChannels.Rc)}";
+		imageSource.ResultsByChannelBaseUrl[rcChannelUrl] = PhotonImageListingResult.Indeterminate(
+			"channel listing returned HTTP 503 (Service Unavailable)");
+		FakeIndexRepository repository = new();
+		PhotonImageDiscoveryJobHandler handler = new(
+			versionSource, imageSource, repository, NullLogger<PhotonImageDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		// Every other channel still indexed -- one indeterminate channel does not fail the sweep...
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Equal(PhotonImageChannels.All.Count - 1, repository.Upserted.Count);
+		Assert.DoesNotContain(repository.Upserted, e => e.Channel == PhotonImageChannels.Rc);
+		// ... but it is never reported as an unqualified success, and the operator can
+		// see WHICH channel and WHY.
+		Assert.Contains("INDEXING INCOMPLETE", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains(PhotonImageChannels.Rc, outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("503", outcome.Note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// The all-indeterminate sweep: nothing indexed, and the failure note must say the
+	/// channels were indeterminate rather than unpublished -- an operator reading
+	/// "0 unpublished, 5 indeterminate" chases an upstream/network fault, one reading
+	/// "5 unpublished" chases a vendor that removed the channels.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_EveryChannelIndeterminate_FailsAndNamesTheChannels()
+	{
+		FakeVersionSource versionSource = new();
+		FakeImageSource imageSource = new()
+		{
+			DefaultResult = PhotonImageListingResult.Indeterminate("connection reset"),
+		};
+		FakeIndexRepository repository = new();
+		PhotonImageDiscoveryJobHandler handler = new(
+			versionSource, imageSource, repository, NullLogger<PhotonImageDiscoveryJobHandler>.Instance);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Empty(repository.Upserted);
+		Assert.Contains("connection reset", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("indeterminate", outcome.Note, StringComparison.Ordinal);
 	}
 
 	/// <summary>Mirrors the sibling repo-discovery job's all-failed gate: an entirely-unpublished sweep fails the job, not "Indexed 0" success.</summary>
@@ -176,7 +248,7 @@ public sealed class PhotonImageDiscoveryJobHandlerTests
 	public async Task ExecuteAsync_EveryChannelUnpublished_FailsTheJob()
 	{
 		FakeVersionSource versionSource = new();
-		FakeImageSource imageSource = new() { DefaultEntries = null };
+		FakeImageSource imageSource = new() { DefaultResult = PhotonImageListingResult.Absent };
 		FakeIndexRepository repository = new();
 		PhotonImageDiscoveryJobHandler handler = new(
 			versionSource, imageSource, repository, NullLogger<PhotonImageDiscoveryJobHandler>.Instance);
@@ -201,8 +273,10 @@ public sealed class PhotonImageDiscoveryJobHandlerTests
 		await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
 
 		// The fake repository records every upsert call (never dedupes) -- the real
-		// idempotent-upsert behavior against Postgres's UNIQUE constraint is proven by
-		// PhotonIndexRepositoryTests; this asserts only that the handler issues one
+		// idempotent-upsert behavior against Postgres's UNIQUE constraint (this table's
+		// ON CONFLICT target) is proven against a real database by
+		// PhotonImageIndexRunnerRoleGrantTests.DownloadRunnerRole_CanUpsertAndListImageIndexEntries;
+		// this asserts only that the handler issues one
 		// upsert call per (version, channel, file), same shape both passes.
 		Assert.Equal(firstPassCount, repository.Upserted.Count - firstPassCount);
 	}

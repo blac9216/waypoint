@@ -35,8 +35,12 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 /// (<see cref="PhotonRepomdProbeKind.Absent"/>) produces no row at all and only a
 /// debug-level note -- indexing it as <c>HasRepodata = false</c> would make a claim the
 /// probe cannot support (a cartesian-product guess, not an observed repo). A repo whose
-/// probe fails outright (<see cref="PhotonRepomdProbeKind.Error"/>) is skipped and its
-/// error collected -- one bad repo never fails the whole job, matching this repo's
+/// probe fails outright, or whose repodata state this sweep could not determine
+/// (<see cref="PhotonRepomdProbeKind.Error"/> -- which since issue #1835 Option B also
+/// covers "repomd.xml 404 but the repodata/ directory is present upstream"), is skipped
+/// WITHOUT an upsert, so a previously-<c>Found</c> row keeps its
+/// <c>repomd_revision</c>/<c>package_count</c> rather than being downgraded to
+/// <c>has_repodata = false</c> by one transient sweep, and its error collected -- one bad repo never fails the whole job, matching this repo's
 /// tolerant-parse convention elsewhere (e.g. <c>EsxPatchStoreMetadataParser</c>) -- but
 /// when the sweep indexes NOTHING, the job itself fails rather than reporting a
 /// misleading "Indexed 0" success, whatever mix of absent/errored/unreachable probes

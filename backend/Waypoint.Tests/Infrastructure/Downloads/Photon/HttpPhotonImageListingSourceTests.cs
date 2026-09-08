@@ -83,9 +83,9 @@ public sealed class HttpPhotonImageListingSourceTests
 		});
 		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
 
-		IReadOnlyList<PhotonImageListingEntry>? entries = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
 
-		Assert.NotNull(entries);
+		Assert.Equal(PhotonImageListingKind.Found, result.Kind);
 		Assert.Contains(handler.Requests, r => r.Method == HttpMethod.Head && r.Url.EndsWith(".iso", StringComparison.Ordinal));
 		Assert.Contains(handler.Requests, r => r.Method == HttpMethod.Head && r.Url.EndsWith(".ova", StringComparison.Ordinal));
 		Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Get && r.Url.EndsWith(".ova", StringComparison.Ordinal));
@@ -99,13 +99,13 @@ public sealed class HttpPhotonImageListingSourceTests
 			: new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(AutoindexHtml) });
 		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
 
-		IReadOnlyList<PhotonImageListingEntry>? entries = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
 
-		Assert.NotNull(entries);
-		Assert.Equal(2, entries!.Count);
-		Assert.Contains(entries, e => e.RelativePath == "photon-5.0-x86_64.iso");
-		Assert.Contains(entries, e => e.RelativePath == "photon-5.0-x86_64.ova");
-		Assert.DoesNotContain(entries, e => e.RelativePath.EndsWith(".sha256", StringComparison.Ordinal));
+		Assert.Equal(PhotonImageListingKind.Found, result.Kind);
+		Assert.Equal(2, result.Entries.Count);
+		Assert.Contains(result.Entries, e => e.RelativePath == "photon-5.0-x86_64.iso");
+		Assert.Contains(result.Entries, e => e.RelativePath == "photon-5.0-x86_64.ova");
+		Assert.DoesNotContain(result.Entries, e => e.RelativePath.EndsWith(".sha256", StringComparison.Ordinal));
 	}
 
 	/// <summary>
@@ -130,21 +130,122 @@ public sealed class HttpPhotonImageListingSourceTests
 		});
 		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
 
-		IReadOnlyList<PhotonImageListingEntry>? entries = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
 
-		PhotonImageListingEntry isoEntry = Assert.Single(entries!, e => e.RelativePath == "photon-5.0-x86_64.iso");
+		PhotonImageListingEntry isoEntry = Assert.Single(result.Entries, e => e.RelativePath == "photon-5.0-x86_64.iso");
 		Assert.Equal(240_057_499, isoEntry.SizeBytes);
 	}
 
+	/// <summary>
+	/// Round-1 review finding 2, the "definitively absent" outcome: an explicit 404 on
+	/// the channel listing is the ONE failure shape that means "this channel is not
+	/// published", and it is the only one that may be reported as
+	/// <see cref="PhotonImageListingKind.Absent"/>.
+	/// </summary>
 	[Fact]
-	public async Task ListImagesAsync_ListingUnreachable_ReturnsNull()
+	public async Task ListImagesAsync_Listing404_IsAbsentNotIndeterminate()
 	{
 		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
 		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
 
-		IReadOnlyList<PhotonImageListingEntry>? entries = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
 
-		Assert.Null(entries);
+		Assert.Equal(PhotonImageListingKind.Absent, result.Kind);
+		Assert.Empty(result.Entries);
+		Assert.Null(result.Error);
+	}
+
+	/// <summary>
+	/// Round-1 review finding 2, the "could not determine" outcomes: a 403, a 5xx, and
+	/// any other non-404 failure status say nothing about whether the channel is
+	/// published, so each is <see cref="PhotonImageListingKind.Indeterminate"/> with an
+	/// error naming the status -- never the 404's Absent, which the handler reads as
+	/// "nothing to index here" and passes over without qualifying the sweep.
+	/// </summary>
+	[Theory]
+	[InlineData(HttpStatusCode.Forbidden, "403")]
+	[InlineData(HttpStatusCode.InternalServerError, "500")]
+	[InlineData(HttpStatusCode.ServiceUnavailable, "503")]
+	[InlineData(HttpStatusCode.MethodNotAllowed, "405")]
+	public async Task ListImagesAsync_NonNotFoundFailureStatus_IsIndeterminate(HttpStatusCode status, string expectedInError)
+	{
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(status));
+		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+
+		Assert.Equal(PhotonImageListingKind.Indeterminate, result.Kind);
+		Assert.Contains(expectedInError, result.Error!, StringComparison.Ordinal);
+		Assert.Empty(result.Entries);
+	}
+
+	/// <summary>A transport failure never reached the server at all -- indeterminate, never absent.</summary>
+	[Fact]
+	public async Task ListImagesAsync_TransportFailure_IsIndeterminate()
+	{
+		ScriptedHandler handler = new(_ => throw new HttpRequestException("connection reset by peer"));
+		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+
+		Assert.Equal(PhotonImageListingKind.Indeterminate, result.Kind);
+		Assert.Contains("connection reset by peer", result.Error!, StringComparison.Ordinal);
+	}
+
+	/// <summary>A timeout (a TaskCanceledException with no caller cancellation) is indeterminate, never absent.</summary>
+	[Fact]
+	public async Task ListImagesAsync_Timeout_IsIndeterminate()
+	{
+		ScriptedHandler handler = new(_ => throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout"));
+		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+
+		Assert.Equal(PhotonImageListingKind.Indeterminate, result.Kind);
+		Assert.Contains("timed out", result.Error!, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// An autoindex document over <see cref="HttpPhotonImageListingSource.MaxListingBytes"/>
+	/// was SERVED and rejected on this type's own byte bound -- issue #1834's distinction,
+	/// applied here: a size-cap rejection is indeterminate and names the cap, never an
+	/// absent channel.
+	/// </summary>
+	[Fact]
+	public async Task ListImagesAsync_ListingOverSizeCap_IsIndeterminateAndNamesTheCap()
+	{
+		byte[] oversized = new byte[HttpPhotonImageListingSource.MaxListingBytes + 1024];
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(oversized) });
+		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+
+		Assert.Equal(PhotonImageListingKind.Indeterminate, result.Kind);
+		Assert.Contains(
+			HttpPhotonImageListingSource.MaxListingBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
+			result.Error!,
+			StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// A listing that parsed but holds no recognized image file is <c>Found</c> with an
+	/// EMPTY entry list -- a third fact again, distinct from both Absent and
+	/// Indeterminate: the channel exists and is genuinely empty of images.
+	/// </summary>
+	[Fact]
+	public async Task ListImagesAsync_ParsedListingWithNoImages_IsFoundWithNoEntries()
+	{
+		ScriptedHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK)
+		{
+			Content = new StringContent("""<html><body><a href="../">Parent Directory</a></body></html>"""),
+		});
+		HttpPhotonImageListingSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonImageListingResult result = await source.ListImagesAsync(ChannelBaseUrl, CancellationToken.None);
+
+		Assert.Equal(PhotonImageListingKind.Found, result.Kind);
+		Assert.Empty(result.Entries);
+		Assert.Null(result.Error);
 	}
 
 	[Theory]

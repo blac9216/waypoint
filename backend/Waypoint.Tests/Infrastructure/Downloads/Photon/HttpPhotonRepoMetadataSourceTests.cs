@@ -141,7 +141,11 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	[Fact]
 	public async Task TryGetRepomdRevisionAndPackageCountAsync_NoRepodata_DirectoryExists_ReturnsNotFoundClassification()
 	{
+		// A genuinely repodata-free repo: repomd.xml 404s, the repo directory itself is
+		// there (200), and repodata/ is ALSO 404 -- the corroboration issue #1835's
+		// Option B requires before this classification may overwrite an indexed row.
 		ScriptedHandler handler = new(request => request.RequestUri!.ToString().EndsWith("repomd.xml", StringComparison.Ordinal)
+				|| request.RequestUri!.ToString().EndsWith("/repodata/", StringComparison.Ordinal)
 			? new HttpResponseMessage(HttpStatusCode.NotFound)
 			: new HttpResponseMessage(HttpStatusCode.OK));
 		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
@@ -152,8 +156,9 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 		Assert.Equal(PhotonRepomdProbeKind.NoRepodata, result.Kind);
 		Assert.Null(result.Revision);
 		Assert.Null(result.PackageCount);
-		// repomd.xml (404) then the directory-existence probe (200) -- never primary.xml.gz.
-		Assert.Equal(2, handler.RequestedUrls.Count);
+		// repomd.xml (404), the directory-existence probe (200), the repodata/ probe
+		// (404) -- never primary.xml.gz.
+		Assert.Equal(3, handler.RequestedUrls.Count);
 	}
 
 	/// <summary>
@@ -361,6 +366,57 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	/// never as <see cref="PhotonRepomdProbeKind.NoRepodata"/> (which the job handler
 	/// would otherwise upsert, silently downgrading a previously-healthy row).
 	/// </summary>
+	/// <summary>
+	/// Issue #1835's second "Done when" box (its Option B), the transient fault its own
+	/// title names: <c>repomd.xml</c> 404s while upstream regenerates its metadata, but
+	/// the <c>repodata/</c> directory is right there. That is "could not determine
+	/// whether this repo has repodata", not "this repo has no repodata" -- classifying
+	/// it <c>NoRepodata</c> would make the handler upsert
+	/// <c>has_repodata=false, repomd_revision=null, package_count=null</c> over a
+	/// previously-<c>Found</c> row while reporting success. The corroborating
+	/// <c>repodata/</c> probe is what tells the two apart; collapsing this arm back to
+	/// <c>PhotonRepomdProbeResult.NotFound</c> turns this test red.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_Repomd404ButRepodataDirectoryPresent_IsAnErrorNotNoRepodata()
+	{
+		ScriptedHandler handler = new(request => request.RequestUri!.ToString().EndsWith("repomd.xml", StringComparison.Ordinal)
+			? new HttpResponseMessage(HttpStatusCode.NotFound)
+			: new HttpResponseMessage(HttpStatusCode.OK));
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.Contains("repodata", result.Error!, StringComparison.Ordinal);
+		Assert.Null(result.Revision);
+		Assert.Null(result.PackageCount);
+	}
+
+	/// <summary>
+	/// The transport-failure arm of the same corroboration: the repo directory is
+	/// present but the <c>repodata/</c> probe never got an answer, so the two states
+	/// still cannot be told apart -- a probe error, never a downgrading
+	/// <c>NoRepodata</c> row.
+	/// </summary>
+	[Fact]
+	public async Task TryGetRepomdRevisionAndPackageCountAsync_RepodataDirectoryProbeServerError_IsAnErrorNotNoRepodata()
+	{
+		ScriptedHandler handler = new(request => request.RequestUri!.ToString().EndsWith("/repodata/", StringComparison.Ordinal)
+			? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+			: request.RequestUri!.ToString().EndsWith("repomd.xml", StringComparison.Ordinal)
+				? new HttpResponseMessage(HttpStatusCode.NotFound)
+				: new HttpResponseMessage(HttpStatusCode.OK));
+		HttpPhotonRepoMetadataSource source = new(new FakeHttpClientFactory(handler));
+
+		PhotonRepomdProbeResult result = await source.TryGetRepomdRevisionAndPackageCountAsync(
+			$"{BaseUrl}/5.0/photon_release_5.0_x86_64", CancellationToken.None);
+
+		Assert.Equal(PhotonRepomdProbeKind.Error, result.Kind);
+		Assert.NotNull(result.Error);
+	}
+
 	[Fact]
 	public async Task TryGetRepomdRevisionAndPackageCountAsync_DirectoryProbeServerError_IsAnErrorNotNoRepodata()
 	{

@@ -30,15 +30,55 @@ namespace Waypoint.Core.Downloads.Photon;
 public interface IPhotonImageListingSource
 {
 	/// <summary>
-	/// Returns every image file found directly under <c>channelBaseUrl</c>, or
-	/// <c>null</c> if that directory listing is unreachable or unparseable -- the
-	/// caller then treats the channel as not-yet-published rather than indexing zero
-	/// entries as a confirmed empty channel (mirrors <see cref="PhotonRepomdProbeResult.Absent"/>'s
-	/// "no row" posture for a combination that does not exist upstream). A
-	/// successfully-parsed listing with zero recognized image files is returned as an
-	/// empty list, distinct from <c>null</c>.
+	/// Lists every image file found directly under <c>channelBaseUrl</c>. The outcome is
+	/// a three-way <see cref="PhotonImageListingResult"/> rather than a nullable list,
+	/// for the reason issue #1835 records on the sibling repo lane: "we looked and this
+	/// channel is not published" and "we could not look" are different facts, and folding
+	/// them into one value makes an under-indexed sweep indistinguishable from a
+	/// fully-indexed one. An explicit 404 on the listing is
+	/// <see cref="PhotonImageListingKind.Absent"/> (a cartesian-product channel the
+	/// vendor never published -- normal, no row, not an error); a 403, a 5xx, any other
+	/// non-404 failure status, a transport failure, a timeout, or a listing document over
+	/// the implementation's byte cap are all
+	/// <see cref="PhotonImageListingKind.Indeterminate"/> with an operator-readable
+	/// <see cref="PhotonImageListingResult.Error"/> naming which of those happened. A
+	/// successfully-parsed listing is <see cref="PhotonImageListingKind.Found"/>, with
+	/// zero recognized image files returned as an empty entry list -- itself distinct
+	/// from both other outcomes.
 	/// </summary>
-	Task<IReadOnlyList<PhotonImageListingEntry>?> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken);
+	Task<PhotonImageListingResult> ListImagesAsync(string channelBaseUrl, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// The outcome of listing one version/channel directory. Mirrors
+/// <see cref="PhotonRepomdProbeResult"/>'s split on the sibling repo lane: an observed
+/// absence, an observed listing, and "the probe could not determine which" are three
+/// distinct facts, never one nullable value.
+/// </summary>
+public sealed record PhotonImageListingResult(
+	PhotonImageListingKind Kind, IReadOnlyList<PhotonImageListingEntry> Entries, string? Error)
+{
+	/// <summary>The channel directory answered an explicit 404 -- it is not published for this version.</summary>
+	public static readonly PhotonImageListingResult Absent = new(PhotonImageListingKind.Absent, [], null);
+
+	public static PhotonImageListingResult Found(IReadOnlyList<PhotonImageListingEntry> entries) =>
+		new(PhotonImageListingKind.Found, entries, null);
+
+	/// <summary>
+	/// The probe never produced an answer this code may act on (403/5xx/other non-404
+	/// status, transport failure, timeout, or an over-cap listing document). The caller
+	/// must NOT treat this as an unpublished channel: nothing is written, and the sweep
+	/// reports itself incomplete.
+	/// </summary>
+	public static PhotonImageListingResult Indeterminate(string error) =>
+		new(PhotonImageListingKind.Indeterminate, [], error);
+}
+
+public enum PhotonImageListingKind
+{
+	Found,
+	Absent,
+	Indeterminate,
 }
 
 /// <summary>

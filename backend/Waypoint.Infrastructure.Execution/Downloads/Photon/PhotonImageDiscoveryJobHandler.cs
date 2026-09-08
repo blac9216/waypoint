@@ -31,12 +31,20 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 /// <c>photon_image_index</c> row per recognized ISO/OVA/OVF/cloud-image/RPi file via
 /// <see cref="IPhotonIndexRepository.UpsertImageIndexEntryAsync"/> -- metadata only,
 /// never a download of the image itself (AC 1/AC 5).
-/// A channel directory whose listing is unreachable/unparseable
-/// (<see cref="IPhotonImageListingSource.ListImagesAsync"/> returning <c>null</c>) is
-/// treated as "not published for this version" and produces no row and only a
-/// debug-level note -- mirrors <c>PhotonRepoDiscoveryJobHandler</c>'s Absent handling:
-/// a cartesian-product guess the vendor never published is not an error. When the
-/// sweep indexes NOTHING across every version/channel, the job itself fails rather than
+/// A channel directory that answers an explicit 404
+/// (<see cref="PhotonImageListingKind.Absent"/>) is treated as "not published for this
+/// version" and produces no row and only a debug-level note -- mirrors
+/// <c>PhotonRepoDiscoveryJobHandler</c>'s Absent handling: a cartesian-product guess
+/// the vendor never published is not an error. A channel whose listing could NOT be
+/// determined (<see cref="PhotonImageListingKind.Indeterminate"/> -- a 403, a 5xx, a
+/// transport failure, a timeout, an over-cap document) is a different fact and is
+/// handled differently: it is collected, logged at Warning, and named in the job's
+/// outcome, because the mirror is then under-indexed by an unknown number of files.
+/// The sweep still succeeds if anything was indexed, but never with an unqualified
+/// success message -- the note says INDEXING INCOMPLETE and lists which channels
+/// (round-1 review finding 2: "could not look" must never read as "nothing there",
+/// the same defect class issue #1835 raises on the sibling repo lane). When the sweep
+/// indexes NOTHING across every version/channel, the job itself fails rather than
 /// reporting a misleading "Indexed 0" success (mirrors round-2 review finding 1's fix
 /// on the sibling repo-discovery job). At least one indexed file is partial success.
 /// Payload: <c>{"base_url": "https://packages.broadcom.com/photon"}</c> -- required, no
@@ -100,8 +108,8 @@ public sealed partial class PhotonImageDiscoveryJobHandler : IJobHandler
 		}
 
 		int indexed = 0;
-		int skippedUnrecognized = 0;
 		int channelsUnpublished = 0;
+		List<string> indeterminate = [];
 		int totalChannels = versions.Count * PhotonImageChannels.All.Count;
 
 		foreach (string version in versions)
@@ -110,25 +118,41 @@ public sealed partial class PhotonImageDiscoveryJobHandler : IJobHandler
 			{
 				string channelBaseUrl = $"{payload.BaseUrl.TrimEnd('/')}/{version}/{ChannelDirectoryName(channel)}";
 
-				IReadOnlyList<PhotonImageListingEntry>? entries = await _imageSource
+				PhotonImageListingResult listing = await _imageSource
 					.ListImagesAsync(channelBaseUrl, cancellationToken).ConfigureAwait(false);
 
-				if (entries is null)
+				if (listing.Kind == PhotonImageListingKind.Absent)
 				{
 					channelsUnpublished++;
 					LogChannelUnpublished(_logger, version, channel, channelBaseUrl);
 					continue;
 				}
 
-				foreach (PhotonImageListingEntry entry in entries)
+				if (listing.Kind == PhotonImageListingKind.Indeterminate)
+				{
+					// NOT an unpublished channel: the probe could not determine whether
+					// this channel is published, so the mirror is under-indexed by
+					// however many files it holds. Collected and surfaced -- never
+					// counted as absence, and never left to the global indexed == 0
+					// gate, which one file from any other channel would satisfy while
+					// this channel silently went missing (round-1 review finding 2).
+					indeterminate.Add($"{version}/{channel}: {listing.Error}");
+					LogChannelIndeterminate(_logger, version, channel, channelBaseUrl, listing.Error);
+					continue;
+				}
+
+				foreach (PhotonImageListingEntry entry in listing.Entries)
 				{
 					string? kind = PhotonImageKinds.ClassifyByFileName(entry.RelativePath);
 					if (kind is null)
 					{
-						// The listing source already filters to recognized extensions,
-						// but re-checked here defensively: never index a file under a
-						// guessed kind.
-						skippedUnrecognized++;
+						// The listing source already filters on this same call, so this
+						// arm is unreachable through the production source; kept as a
+						// defensive re-check (never index a file under a guessed kind)
+						// and logged at Warning, so if a future source ever does reach
+						// it the skip is visible in the log rather than folded into a
+						// counter nobody reads (round-1 review note 5).
+						LogUnrecognizedFileSkipped(_logger, version, channel, entry.RelativePath);
 						continue;
 					}
 
@@ -142,14 +166,25 @@ public sealed partial class PhotonImageDiscoveryJobHandler : IJobHandler
 
 		if (indexed == 0)
 		{
-			LogNothingIndexed(_logger, totalChannels, channelsUnpublished);
-			return JobExecutionOutcome.Failed(
-				$"photon-image-discovery: indexed 0 image(s) across {versions.Count} version(s) x " +
-				$"{PhotonImageChannels.All.Count} channel(s) ({channelsUnpublished} channel(s) unpublished/unreachable); nothing indexed.");
+			LogNothingIndexed(_logger, totalChannels, channelsUnpublished, indeterminate.Count);
+			string diagnosis = $"photon-image-discovery: indexed 0 image(s) across {versions.Count} version(s) x " +
+				$"{PhotonImageChannels.All.Count} channel(s) ({channelsUnpublished} channel(s) unpublished, " +
+				$"{indeterminate.Count} channel(s) indeterminate); nothing indexed.";
+			return JobExecutionOutcome.Failed(indeterminate.Count > 0
+				? $"{diagnosis} Indeterminate channels: {string.Join("; ", indeterminate)}"
+				: diagnosis);
 		}
 
 		string summary = $"Indexed {indexed} Photon image(s) across {versions.Count} version(s) " +
-			$"({channelsUnpublished} channel(s) unpublished/unreachable, {skippedUnrecognized} unrecognized file(s) skipped).";
+			$"({channelsUnpublished} channel(s) unpublished).";
+		if (indeterminate.Count > 0)
+		{
+			LogChannelsIndeterminate(_logger, indeterminate.Count);
+			return JobExecutionOutcome.Succeeded(
+				$"{summary} INDEXING INCOMPLETE: {indeterminate.Count} channel(s) could not be listed and were " +
+				$"neither indexed nor confirmed unpublished: {string.Join("; ", indeterminate)}");
+		}
+
 		return JobExecutionOutcome.Succeeded(summary);
 	}
 
@@ -160,11 +195,20 @@ public sealed partial class PhotonImageDiscoveryJobHandler : IJobHandler
 	/// </summary>
 	internal static string ChannelDirectoryName(string channel) => channel.ToLowerInvariant();
 
-	[LoggerMessage(Level = LogLevel.Error, Message = "photon-image-discovery: indexed nothing -- {TotalChannels} channel(s) probed, {Unpublished} unpublished/unreachable")]
-	private static partial void LogNothingIndexed(ILogger logger, int totalChannels, int unpublished);
+	[LoggerMessage(Level = LogLevel.Error, Message = "photon-image-discovery: indexed nothing -- {TotalChannels} channel(s) probed, {Unpublished} unpublished, {Indeterminate} indeterminate")]
+	private static partial void LogNothingIndexed(ILogger logger, int totalChannels, int unpublished, int indeterminate);
 
-	[LoggerMessage(Level = LogLevel.Debug, Message = "photon-image-discovery: {Version}/{Channel} channel listing unpublished or unreachable ({ChannelBaseUrl}), no row indexed")]
+	[LoggerMessage(Level = LogLevel.Debug, Message = "photon-image-discovery: {Version}/{Channel} channel is not published ({ChannelBaseUrl}), no row indexed")]
 	private static partial void LogChannelUnpublished(ILogger logger, string version, string channel, string channelBaseUrl);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "photon-image-discovery: {Version}/{Channel} channel listing could not be determined ({ChannelBaseUrl}): {Error} -- this sweep is incomplete for that channel")]
+	private static partial void LogChannelIndeterminate(ILogger logger, string version, string channel, string channelBaseUrl, string? error);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "photon-image-discovery: {Count} channel(s) could not be listed; the image index is incomplete for this sweep")]
+	private static partial void LogChannelsIndeterminate(ILogger logger, int count);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "photon-image-discovery: {Version}/{Channel} listing offered an unrecognized file '{RelativePath}' -- skipped, never indexed under a guessed kind")]
+	private static partial void LogUnrecognizedFileSkipped(ILogger logger, string version, string channel, string relativePath);
 
 	private sealed record PhotonImageDiscoveryPayload(string? BaseUrl);
 }

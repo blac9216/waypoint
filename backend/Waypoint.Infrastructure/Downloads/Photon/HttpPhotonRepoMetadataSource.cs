@@ -29,8 +29,9 @@ namespace Waypoint.Infrastructure.Downloads.Photon;
 /// resolves a <c>primary</c> data entry AND that entry's <c>href</c> passes
 /// <see cref="IsValidPrimaryHref"/>, <c>GET &lt;repoBase&gt;/&lt;that entry's location&gt;</c>
 /// (the compressed <c>primary.xml.gz</c> HEADER document), or a directory-existence probe
-/// of <c>&lt;repoBase&gt;</c> itself when <c>repomd.xml</c> 404s (to distinguish "directory
-/// absent upstream" from "present, no repodata" -- see <see cref="ProbeDirectoryExistsAsync"/>)
+/// of <c>&lt;repoBase&gt;</c> and of <c>&lt;repoBase&gt;/repodata/</c> when <c>repomd.xml</c>
+/// 404s (to distinguish "directory absent upstream" from "present, no repodata" from
+/// "present, repodata mid-regeneration" -- see <see cref="ProbeDirectoryExistsAsync"/>)
 /// -- never an actual RPM, ISO, OVA, or any other package/image file (this issue's AC 5).
 /// <c>repomd.xml</c> is unsigned upstream (research #1029 finding 2: "Metadata signing:
 /// none... repomd.xml lists no signature data entry") so this type derives no trust
@@ -117,14 +118,46 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 			// A 404 on repomd.xml alone cannot tell "directory absent upstream" apart from
 			// "directory present, no repodata" -- probe the directory itself to decide.
 			DirectoryProbe directoryProbe = await ProbeDirectoryExistsAsync(repoBaseUrl, cancellationToken).ConfigureAwait(false);
-			return directoryProbe switch
+			if (directoryProbe == DirectoryProbe.Absent)
 			{
-				DirectoryProbe.Exists => PhotonRepomdProbeResult.NotFound,
-				DirectoryProbe.Absent => PhotonRepomdProbeResult.Absent,
-				_ => PhotonRepomdProbeResult.Failed(
+				return PhotonRepomdProbeResult.Absent;
+			}
+
+			if (directoryProbe != DirectoryProbe.Exists)
+			{
+				return PhotonRepomdProbeResult.Failed(
 					$"repodata/repomd.xml was 404 at '{repomdUrl}' and the follow-up directory HEAD on " +
 					$"'{repoBaseUrl}' failed at the transport layer, so absent-upstream and " +
-					"present-without-repodata cannot be told apart -- reported as a probe error, not as absent."),
+					"present-without-repodata cannot be told apart -- reported as a probe error, not as absent.");
+			}
+
+			// Issue #1835 Option B: the repo directory exists, but a bare 404 on
+			// repomd.xml still cannot tell "this repo genuinely publishes no repodata"
+			// (a photon_snapshots-shaped directory, AC 3 of #1509) apart from "upstream
+			// is mid-regeneration and repomd.xml is momentarily missing from a repodata/
+			// directory that is right there". Corroborate with a HEAD on repodata/
+			// itself -- the issue's own "or a successful directory listing" corroboration:
+			// only an explicit 404 on repodata/ is positive evidence that this repo has
+			// no repodata, and only that evidence may produce a NoRepodata row (which the
+			// caller upserts as has_repodata=false, overwriting whatever a previous sweep
+			// recorded). repodata/ present, or a probe that never got an answer, is
+			// "could not determine" -- a probe error, which the handler skips without
+			// upserting, so a previously-Found row keeps its revision and package count
+			// instead of being silently downgraded by one transient sweep.
+			string repodataDirUrl = $"{repoBaseUrl.TrimEnd('/')}/repodata";
+			DirectoryProbe repodataProbe = await ProbeDirectoryExistsAsync(repodataDirUrl, cancellationToken).ConfigureAwait(false);
+			return repodataProbe switch
+			{
+				DirectoryProbe.Absent => PhotonRepomdProbeResult.NotFound,
+				DirectoryProbe.Exists => PhotonRepomdProbeResult.Failed(
+					$"repodata/repomd.xml was 404 at '{repomdUrl}' while the repodata/ directory at " +
+					$"'{repodataDirUrl}/' answered as present -- upstream is regenerating its metadata, so " +
+					"whether this repo has repodata cannot be determined on this sweep. Reported as a probe " +
+					"error rather than as no-repodata, so a previously-indexed row is not downgraded (#1835)."),
+				_ => PhotonRepomdProbeResult.Failed(
+					$"repodata/repomd.xml was 404 at '{repomdUrl}' and the follow-up HEAD on " +
+					$"'{repodataDirUrl}/' failed at the transport layer, so a genuinely repodata-free repo " +
+					"and an upstream mid-regeneration cannot be told apart -- reported as a probe error."),
 			};
 		}
 
@@ -241,7 +274,11 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 	/// <summary>
 	/// Distinguishes "the repo directory does not exist upstream" from "the directory
 	/// exists but has no <c>repodata/</c>" -- both look identical from a bare 404 on
-	/// <c>repodata/repomd.xml</c>. A <c>HEAD</c> on the repo base itself: an explicit
+	/// <c>repodata/repomd.xml</c>. Called twice on that 404 path: once on the repo base
+	/// itself, then (only when the repo base exists) on <c>&lt;repoBase&gt;/repodata</c>,
+	/// which is the corroboration issue #1835's Option B asks for before a
+	/// previously-<c>Found</c> row may be downgraded to <c>has_repodata = false</c>.
+	/// A <c>HEAD</c> on the directory: an explicit
 	/// 404 is <see cref="DirectoryProbe.Absent"/>; a 2xx or 3xx response (200, a
 	/// redirect, ...) is <see cref="DirectoryProbe.Exists"/>; every other status --
 	/// a 5xx, or any other non-404 4xx (403, 405, ...) -- and a transport failure or
@@ -255,12 +292,12 @@ public sealed class HttpPhotonRepoMetadataSource : IPhotonRepoMetadataSource
 	/// which the job handler skips (never upserted), the previously-indexed row for a
 	/// genuinely healthy repo is left untouched by a transient fault.
 	/// </summary>
-	private async Task<DirectoryProbe> ProbeDirectoryExistsAsync(string repoBaseUrl, CancellationToken cancellationToken)
+	private async Task<DirectoryProbe> ProbeDirectoryExistsAsync(string directoryUrl, CancellationToken cancellationToken)
 	{
 		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpPhotonRepoMetadataSource));
 		try
 		{
-			using HttpRequestMessage request = new(HttpMethod.Head, repoBaseUrl.TrimEnd('/') + "/");
+			using HttpRequestMessage request = new(HttpMethod.Head, directoryUrl.TrimEnd('/') + "/");
 			using HttpResponseMessage response = await client
 				.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
 
