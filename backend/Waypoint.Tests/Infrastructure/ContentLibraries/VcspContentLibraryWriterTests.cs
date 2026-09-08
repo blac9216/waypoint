@@ -329,10 +329,29 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 		// touched must leave both of those documents byte-for-byte the same file they
 		// were before this call, and must leave no partial temp artifact behind for
 		// any document the cancellation interrupted.
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(
-			() => writer.WriteAsync(library, newItems, cts.Token));
-		await cancelOnFirstItemWritten;
-		stopPolling.Set();
+		try
+		{
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(
+				() => writer.WriteAsync(library, newItems, cts.Token));
+			await cancelOnFirstItemWritten;
+		}
+		finally
+		{
+			// PR #1832 round-2 note N2c. Without this finally, a WriteAsync that threw
+			// some OTHER exception before the first item.json appeared made the assert
+			// above throw first, so the dedicated spin-loop poller was never told to
+			// stop -- it pinned one core for the remainder of the process, on a host
+			// docs/process/testing.md documents as shared with concurrent agents, and
+			// went on reading ManualResetEventSlims the `using` declarations above were
+			// meanwhile disposing. Releasing the poller, unblocking the waiter behind
+			// firstItemWritten and joining the thread makes teardown unconditional:
+			// reachable only when the test is already failing, which is exactly when a
+			// leaked hot thread is least welcome.
+			stopPolling.Set();
+			firstItemWritten.Set();
+			poller.Join(TimeSpan.FromSeconds(5));
+			await cancelOnFirstItemWritten;
+		}
 
 		Assert.True(File.Exists(firstNewItemJson), "the cancellation fired before any new item.json was written -- this run did not exercise a mid-write cancellation");
 		Assert.Equal(itemsBefore, File.ReadAllBytes(itemsJsonPath));
