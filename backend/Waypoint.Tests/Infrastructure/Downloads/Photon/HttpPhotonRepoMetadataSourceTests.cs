@@ -395,8 +395,8 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	}
 
 	/// <summary>
-	/// The transport-failure arm of the same corroboration: the repo directory is
-	/// present but the <c>repodata/</c> probe never got an answer, so the two states
+	/// The server-fault arm of the same corroboration: the repo directory is
+	/// present but the <c>repodata/</c> probe answered 500, not 404, so the two states
 	/// still cannot be told apart -- a probe error, never a downgrading
 	/// <c>NoRepodata</c> row.
 	/// </summary>
