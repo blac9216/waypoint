@@ -143,7 +143,7 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			throw new NotSupportedException("not needed for this test");
 
-		public Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken) =>
+		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) =>
 			throw new NotSupportedException("not needed for this test");
 	}
 

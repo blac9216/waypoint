@@ -597,10 +597,16 @@ public sealed class SchemaMigrationTests
 	/// <c>PhotonRepoDiscoveryJobHandler</c> is the only consumer this migration ships
 	/// alongside; the other two tables get no grant yet (0118's <c>oci_bundles</c>
 	/// precedent for the same shape of gap), proven both directions by
-	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> --
-	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file. Issue #1783
-	/// (migration 0132) added <c>depot_artifacts.bundle_id</c>, bumping 96 -&gt; 97.</summary>
-	private const int ExpectedMigrationCount = 97;
+	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> -- 0132 (issue #1783) added
+	/// <c>depot_artifacts.bundle_id</c>, bumping 96 -&gt; 97; 0134 (issue #1804) adds
+	/// <c>depot_artifacts.superseded_at</c> (nullable timestamp), the never-delete
+	/// marker <c>RekeyManyAsync</c>'s collision path sets on a stale legacy row it
+	/// folds into a surviving new-identity row -- see that migration's own header
+	/// comment for why a status VALUE was rejected in favor of a column -- bumping
+	/// 97 -&gt; 98 (0133, carried by PR #1831's <c>content_library_items</c> migration,
+	/// had not merged as of this rebase, so slot 0134 is still free) --
+	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 98;
 
 	private readonly PostgresFixture _fixture;
 

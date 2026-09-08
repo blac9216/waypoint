@@ -212,6 +212,95 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		Assert.Equal("sha-original", matching.Sha256);
 	}
 
+	[Fact]
+	public async Task RekeyManyAsync_LegacyRowWithNoCollision_RenamesInPlace()
+	{
+		string legacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string newId = $"PROD/COMP/VCENTER/{legacyId}";
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(legacyId, "sha-legacy", "indexed", "{}"), CancellationToken.None);
+
+		int reconciled = await _repository.RekeyManyAsync(
+			new Dictionary<string, string> { [legacyId] = newId }, CancellationToken.None);
+
+		Assert.Equal(1, reconciled);
+
+		(IReadOnlyList<DepotArtifact> items, long total) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, CancellationToken.None);
+		Assert.DoesNotContain(items, item => item.ExternalId == legacyId);
+		Assert.Contains(items, item => item.ExternalId == newId && item.Sha256 == "sha-legacy");
+		_ = total;
+	}
+
+	[Fact]
+	public async Task RekeyManyAsync_ZeroCandidatesHaveALegacyRow_ReturnsZeroWithoutTouchingAnything()
+	{
+		string legacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string newId = $"PROD/COMP/VCENTER/{legacyId}";
+
+		int reconciled = await _repository.RekeyManyAsync(
+			new Dictionary<string, string> { [legacyId] = newId }, CancellationToken.None);
+
+		Assert.Equal(0, reconciled);
+	}
+
+	/// <summary>
+	/// Issue #1804's own acceptance criterion: seeds BOTH a legacy-identity row and a
+	/// new-identity row for the same logical artifact (simulating the presence sweep
+	/// having already created the new-identity row before this artifact's first
+	/// post-#1784 pull) and asserts exactly one row remains afterward -- the legacy
+	/// row's still-valid <c>sha256</c> (which the sweep-created row never carries --
+	/// the sweep only ever reports presence/status) is folded into the surviving
+	/// row, and the legacy row is marked <c>superseded_at</c> rather than deleted
+	/// (design #16 section 2's never-auto-remove policy) -- confirmed directly
+	/// against the raw column, since <see cref="DepotArtifact"/> does not expose it.
+	/// </summary>
+	[Fact]
+	public async Task RekeyManyAsync_CollisionWhereBothRowsAlreadyExist_MergesAndSupersedesTheLegacyRow()
+	{
+		string legacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string newId = $"PROD/COMP/VCENTER/{legacyId}";
+
+		Guid legacyRowId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(legacyId, "sha-from-legacy-pull", "indexed", "{}", SizeBytes: 999),
+			CancellationToken.None);
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(newId, null, "present", "{}"), CancellationToken.None);
+
+		int reconciled = await _repository.RekeyManyAsync(
+			new Dictionary<string, string> { [legacyId] = newId }, CancellationToken.None);
+
+		Assert.Equal(1, reconciled);
+
+		(IReadOnlyList<DepotArtifact> items, long total) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, CancellationToken.None);
+
+		// Exactly one VISIBLE row for this logical artifact -- the legacy row is
+		// superseded, not deleted, so ListAsync's superseded_at IS NULL filter is
+		// what makes this "exactly one", not the legacy row's absence from the table.
+		DepotArtifact survivor = Assert.Single(items.Where(item => item.ExternalId == newId || item.ExternalId == legacyId));
+		Assert.Equal(newId, survivor.ExternalId);
+		Assert.Equal("present", survivor.Status); // the sweep-created row's own status wins -- never overwritten by the merge.
+		Assert.Equal("sha-from-legacy-pull", survivor.Sha256); // folded from the legacy row (COALESCE -- the survivor had none).
+		Assert.Equal(999, survivor.SizeBytes); // folded from the legacy row.
+		_ = total;
+
+		// The legacy row itself: still present in the table (never deleted), but now
+		// marked superseded_at, and GetByIdAsync (an existing-FK-reference lookup,
+		// not a listing surface) still resolves it by id.
+		DepotArtifact? legacyById = await _repository.GetByIdAsync(legacyRowId, CancellationToken.None);
+		Assert.NotNull(legacyById);
+		Assert.Equal(legacyId, legacyById!.ExternalId);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT superseded_at FROM depot_artifacts WHERE id = $1", connection);
+		command.Parameters.AddWithValue(legacyRowId);
+		object? supersededAt = await command.ExecuteScalarAsync();
+		Assert.NotNull(supersededAt);
+	}
+
 	/// <summary>
 	/// Issue #1488 acceptance criterion: migration 0100's <c>external_id</c> -&gt;
 	/// <c>relative_path</c> rename must run cleanly against a fixture carrying

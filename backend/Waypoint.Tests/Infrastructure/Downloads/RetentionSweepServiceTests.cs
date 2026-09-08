@@ -171,8 +171,8 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) =>
 			inner.UpsertAsync(artifact, cancellationToken);
 
-		public Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken) =>
-			inner.RekeyAsync(fromRelativePath, toRelativePath, cancellationToken);
+		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) =>
+			inner.RekeyManyAsync(renames, cancellationToken);
 
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
 			id == missing ? Task.FromResult<DepotArtifact?>(null) : inner.GetByIdAsync(id, cancellationToken);

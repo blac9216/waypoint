@@ -100,39 +100,117 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	}
 
 	/// <summary>
-	/// The <c>NOT EXISTS</c> guard reads a statement-start snapshot under Postgres's
-	/// default READ COMMITTED isolation, not a locked/rechecked read: if a presence
-	/// sweep commits a row at <paramref name="toRelativePath"/> concurrently with this
-	/// UPDATE, the two can race, and this statement can still attempt (and fail with a
-	/// unique-key violation on <c>relative_path</c>) a rename onto an identity that
-	/// exists by the time it commits. This is distinct from the DOCUMENTED remainder
-	/// tracked at #1804 (the ordinary, non-concurrent case where the sweep already
-	/// created the TO row BEFORE this pull started -- that case correctly no-ops here,
-	/// verified in <see cref="DepotArtifactRepositoryTests"/>). The narrower
-	/// concurrent-commit race is timing-dependent, unobserved in production, and left
-	/// unfixed (a <c>FOR UPDATE</c>/advisory-lock closes it but adds
-	/// contention to every rekey for a window that has never been hit) -- recorded here
-	/// so a future unhandled-exception report from this call site is not a surprise.
+	/// The <c>NOT EXISTS</c> guards below read a statement-start snapshot under
+	/// Postgres's default READ COMMITTED isolation, not a locked/rechecked read: if a
+	/// presence sweep commits a row at a TO identity concurrently with the rename
+	/// statement, the two can race, and that statement can still attempt (and fail
+	/// with a unique-key violation on <c>relative_path</c>) a rename onto an identity
+	/// that exists by the time it commits. This is distinct from the collision case
+	/// this method now reconciles (the ordinary, non-concurrent case where the sweep
+	/// already created the TO row BEFORE this pull started -- verified in
+	/// <see cref="DepotArtifactRepositoryTests"/>). The narrower concurrent-commit
+	/// race is timing-dependent, unobserved in production, and left unfixed (a
+	/// <c>FOR UPDATE</c>/advisory-lock closes it but adds contention to every rekey
+	/// for a window that has never been hit) -- recorded here so a future
+	/// unhandled-exception report from this call site is not a surprise.
 	/// </summary>
 	/// <inheritdoc/>
-	public async Task<bool> RekeyAsync(string fromRelativePath, string toRelativePath, CancellationToken cancellationToken)
+	public async Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(fromRelativePath);
-		ArgumentException.ThrowIfNullOrWhiteSpace(toRelativePath);
+		ArgumentNullException.ThrowIfNull(renames);
+		if (renames.Count == 0)
+		{
+			return 0;
+		}
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new(
+
+		// Step 1, the one query "up front": which of the candidate FROM identities
+		// actually have a non-superseded row today? Almost always none once a
+		// stack's first post-#1784 pull has run -- the per-artifact guard this
+		// batching replaced fired on every artifact regardless of whether a legacy
+		// row existed (#1818). Zero matches here means zero further round trips.
+		string[] fromCandidates = [.. renames.Keys];
+		List<string> legacyFrom = [];
+		await using (NpgsqlCommand probe = new(
+			"SELECT relative_path FROM depot_artifacts WHERE relative_path = ANY($1) AND superseded_at IS NULL", connection))
+		{
+			probe.Parameters.AddWithValue(fromCandidates);
+			await using NpgsqlDataReader reader = await probe.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				legacyFrom.Add(reader.GetString(0));
+			}
+		}
+
+		if (legacyFrom.Count == 0)
+		{
+			return 0;
+		}
+
+		string[] legacyFromArray = [.. legacyFrom];
+		string[] legacyToArray = [.. legacyFrom.Select(from => renames[from])];
+
+		// Step 2: rename every legacy row onto its TO identity in one statement,
+		// except where the TO identity already has a row (issue #1804's collision
+		// case -- step 3 below reconciles those).
+		int renamed;
+		await using (NpgsqlCommand rename = new(
 			"""
-			UPDATE depot_artifacts
-			SET relative_path = $2
-			WHERE relative_path = $1
-			  AND NOT EXISTS (SELECT 1 FROM depot_artifacts WHERE relative_path = $2)
-			""", connection);
-		command.Parameters.AddWithValue(fromRelativePath);
-		command.Parameters.AddWithValue(toRelativePath);
-		int renamed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-		return renamed > 0;
+			WITH pairs (from_path, to_path) AS (SELECT * FROM UNNEST($1::text[], $2::text[]))
+			UPDATE depot_artifacts d
+			SET relative_path = p.to_path
+			FROM pairs p
+			WHERE d.relative_path = p.from_path
+			  AND NOT EXISTS (SELECT 1 FROM depot_artifacts t WHERE t.relative_path = p.to_path)
+			""", connection))
+		{
+			rename.Parameters.AddWithValue(legacyFromArray);
+			rename.Parameters.AddWithValue(legacyToArray);
+			renamed = await rename.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		if (renamed == legacyFrom.Count)
+		{
+			return renamed;
+		}
+
+		// Step 3, issue #1804's collision case: for whichever pairs step 2 could not
+		// rename (their FROM row is still present, unchanged), fold the legacy row's
+		// still-valid facts into the surviving TO row -- COALESCE-only, never
+		// clobbering a fact the TO row already has, the same convention
+		// UpsertAsync's own ON CONFLICT clause uses -- then mark the legacy row
+		// superseded (migration 0134) rather than deleting it: IDepotArtifactRepository
+		// has no Delete/Remove/Purge-named member (design #16 section 2's
+		// never-auto-remove policy, ReviewListServiceTests.
+		// Interface_HasNoDeleteOrRemoveOrPurgeMethod).
+		int superseded;
+		await using (NpgsqlCommand merge = new(
+			"""
+			WITH pairs (from_path, to_path) AS (SELECT * FROM UNNEST($1::text[], $2::text[])),
+			merged AS (
+				UPDATE depot_artifacts target
+				SET sha256 = COALESCE(target.sha256, legacy.sha256),
+				    size_bytes = COALESCE(target.size_bytes, legacy.size_bytes),
+				    last_verified_at = COALESCE(target.last_verified_at, legacy.last_verified_at)
+				FROM pairs p
+				JOIN depot_artifacts legacy ON legacy.relative_path = p.from_path AND legacy.superseded_at IS NULL
+				WHERE target.relative_path = p.to_path
+				RETURNING legacy.id AS legacy_id
+			)
+			UPDATE depot_artifacts d
+			SET superseded_at = now()
+			FROM merged m
+			WHERE d.id = m.legacy_id
+			""", connection))
+		{
+			merge.Parameters.AddWithValue(legacyFromArray);
+			merge.Parameters.AddWithValue(legacyToArray);
+			superseded = await merge.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		return renamed + superseded;
 	}
 
 	/// <inheritdoc/>
@@ -191,7 +269,13 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	private static string BuildWhereClause(DepotArtifactFilter filter, out List<object> parameters)
 	{
 		parameters = [];
-		List<string> clauses = [];
+		// Issue #1804: a superseded legacy row (RekeyManyAsync's collision path) is
+		// never a delete -- but every read surface that lists artifacts must not
+		// show it as a duplicate of the row it was folded into. Unconditional, not a
+		// DepotArtifactFilter option: no caller has ever needed to list superseded
+		// rows, and GetByIdAsync (an existing-FK-reference lookup, not a listing
+		// surface) deliberately does not apply this filter.
+		List<string> clauses = ["superseded_at IS NULL"];
 
 		if (!string.IsNullOrWhiteSpace(filter.Product))
 		{
