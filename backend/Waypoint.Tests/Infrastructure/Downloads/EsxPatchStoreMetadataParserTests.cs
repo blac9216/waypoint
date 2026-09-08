@@ -742,6 +742,6 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		EsxPatchStoreVendorHealth health = Assert.Single(result.Metadata.VendorHealth);
 		Assert.Equal("vmw", health.VendorCode);
 		Assert.Equal(EsxPatchStoreVendorHealthKind.MalformedIndex, health.Kind);
-		Assert.Contains(result.Metadata.Warnings, w => w.Contains("byte-size bound -- not read"));
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains("file-size bound -- not read"));
 	}
 }
