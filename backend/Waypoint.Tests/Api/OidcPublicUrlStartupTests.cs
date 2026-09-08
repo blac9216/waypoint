@@ -58,9 +58,25 @@ public sealed class OidcPublicUrlStartupTests
 
 			// Belt-and-suspenders: confirm it truly never opened the listening socket,
 			// not just that it happened to exit for some unrelated reason afterward.
+			// Issue #1279: a connection to a port nothing is listening on normally
+			// reaches HttpClient as HttpRequestException (connection refused), but
+			// under host scheduling load the client's own 2s Timeout can elapse first
+			// -- surfacing as TaskCanceledException instead -- before the OS gets
+			// around to delivering the RST. Both outcomes prove the identical thing
+			// this assertion exists to prove ("no response was served"); the probe
+			// below accepts either rather than pinning the transport's failure shape,
+			// exactly as this class's own WaitForHealthyAsync already treats the two
+			// as equivalent "not up yet" signals.
 			using HttpClient client = new() { Timeout = TimeSpan.FromSeconds(2) };
-			await Assert.ThrowsAnyAsync<HttpRequestException>(
-				() => client.GetAsync($"http://127.0.0.1:{port}/api/v1/health"));
+			try
+			{
+				await client.GetAsync($"http://127.0.0.1:{port}/api/v1/health");
+				Assert.Fail("The health probe should not have received a response -- the API never opened its listening socket.");
+			}
+			catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+			{
+				// Expected: nothing was served, whichever shape the failure took.
+			}
 		}
 		finally
 		{
