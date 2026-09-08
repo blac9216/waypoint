@@ -18,10 +18,24 @@ namespace Waypoint.Core.Downloads;
 /// Which of the two byte-compatible on-disk layouts a store's <c>hostupdate/</c> tree
 /// was found under (research #1028: the wire format is unchanged across the
 /// transition, only the root differs). See <see cref="IEsxPatchStoreMetadataParser"/>.
+///
+/// Issue #1643: this describes WHICH PROBE MATCHED under
+/// <c>EsxPatchStoreMetadataParser.ResolveHostupdateRoot</c>, not the store's true
+/// generation. On auto-detect, Legacy is probed and preferred first -- a store root
+/// that also happens to have <c>PROD/COMP/ESX_HOST/patch-store/hostupdate</c> nested
+/// inside it resolves to its own top-level <c>hostupdate/</c> and reports Legacy, and
+/// passing a 9.1 depot's own <c>.../patch-store</c> directory directly as the store
+/// root (rather than the depot root above it) matches the legacy probe and reports
+/// Legacy too, even though the store content is 9.1's. In both cases
+/// <see cref="EsxPatchStoreMetadata.HostupdateRoot"/> is correct; only this value
+/// describes the probe, not the generation. Pass an explicit layout to
+/// <see cref="IEsxPatchStoreMetadataParser.Parse"/> when the caller already knows
+/// which generation it is pointing at, rather than relying on this value afterward to
+/// infer it.
 /// </summary>
 public enum EsxPatchStoreLayout
 {
-	/// <summary>UMDS 8.x/9.0: <c>&lt;storeRoot&gt;/hostupdate/...</c> -- the store root is a sidecar UMDS volume.</summary>
+	/// <summary>UMDS 8.x/9.0: <c>&lt;storeRoot&gt;/hostupdate/...</c> -- the store root is a sidecar UMDS volume. Also reported when auto-detection's legacy probe matches ahead of a nested 9.1 shape; see this enum's own remarks.</summary>
 	Legacy,
 
 	/// <summary>VCFDT 9.1: <c>&lt;storeRoot&gt;/PROD/COMP/ESX_HOST/patch-store/hostupdate/...</c> -- the store root is the depot root the download tool already owns.</summary>
@@ -68,13 +82,28 @@ public sealed record EsxPatchStoreMetadataBundle(
 /// call site; see <see cref="EsxPatchStoreVendorHealth"/> and
 /// <c>EsxPatchStoreMetadataParser</c>'s own remarks for the exact mapping. Only
 /// shapes that leave a vendor's bundle list incomplete are represented here --
-/// genuine absence (no consolidated metadata index file at all, or a metadata entry
-/// naming a zip that is not on disk) is not a health failure and carries no entry.
+/// genuine absence (a metadata entry naming a zip that is not on disk) is not a
+/// health failure and carries no entry. Issue #1700: a vendor directory with NO
+/// consolidated metadata index file at all (<see cref="IndexAbsent"/>) is decided as
+/// degradation rather than genuine content absence -- see that member's own remarks.
 /// </summary>
 public enum EsxPatchStoreVendorHealthKind
 {
 	/// <summary>The vendor's consolidated metadata index file exists but could not be opened/read (I/O or permission failure).</summary>
 	UnreadableIndex,
+
+	/// <summary>
+	/// The vendor directory exists but has no consolidated metadata index file at all
+	/// (issue #1700). Decided deliberately as degradation, not genuine content
+	/// removal: a transfer that lands zips before its index, or an index deleted or
+	/// mid-move, leaves this vendor's real content unreadable this run rather than
+	/// actually gone. Left ungated (as it was before #1700), this vendor's zips would
+	/// simultaneously open as false <c>Orphan</c> rows (#1452 surfaces those to an
+	/// operator as explicit deletion candidates) and its previously indexed content
+	/// keys would open as false <c>Missing</c> rows -- both diffs gate on this kind the
+	/// same way they gate on every other member here.
+	/// </summary>
+	IndexAbsent,
 
 	/// <summary>The vendor's consolidated metadata index file is present but empty or all-whitespace -- e.g. a concurrent writer caught mid-truncate.</summary>
 	EmptyIndex,

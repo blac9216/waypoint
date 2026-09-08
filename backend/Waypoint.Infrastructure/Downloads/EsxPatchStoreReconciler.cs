@@ -419,6 +419,7 @@ public sealed class EsxPatchStoreReconciler : IEsxPatchStoreReconciler
 	private static string DescribeHealthKind(EsxPatchStoreVendorHealthKind kind) => kind switch
 	{
 		EsxPatchStoreVendorHealthKind.UnreadableIndex => "could not read its consolidated metadata index",
+		EsxPatchStoreVendorHealthKind.IndexAbsent => "has no consolidated metadata index at all (issue #1700)",
 		EsxPatchStoreVendorHealthKind.EmptyIndex => "its consolidated metadata index is empty",
 		EsxPatchStoreVendorHealthKind.MalformedIndex => "its consolidated metadata index is not valid/safe XML (or exceeds the parse size bound)",
 		EsxPatchStoreVendorHealthKind.UnreadableZip => "could not read a metadata zip it names",

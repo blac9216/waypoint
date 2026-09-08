@@ -707,6 +707,51 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		Assert.Equal(1, await CountIndexRowsAsync());
 	}
 
+	// ----- issue #1700: vendor directory with no consolidated metadata index at all --
+
+	/// <summary>
+	/// Issue #1700: a vendor directory that exists on disk but has NO consolidated
+	/// metadata index file at all (a transfer that lands zips before its index, or an
+	/// index deleted/mid-move) must gate both diffs exactly like every other degraded
+	/// shape -- before this fix, this vendor's zip opened as a false <c>Orphan</c> row
+	/// (a deletion candidate via #1452) and its previously-indexed content opened as a
+	/// false <c>Missing</c> row, simultaneously, on the same run.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_VendorDirectoryWithNoIndexAtAll_GatesBothDiffsForThatVendorInsteadOfOpeningOrphans()
+	{
+		WriteConsolidatedIndex(_hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
+
+		EsxPatchStoreReconciliationReport firstReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+		Assert.Equal(1, firstReport.IndexedCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+
+		// The vendor's index file itself vanishes (not the vendor directory, not the
+		// zip -- exactly the shape #1700 describes), leaving the zip stranded.
+		File.Delete(Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml"));
+
+		EsxPatchStoreReconciliationReport secondReport = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(secondReport.Succeeded);
+		Assert.Contains(secondReport.ParserWarnings, w => w.Contains("vmw") && w.Contains("no consolidated metadata index"));
+
+		// Before #1700: this would have been NewOrphanCount == 1 for metadata-a.zip
+		// (a zip the store genuinely still has) and NewMissingCount == 1 for the same
+		// content key it had already indexed -- both false.
+		Assert.Equal(0, secondReport.NewMissingCount);
+		Assert.Equal(0, secondReport.NewOrphanCount);
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Missing-discrepancy detection skipped") && w.Contains("vmw") && w.Contains("#1700"));
+		Assert.Contains(secondReport.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped") && w.Contains("vmw") && w.Contains("#1700"));
+
+		(int missingCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Missing);
+		Assert.Equal(0, missingCount);
+		(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, orphanCount);
+		Assert.Equal(1, await CountIndexRowsAsync());
+	}
+
 	// ----- round-2 review finding F5: pin the parser/reconciler health contract ----
 
 	/// <summary>
@@ -726,6 +771,7 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		EsxPatchStoreVendorHealthKind[] expected =
 		[
 			EsxPatchStoreVendorHealthKind.UnreadableIndex,
+			EsxPatchStoreVendorHealthKind.IndexAbsent,
 			EsxPatchStoreVendorHealthKind.EmptyIndex,
 			EsxPatchStoreVendorHealthKind.MalformedIndex,
 			EsxPatchStoreVendorHealthKind.UnreadableZip,
@@ -782,11 +828,13 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		string vendorDir = WriteVendorMetadataIndex(_hostupdateDir, "vmw", "metadata-a.zip");
 		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"));
 
-		// No read/execute: Directory.GetFiles on the vendor dir itself throws once
-		// the consolidated metadata index has already been (successfully) parsed
-		// during this same run -- deny only after index parsing, mirroring a
-		// permission change mid-run rather than a pre-existing unreadable vendor.
-		File.SetUnixFileMode(vendorDir, UnixFileMode.UserWrite);
+		// Execute-only (no read): a named file can still be stat'd through the
+		// directory (File.Exists(indexPath) succeeds -- traversal needs only the
+		// execute bit), so the parser's index read still succeeds this run and #1700's
+		// IndexAbsent gate does not fire. Listing the directory's contents DOES need
+		// the read bit, so Directory.GetFiles on the vendor dir itself still throws --
+		// the scenario this test actually targets.
+		File.SetUnixFileMode(vendorDir, UnixFileMode.UserExecute);
 		try
 		{
 			EsxPatchStoreReconciliationReport report = await _reconciler.ReconcileAsync(_root, null, CancellationToken.None);
@@ -801,5 +849,59 @@ public sealed class EsxPatchStoreReconcilerTests : IAsyncLifetime, IDisposable
 		{
 			File.SetUnixFileMode(vendorDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 		}
+	}
+
+	// ----- issue #1702: pin the rootDegraded half of the orphan gate ---------------
+
+	/// <summary>
+	/// Issue #1702: the <c>rootDegraded</c> half of the orphan gate
+	/// (<c>IReadOnlyList&lt;string&gt; orphanScanVendorCodes = rootDegraded ? [] : metadata.VendorCodes;</c>)
+	/// was not pinned by any test that actually fails when that guard is removed --
+	/// every prior root-degraded test's mode-0200 fixture also made
+	/// <c>Directory.Exists(vendorDir)</c> false, so the orphan loop was inert by
+	/// accident of filesystem permissions rather than by the guard, and this test
+	/// would pass in both configurations. This drives the reconciler against a stub
+	/// <see cref="IEsxPatchStoreMetadataParser"/> that reports <c>RootReadable: false</c>
+	/// alongside a real, readable vendor directory containing an unreferenced zip on
+	/// disk, so removing the guard flips <c>NewOrphanCount</c> from 0 to 1 -- and does
+	/// not depend on permission modes, so it also runs on Windows.
+	/// </summary>
+	[Fact]
+	public async Task ReconcileAsync_RootDegradedWithReadableVendorDirectory_SkipsOrphanScanRatherThanOpeningOrphans()
+	{
+		string vendorDir = Path.Combine(_hostupdateDir, "vmw");
+		Directory.CreateDirectory(vendorDir);
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-unreferenced.zip"));
+
+		EsxPatchStoreMetadata stubMetadata = new(
+			StoreRoot: _root,
+			Layout: EsxPatchStoreLayout.Legacy,
+			HostupdateRoot: _hostupdateDir,
+			VendorCodes: ["vmw"],
+			Bundles: [],
+			Warnings: ["Could not list vendor directories under '<root>/hostupdate': stubbed root-degraded parse."],
+			RootReadable: false,
+			VendorHealth: [],
+			UnresolvedReferences: []);
+		EsxPatchStoreReconciler reconciler = new(
+			_fixture.ConnectionString, new StubEsxPatchStoreMetadataParser(EsxPatchStoreParseResult.Ok(stubMetadata)));
+
+		EsxPatchStoreReconciliationReport report = await reconciler.ReconcileAsync(_root, null, CancellationToken.None);
+
+		Assert.True(report.Succeeded);
+		// The assertion that actually goes red when `rootDegraded ? [] :` is removed:
+		// with the guard present, the readable vendor directory's unreferenced zip is
+		// never scanned; with it removed, the orphan loop would reach vmw/ (VendorCodes
+		// names it, Directory.Exists(vendorDir) is true here on purpose) and record it.
+		Assert.Equal(0, report.NewOrphanCount);
+		Assert.Contains(report.ReconcilerWarnings, w => w.Contains("Orphan-discrepancy detection skipped entirely this run"));
+		(int orphanCount, string? _, bool _) = await ReadFirstDiscrepancyAsync(EsxPatchStoreDiscrepancyType.Orphan);
+		Assert.Equal(0, orphanCount);
+	}
+
+	/// <summary>Minimal stub for #1702 -- returns a fixed <see cref="EsxPatchStoreParseResult"/> regardless of input, so the reconciler's own gating logic (not a real filesystem probe) is what the test above exercises.</summary>
+	private sealed class StubEsxPatchStoreMetadataParser(EsxPatchStoreParseResult result) : IEsxPatchStoreMetadataParser
+	{
+		public EsxPatchStoreParseResult Parse(string storeRoot, EsxPatchStoreLayout? layout = null) => result;
 	}
 }
