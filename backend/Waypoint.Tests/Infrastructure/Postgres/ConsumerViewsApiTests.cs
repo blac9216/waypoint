@@ -32,8 +32,11 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #1464 end to end against real Postgres: the <c>/consumer-views</c> surface --
 /// EVERY verb (including read) is Admin-only per decision R2-10, an unknown platform
-/// key is a 400, and exactly one default view is enforced with a 409, provable through
-/// the real HTTP surface.
+/// key is a 400, and the exactly-one-default invariant holds in both directions
+/// through the real HTTP surface: marking another view <c>is_default: true</c> MOVES
+/// the default (200/201, exactly one default afterwards), while clearing or deleting
+/// the view that holds it is a 409. Every test starts from migration 0131's seeded
+/// default row -- the production-reachable state (PR #1816 round 2 Spec finding 1).
 /// </summary>
 [Collection("Postgres")]
 #pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync tears down client/factory.
@@ -86,7 +89,7 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
 		await migrator.ApplyAsync();
-		await ResetAsync();
+		await ResetToSeededStateAsync();
 
 		_factory = new ConsumerViewsApiFactory(_fixture.ConnectionString);
 		_client = _factory.CreateClient();
@@ -99,11 +102,28 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		return Task.CompletedTask;
 	}
 
-	private async Task ResetAsync()
+	/// <summary>
+	/// Resets to the state a real deployment is actually in: migration 0131's seeded
+	/// default row present and holding the default, and nothing else (PR #1816 round 2
+	/// Spec finding 1 -- both suites previously did a bare `DELETE FROM consumer_views`,
+	/// so every CRUD test ran from a zero-default state production can never reach,
+	/// which is exactly why a total default-transfer deadlock survived two review
+	/// rounds). The seeded row is re-inserted and re-promoted rather than assumed
+	/// intact, because tests legitimately move the default off it and then delete it.
+	/// </summary>
+	private async Task ResetToSeededStateAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand command = new("DELETE FROM consumer_views", connection);
+		await using NpgsqlCommand command = new(
+			"""
+			DELETE FROM consumer_views WHERE id <> '00000000-0000-0000-0000-000000000001';
+			INSERT INTO consumer_views (id, name, platforms, is_default)
+			VALUES ('00000000-0000-0000-0000-000000000001', 'Default (unfiltered)', '{}', true)
+			ON CONFLICT (id) DO NOTHING;
+			UPDATE consumer_views SET name = 'Default (unfiltered)', platforms = '{}', is_default = true
+			WHERE id = '00000000-0000-0000-0000-000000000001';
+			""", connection);
 		await command.ExecuteNonQueryAsync();
 	}
 
@@ -204,27 +224,52 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
 	}
 
-	/// <summary>Issue #1464 AC: exactly one default view, provable via the API's own 409.</summary>
+	/// <summary>
+	/// PR #1816 round 2 Spec finding 1: the fixture starts from migration 0131's seeded
+	/// default row -- the state a real deployment is in -- not a wiped table. Pinned so
+	/// a regression of the fixture back to `DELETE FROM consumer_views` fails loudly.
+	/// </summary>
 	[Fact]
-	public async Task PostView_SecondDefault_Returns409()
+	public async Task ListViews_AtFixtureStart_ContainsOnlyTheSeededDefault()
 	{
-		await CreateViewAsync("First default", [], isDefault: true);
+		HttpRequestMessage list = new(HttpMethod.Get, "/api/v1/consumer-views");
+		list.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(list);
 
-		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/consumer-views")
-		{
-			Content = JsonBody(new { name = "Second default", platforms = Array.Empty<string>(), is_default = true }),
-		};
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
-		HttpResponseMessage response = await _client.SendAsync(request);
-
-		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement only = Assert.Single(document.RootElement.EnumerateArray());
+		Assert.Equal(SeededDefaultId, only.GetProperty("id").GetString());
+		Assert.True(only.GetProperty("is_default").GetBoolean());
 	}
 
+	/// <summary>
+	/// Issue #1464 AC 2 over real HTTP, PR #1816 round 2 Spec finding 1: POSTing a view
+	/// with <c>is_default: true</c> while the seeded row holds the default MOVES the
+	/// default (201), rather than the 409 round 1 returned -- which made every
+	/// <c>is_default: true</c> write dead in production. Exactly one default afterwards.
+	/// </summary>
 	[Fact]
-	public async Task PutView_SettingDefaultWhenAnotherIsDefault_Returns409()
+	public async Task PostView_WithIsDefaultTrue_MovesTheDefaultAndReturns201()
 	{
-		await CreateViewAsync("First default", [], isDefault: true);
-		(_, string secondId) = await CreateViewAsync("Not default", [], isDefault: false);
+		(HttpResponseMessage response, string id) = await CreateViewAsync("Operator default", [], isDefault: true);
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+		IReadOnlyList<JsonElement> defaults = await ListDefaultsAsync();
+		JsonElement only = Assert.Single(defaults);
+		Assert.Equal(id, only.GetProperty("id").GetString());
+	}
+
+	/// <summary>
+	/// Issue #1464 AC 2 over real HTTP, PR #1816 round 2 Spec finding 1: the PUT that
+	/// round 1 refused with 409 <c>default_already_set</c>. Promoting another view is
+	/// the supported move -- 200, the promoted view is default, the previous default is
+	/// not, and exactly one row is default.
+	/// </summary>
+	[Fact]
+	public async Task PutView_PromotingAnotherView_MovesTheDefaultAndReturns200()
+	{
+		(_, string secondId) = await CreateViewAsync("Operator view", [], isDefault: false);
 
 		HttpRequestMessage put = new(HttpMethod.Put, $"/api/v1/consumer-views/{secondId}")
 		{
@@ -233,7 +278,34 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		put.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
 		HttpResponseMessage response = await _client.SendAsync(put);
 
-		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument promoted = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.True(promoted.RootElement.GetProperty("is_default").GetBoolean());
+
+		IReadOnlyList<JsonElement> defaults = await ListDefaultsAsync();
+		JsonElement only = Assert.Single(defaults);
+		Assert.Equal(secondId, only.GetProperty("id").GetString());
+		Assert.False(await IsDefaultAsync(SeededDefaultId));
+	}
+
+	/// <summary>
+	/// The whole operator story end to end, which round 1 made impossible in both
+	/// orders (PR #1816 round 2 Spec finding 1): move the default onto a new view, then
+	/// delete the seeded row that used to hold it. Both steps succeed and exactly one
+	/// default survives.
+	/// </summary>
+	[Fact]
+	public async Task PutThenDelete_MovingTheDefaultThenDeletingThePreviousDefault_Succeeds()
+	{
+		(_, string id) = await CreateViewAsync("Operator default", [], isDefault: true);
+
+		HttpRequestMessage delete = new(HttpMethod.Delete, $"/api/v1/consumer-views/{SeededDefaultId}");
+		delete.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage deleteResponse = await _client.SendAsync(delete);
+
+		Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+		JsonElement only = Assert.Single(await ListDefaultsAsync());
+		Assert.Equal(id, only.GetProperty("id").GetString());
 	}
 
 	[Fact]
@@ -375,6 +447,8 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		Assert.Empty(document.RootElement.GetProperty("platforms").EnumerateArray());
 	}
 
+	private const string SeededDefaultId = "00000000-0000-0000-0000-000000000001";
+
 	private static readonly string[] SingleValidPlatform = ["embeddedEsx-7.0-INTL"];
 	private static readonly string[] SingleUnknownPlatform = ["not-a-real-platform"];
 
@@ -390,6 +464,27 @@ public sealed class ConsumerViewsApiTests : IAsyncLifetime
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		string id = document.RootElement.GetProperty("id").GetString()!;
 		return (response, id);
+	}
+
+	/// <summary>Every view currently flagged <c>is_default</c>, read back over the API -- the "exactly one" assertion the move tests make.</summary>
+	private async Task<IReadOnlyList<JsonElement>> ListDefaultsAsync()
+	{
+		HttpRequestMessage list = new(HttpMethod.Get, "/api/v1/consumer-views");
+		list.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(list);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		return [.. document.RootElement.EnumerateArray()
+			.Where(item => item.GetProperty("is_default").GetBoolean())
+			.Select(item => item.Clone())];
+	}
+
+	private async Task<bool> IsDefaultAsync(string id)
+	{
+		HttpRequestMessage get = new(HttpMethod.Get, $"/api/v1/consumer-views/{id}");
+		get.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(get);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		return document.RootElement.GetProperty("is_default").GetBoolean();
 	}
 
 	private static StringContent JsonBody(object value) =>

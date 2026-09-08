@@ -67,11 +67,14 @@ public sealed class ConsumerViewsController : ControllerBase
 	/// <summary>
 	/// Creates a view. Every requested platform key must be a member of the static
 	/// <see cref="ConsumerViewPlatformVocabulary"/> (issue #1464 AC) -- an unrecognized
-	/// key is a 400, not a silently accepted value. <c>is_default: true</c> is
-	/// rejected with 409 when a different view already holds the default (issue #1464
-	/// AC "exactly one default" -- checked here AND enforced at the database by
-	/// migration 0131's partial unique index; a same-request race lands on the
-	/// database's own 23505 via <see cref="ConsumerViewDefaultConflictException"/>).
+	/// key is a 400, not a silently accepted value. <c>is_default: true</c> MOVES the
+	/// default onto the new view: the repository demotes the incumbent default and
+	/// inserts this row already-default inside one transaction, so the "exactly one
+	/// default at any time" invariant (issue #1464 AC 2) holds throughout and a caller
+	/// never has to unset the old default first. Migration 0131's partial unique index
+	/// still backstops it: a writer that bypasses the repository's transfer lock and
+	/// races in a second default lands on the database's own 23505, surfaced as 409
+	/// <c>default_already_set</c> via <see cref="ConsumerViewDefaultConflictException"/>.
 	/// </summary>
 	[HttpPost]
 	[RequireAdminRole]
@@ -88,10 +91,6 @@ public sealed class ConsumerViewsController : ControllerBase
 		ValidateAgainstVocabulary(platforms);
 
 		bool isDefault = request.IsDefault ?? false;
-		if (isDefault)
-		{
-			await EnsureNoOtherDefaultAsync(currentId: null, cancellationToken).ConfigureAwait(false);
-		}
 
 		ConsumerView created;
 		try
@@ -114,11 +113,13 @@ public sealed class ConsumerViewsController : ControllerBase
 	/// <summary>
 	/// Partial update, same leave-unspecified-columns-alone convention as
 	/// <see cref="EsxAcquisitionController.UpdateSubscription"/>. Setting
-	/// <c>is_default: true</c> is rejected with 409 <c>default_already_set</c> unless
-	/// this row is already the default; explicitly setting <c>is_default: false</c> on
-	/// the sole default row is rejected with 409 <c>default_required</c> (issue #1464
-	/// AC "exactly one default at any time" -- the default can be moved, never
-	/// cleared outright).
+	/// <c>is_default: true</c> is the supported way to MOVE the default: the repository
+	/// demotes whichever row currently holds it and promotes this one inside a single
+	/// transaction, so the move is atomic and needs no prior unset (200, not 409).
+	/// Explicitly setting <c>is_default: false</c> on the sole default row is still
+	/// rejected with 409 <c>default_required</c>, and so is deleting it -- those really
+	/// would leave zero defaults, whereas a move never does (issue #1464 AC 2 "exactly
+	/// one default at any time": the default can be moved, never cleared outright).
 	/// </summary>
 	[HttpPut("{id:guid}")]
 	[RequireAdminRole]
@@ -139,11 +140,6 @@ public sealed class ConsumerViewsController : ControllerBase
 		if (request.Platforms is not null)
 		{
 			ValidateAgainstVocabulary(request.Platforms);
-		}
-
-		if (request.IsDefault == true)
-		{
-			await EnsureNoOtherDefaultAsync(currentId: id, cancellationToken).ConfigureAwait(false);
 		}
 
 		ConsumerView? updated;
@@ -174,9 +170,11 @@ public sealed class ConsumerViewsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Deletes a view. The sole default view can never be deleted (409
+	/// Deletes a view. The view currently holding the default can never be deleted (409
 	/// <c>default_required</c>, issue #1464 AC "exactly one default at any time") --
-	/// mark a different view as the default first.
+	/// mark a different view as the default first (a single
+	/// <c>PUT {"is_default": true}</c> on that other view, which moves the default
+	/// atomically), then delete this one.
 	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireAdminRole]
@@ -216,24 +214,6 @@ public sealed class ConsumerViewsController : ControllerBase
 			throw ApiException.Validation(
 				"One or more platform keys are not in the known platform vocabulary.",
 				$"Unknown platform key(s): {string.Join(", ", unknown)}.");
-		}
-	}
-
-	/// <summary>
-	/// API-layer half of the exactly-one-default guarantee (issue #1464 AC): 409 when
-	/// a different row already has <c>is_default = true</c>. <paramref name="currentId"/>
-	/// is null on create (any existing default is a conflict) or the row's own id on
-	/// update (that row itself is not a conflict with itself).
-	/// </summary>
-	private async Task EnsureNoOtherDefaultAsync(Guid? currentId, CancellationToken cancellationToken)
-	{
-		IReadOnlyList<ConsumerView> views = await _views.ListAsync(cancellationToken).ConfigureAwait(false);
-		bool otherDefaultExists = views.Any(view => view.IsDefault && view.Id != currentId);
-		if (otherDefaultExists)
-		{
-			throw new ApiException(
-				HttpStatusCode.Conflict, "default_already_set",
-				"Another consumer view is already marked as the default. Unset it before marking a new default.");
 		}
 	}
 }

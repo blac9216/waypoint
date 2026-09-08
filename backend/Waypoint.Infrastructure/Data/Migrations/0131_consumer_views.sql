@@ -25,16 +25,23 @@
 --      nothing to forbid ZERO defaults.
 --   2. AT LEAST one -- enforced by seeding the well-known default row below
 --      (id 00000000-0000-0000-0000-000000000001, name 'Default (unfiltered)') and by
---      the API/repository refusing to delete that row or clear its `is_default` while
---      it is the sole default (409 `default_required`,
+--      the API/repository refusing to delete the row that currently holds the default
+--      or clear its `is_default` (409 `default_required`,
 --      ConsumerViewsController.Delete/Update via
---      ConsumerViewRepository.DeleteAsync/UpdateAsync) -- so the default can only be
---      MOVED (mark a different row default, which the "at most one" guard above still
---      polices), never removed outright.
--- The API additionally rejects a second default with 409 `default_already_set`
--- before ever reaching the database (belt and suspenders --
--- ConsumerViewsController.EnsureNoOtherDefaultAsync), so all of these are
--- independently provable in CI per the issue's own AC.
+--      ConsumerViewRepository.DeleteAsync/UpdateAsync) -- those two writes really
+--      would leave zero defaults.
+-- MOVING the default is therefore the operation that makes both halves satisfiable at
+-- once, and it is a first-class supported write rather than a refusal: marking a
+-- different row `is_default: true` (POST or PUT) makes
+-- ConsumerViewRepository.CreateAsync/UpdateAsync demote the incumbent and promote the
+-- target inside ONE transaction, serialised against concurrent transfers by a
+-- transaction-scoped advisory lock, so the table is never observable with zero or two
+-- defaults and no caller must (or can) unset the old default first. Without that
+-- transfer the two halves above would deadlock each other -- PR #1816 round 2 Spec
+-- finding 1, where a seeded deployment could never move its default at all. A second
+-- default that somehow bypasses that transaction still hits the partial unique index
+-- below (23505 -> 409 `default_already_set`), so every one of these is independently
+-- provable in CI per the issue's own AC.
 --
 -- Platform-key validation (values must be members of the static #1156-reconciliation
 -- vocabulary -- e.g. `embeddedEsx-7.0-INTL` -- see
@@ -80,7 +87,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_consumer_views_default_unique
     WHERE is_default;
 
 -- AT LEAST one default/unfiltered view at any time (issue #1464 AC, half 2 of 2): the
--- well-known shipped default row. Fixed id so tests and any future migration can
+-- well-known shipped default row (which a later `is_default: true` write on another
+-- row may MOVE the default away from -- this row is the starting default, not a
+-- permanently pinned one). Fixed id so tests and any future migration can
 -- reference it unambiguously; ON CONFLICT DO NOTHING makes this idempotent across
 -- re-runs. Empty `platforms` means "all platforms, no filtering" (see above).
 INSERT INTO consumer_views (id, name, platforms, is_default)
@@ -88,11 +97,11 @@ VALUES ('00000000-0000-0000-0000-000000000001', 'Default (unfiltered)', '{}', tr
 ON CONFLICT (id) DO NOTHING;
 
 COMMENT ON TABLE consumer_views IS
-    'Issue #1464: operator-defined named ESX platform-set views. AT MOST one row may have is_default = true (idx_consumer_views_default_unique, database); EXACTLY one at any time is enforced by the seeded default row (id 00000000-0000-0000-0000-000000000001) plus the API/repository refusing to delete it or clear its is_default while it is the sole default (409 default_required). Model/API only -- no generation or serving logic reads this table yet.';
+    'Issue #1464: operator-defined named ESX platform-set views. AT MOST one row may have is_default = true (idx_consumer_views_default_unique, database); EXACTLY one at any time is enforced by the seeded default row (id 00000000-0000-0000-0000-000000000001) plus the API/repository refusing to delete the row currently holding the default or clear its is_default (409 default_required). The default is MOVED by marking another row is_default = true, which the repository performs as one transaction (demote incumbent, promote target), so it is never pinned to the seeded row. Model/API only -- no generation or serving logic reads this table yet.';
 COMMENT ON COLUMN consumer_views.platforms IS
     'Ordered platform keys (e.g. embeddedEsx-7.0-INTL), validated at write time against the static vocabulary in Waypoint.Core.Downloads.ConsumerViewPlatformVocabulary -- never a schema-level CHECK, matching esx_acquisition_subscriptions.selected_platforms (migration 0117). Empty is explicitly allowed and means "all platforms, no filtering."';
 COMMENT ON COLUMN consumer_views.is_default IS
-    'Marks the single view representing the unfiltered/default store. Modeled as a boolean singleton on an ordinary row, never a special-cased absence -- a zero-default state is unreachable via the API/repository (see idx_consumer_views_default_unique for at-most-one and the seeded row plus delete/clear refusals for at-least-one).';
+    'Marks the single view representing the unfiltered/default store. Modeled as a boolean singleton on an ordinary row, never a special-cased absence -- a zero-default state is unreachable via the API/repository (see idx_consumer_views_default_unique for at-most-one and the seeded row plus delete/clear refusals for at-least-one), while marking another row is_default = true moves the flag atomically inside one transaction.';
 
 CREATE OR REPLACE TRIGGER trg_consumer_views_updated_at
     BEFORE UPDATE ON consumer_views

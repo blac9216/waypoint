@@ -34,13 +34,15 @@ namespace Waypoint.Core.Downloads;
 /// Marks the single view representing the unfiltered/default store -- a boolean
 /// singleton on an ordinary row, never a special-cased absence (issue #1464 AC).
 /// "Exactly one row has this set to <c>true</c> at any time" is two layered
-/// guarantees, not one: migration 0131's partial unique index enforces AT MOST one
-/// (a second <c>is_default: true</c> write is a 409 <c>default_already_set</c> via
-/// <c>ConsumerViewsController</c>'s write-path check); the seeded
-/// <see cref="DefaultViewId"/> row plus the repository/API refusing to delete it or
-/// clear <c>is_default</c> while it is the sole default (409 <c>default_required</c>)
-/// enforce AT LEAST one. Together the default can be MOVED (mark a different row
-/// default first), never removed outright.
+/// guarantees, not one: migration 0131's partial unique index enforces AT MOST one;
+/// the seeded <see cref="DefaultViewId"/> row plus the repository/API refusing to
+/// delete a row that currently holds the default or clear its <c>is_default</c> (409
+/// <c>default_required</c>) enforce AT LEAST one. Marking a DIFFERENT row
+/// <c>is_default: true</c> is neither a conflict nor a two-step dance: the repository
+/// demotes the incumbent and promotes the target inside one transaction, so the
+/// default MOVES atomically -- the table passes through no state with zero or two
+/// defaults, and no caller ever has to (or can) unset the old default first. So the
+/// default can always be moved, never removed outright.
 /// </param>
 public sealed record ConsumerView(
 	Guid Id,

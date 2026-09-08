@@ -27,6 +27,18 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 	private const string NameUniqueIndex = "idx_consumer_views_name_unique";
 	private const string DefaultUniqueIndex = "idx_consumer_views_default_unique";
 
+	// Advisory-lock key serialising default-view TRANSFERS against each other (issue
+	// #1464 AC "exactly one default at any time"; PR #1816 round 2 Spec finding 1). A
+	// transfer is demote-incumbent-then-promote-target inside one transaction; two
+	// concurrent transfers that interleaved their scans could each miss the other's
+	// not-yet-committed promotion and race the partial unique index into a 23505.
+	// Taking this transaction-scoped advisory lock first makes transfers strictly
+	// serial, so the 23505 path stays a genuine belt-and-braces backstop (a raw
+	// writer that never took the lock) rather than a routine outcome. Same
+	// pg_advisory_*-lock idiom as NpgsqlSchemaMigrator's own migration lock; the key
+	// is this table's owning issue number and is not shared with any other call site.
+	private const long DefaultTransferLockKey = 1464L;
+
 	private const string ProjectionSql = """
 		SELECT id, name, platforms, is_default, created_at, updated_at
 		FROM consumer_views
@@ -48,21 +60,51 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Creating a row with is_default = true is a TRANSFER of the default, not a
+		// conflict (issue #1464 AC 2 "exactly one view CAN BE MARKED as the default at
+		// any time"; PR #1816 round 2 Spec finding 1): inside ONE transaction the
+		// incumbent default is demoted and the new row is inserted already-default, so
+		// the table is never observable by another session with zero or two defaults.
+		// Non-default creates need no transaction at all and keep the single-statement
+		// path.
+		await using NpgsqlTransaction? transaction = isDefault
+			? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)
+			: null;
+		if (transaction is not null)
+		{
+			await LockDefaultTransferAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+			await DemoteCurrentDefaultAsync(connection, transaction, exceptId: null, cancellationToken).ConfigureAwait(false);
+		}
+
 		await using NpgsqlCommand command = new(
 			$"""
 			INSERT INTO consumer_views (name, platforms, is_default)
 			VALUES ($1, $2, $3)
 			RETURNING id, name, platforms, is_default, created_at, updated_at
-			""", connection);
+			""", connection, transaction);
 		command.Parameters.AddWithValue(name);
 		command.Parameters.AddWithValue(platforms.ToArray());
 		command.Parameters.AddWithValue(isDefault);
 
 		try
 		{
-			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-			return Map(reader);
+			ConsumerView created;
+			await using (NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+			{
+				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+				created = Map(reader);
+			}
+
+			// Nothing is committed until here, so a failed insert (duplicate name,
+			// cancellation) rolls the demotion back with it -- the incumbent keeps the
+			// default rather than the table being left with none.
+			if (transaction is not null)
+			{
+				await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+			}
+
+			return created;
 		}
 		catch (PostgresException ex) when (ex.SqlState == "23505")
 		{
@@ -106,12 +148,28 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
+		// is_default: true is a TRANSFER of the default to this row (issue #1464 AC 2;
+		// PR #1816 round 2 Spec finding 1) -- inside ONE transaction the incumbent
+		// default (if any, and if it is not this row already) is demoted first and this
+		// row is promoted second, so no other session ever observes zero or two
+		// defaults. Any other write (is_default false or unspecified) needs no
+		// transaction and keeps the single-statement path below.
+		await using NpgsqlTransaction? transaction = isDefault == true
+			? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)
+			: null;
+		if (transaction is not null)
+		{
+			await LockDefaultTransferAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+			await DemoteCurrentDefaultAsync(connection, transaction, exceptId: id, cancellationToken).ConfigureAwait(false);
+		}
+
 		// Atomic, race-safe refusal (issue #1464 AC "exactly one default at any
 		// time"): the WHERE clause excludes this row from the update when it is
 		// CURRENTLY the default (is_default) and the requested new value would clear
 		// it (COALESCE($3, is_default) = false -- COALESCE means an unspecified
 		// isDefault ($3 IS NULL) always resolves to the row's own current value, so a
-		// write that never touches is_default can never trip this). A row that exists
+		// write that never touches is_default can never trip this). It never blocks a
+		// promotion ($3 = true), which is the transfer path above. A row that exists
 		// but does not match is indistinguishable at this point from a nonexistent
 		// row; ExistsAsync below disambiguates only when needed.
 		await using NpgsqlCommand command = new(
@@ -122,7 +180,7 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 				is_default = COALESCE($3, is_default)
 			WHERE id = $4 AND NOT (is_default AND COALESCE($3, is_default) = false)
 			RETURNING id, name, platforms, is_default, created_at, updated_at
-			""", connection);
+			""", connection, transaction);
 		command.Parameters.AddWithValue((object?)name ?? DBNull.Value);
 		command.Parameters.Add(new NpgsqlParameter
 		{
@@ -134,10 +192,31 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 
 		try
 		{
-			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			ConsumerView? updated = null;
+			await using (NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
 			{
-				return Map(reader);
+				if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+				{
+					updated = Map(reader);
+				}
+			}
+
+			if (updated is not null)
+			{
+				if (transaction is not null)
+				{
+					await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+				}
+
+				return updated;
+			}
+
+			// On the transfer path a missing row means the caller asked to promote an
+			// id that does not exist: roll the demotion back rather than leaving the
+			// table with no default at all, then fall through to the 404 return below.
+			if (transaction is not null)
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
 			}
 		}
 		catch (PostgresException ex) when (ex.SqlState == "23505")
@@ -183,6 +262,42 @@ public sealed class ConsumerViewRepository : IConsumerViewRepository
 		}
 
 		return false;
+	}
+
+	/// <summary>
+	/// Serialises default-view transfers (see <see cref="DefaultTransferLockKey"/>).
+	/// Transaction-scoped, so it is released by the COMMIT/ROLLBACK that follows it and
+	/// can never be leaked by an early return or a thrown exception.
+	/// </summary>
+	private static async Task LockDefaultTransferAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new("SELECT pg_advisory_xact_lock($1)", connection, transaction);
+		command.Parameters.AddWithValue(DefaultTransferLockKey);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Clears <c>is_default</c> on whichever row currently holds it, skipping
+	/// <paramref name="exceptId"/> (the row about to be promoted, so re-promoting the
+	/// existing default is a no-op rather than a demote-then-promote of the same row).
+	/// Only ever called inside the caller's transfer transaction: the zero-default
+	/// state it creates exists solely between this statement and the promotion that
+	/// follows, and is never visible to another session.
+	/// </summary>
+	private static async Task DemoteCurrentDefaultAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid? exceptId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new(
+			"UPDATE consumer_views SET is_default = false WHERE is_default AND ($1 IS NULL OR id <> $1)",
+			connection,
+			transaction);
+		command.Parameters.Add(new NpgsqlParameter
+		{
+			Value = (object?)exceptId ?? DBNull.Value,
+			NpgsqlDbType = NpgsqlDbType.Uuid,
+		});
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	private static async Task<bool> ExistsAsync(NpgsqlConnection connection, Guid id, CancellationToken cancellationToken)
