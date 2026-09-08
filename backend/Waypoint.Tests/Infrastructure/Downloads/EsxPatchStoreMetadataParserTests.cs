@@ -459,7 +459,14 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 
 		Assert.True(result.Succeeded);
 		Assert.Empty(result.Metadata!.Bundles);
-		Assert.Contains(result.Metadata.Warnings, w => w.Contains("Consolidated index not found"));
+		Assert.Single(result.Metadata.Warnings);
+
+		// Issue #1658 AC1: when the hostupdate/ root itself WAS readable (this is an
+		// empty store, not a permissions failure), the directory listing genuinely is
+		// a working fallback for the vendor list, so the warning must say so.
+		Assert.Contains(
+			result.Metadata.Warnings,
+			w => w.Contains("Consolidated index not found") && w.Contains("vendor list will come from the directory listing only"));
 	}
 
 	/// <summary>
@@ -498,12 +505,14 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 				w => w.Contains("Could not list vendor directories") && w.Contains(hostupdateDir));
 
 			// The empty-store case (Parse_EmptyStore_SucceedsWithNoBundlesAndAWarning)
-			// produces exactly one warning; an unreadable store must produce a second,
-			// distinguishing warning naming the enumeration failure -- not just the
-			// "not found" warning that an empty store would also emit.
-			Assert.True(
-				result.Metadata.Warnings.Count >= 2,
-				$"expected an enumeration-failure warning in addition to any consolidated-index warning, got: {string.Join(" | ", result.Metadata.Warnings)}");
+			// produces exactly one warning; an unreadable store produces exactly two --
+			// the enumeration-failure warning above, plus a "not found" warning for the
+			// consolidated index that (issue #1658 AC1) must NOT claim the directory
+			// listing is a working fallback, since that listing failed too.
+			Assert.Equal(2, result.Metadata.Warnings.Count);
+			Assert.Contains(
+				result.Metadata.Warnings,
+				w => w.Contains("Consolidated index not found") && !w.Contains("vendor list will come from the directory listing only"));
 		}
 		finally
 		{
@@ -688,5 +697,51 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		EsxPatchStoreVibReference vibReference = Assert.Single(bundle.Vibs);
 		Assert.Equal("vib20/esx-update/pkg.vib", vibReference.RelativePath);
 		Assert.Null(vibReference.ChecksumSha256);
+	}
+
+	// ----- issue #1641 AC1: the size cap is bound on file bytes, not decoded chars --
+
+	/// <summary>
+	/// Issue #1641 AC1: <see cref="EsxPatchStoreMetadataParser.MaxXmlBytes"/> must be
+	/// checked against the file's on-disk byte size (<see cref="FileInfo.Length"/>)
+	/// BEFORE the content is decoded and read into memory -- not against the decoded
+	/// UTF-16 character count, which can be materially smaller than the byte count for
+	/// any non-ASCII content. This fixture pads a vendor consolidated metadata index
+	/// with a two-byte-per-character UTF-8 comment: on disk it is larger than
+	/// <see cref="EsxPatchStoreMetadataParser.MaxXmlBytes"/>, but once decoded its
+	/// UTF-16 character count is under <see cref="EsxPatchStoreMetadataParser.MaxXmlCharacters"/>
+	/// -- so a char-based (rather than byte-based) cap would never catch it, and the
+	/// parser would materialise the whole oversized file into memory before parsing it.
+	/// </summary>
+	[Fact]
+	public void Parse_VendorIndexOversizedInBytesButNotInDecodedChars_IsRejectedOnFileSizeNotCharCount()
+	{
+		string hostupdateDir = Path.Combine(_root, "hostupdate");
+		WriteConsolidatedIndex(hostupdateDir, "vmw");
+		string vendorDir = WriteVendorMetadataIndex(hostupdateDir, "vmw", "metadata-a.zip");
+		WriteMetadataZip(Path.Combine(vendorDir, "metadata-a.zip"), [("vib20/esx-update/pkg-a.vib", "aa".PadRight(64, '0'))]);
+
+		string indexPath = Path.Combine(vendorDir, "__hostupdate20-consolidated-metadata-index__.xml");
+
+		// 'é' (U+00E9) is 2 bytes in UTF-8 but decodes to exactly 1 UTF-16 char, so N
+		// repetitions write ~2N bytes to disk but decode to ~N chars. Choose N so that
+		// 2N clears MaxXmlBytes while N stays under MaxXmlCharacters.
+		int charCount = (EsxPatchStoreMetadataParser.MaxXmlCharacters / 2) + 100_000;
+		string padding = new string('é', charCount);
+		string content = $"<metadataList><!--{padding}--></metadataList>";
+		File.WriteAllText(indexPath, content);
+
+		long onDiskBytes = new FileInfo(indexPath).Length;
+		Assert.True(onDiskBytes > EsxPatchStoreMetadataParser.MaxXmlBytes, $"fixture must exceed the byte bound on disk, was {onDiskBytes} bytes");
+		Assert.True(content.Length < EsxPatchStoreMetadataParser.MaxXmlCharacters, $"fixture must stay under the char bound once decoded, was {content.Length} chars");
+
+		EsxPatchStoreParseResult result = _parser.Parse(_root);
+
+		Assert.True(result.Succeeded);
+		Assert.Empty(result.Metadata!.Bundles);
+		EsxPatchStoreVendorHealth health = Assert.Single(result.Metadata.VendorHealth);
+		Assert.Equal("vmw", health.VendorCode);
+		Assert.Equal(EsxPatchStoreVendorHealthKind.MalformedIndex, health.Kind);
+		Assert.Contains(result.Metadata.Warnings, w => w.Contains("byte-size bound -- not read"));
 	}
 }
