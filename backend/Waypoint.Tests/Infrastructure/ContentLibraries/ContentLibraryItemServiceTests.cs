@@ -281,6 +281,85 @@ public sealed class ContentLibraryItemServiceTests : IAsyncLifetime
 		Assert.Equal(itemsBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json")));
 	}
 
+	// ---- the name-length bound (review round 2 relay, F4) ---------------------------
+	//
+	// The service writes each payload through a same-directory temp component whose
+	// name is `.<fileName>.<32-hex guid>.tmp` -- 38 bytes of decoration around the
+	// caller's own name. Linux NAME_MAX is 255 bytes per component, so the longest
+	// name the service can actually store is 255 - 38 = 217 bytes; one byte more is
+	// admitted by every other clause of the guard yet cannot be written, and before
+	// the bound existed it failed as a PathTooLongException out of the FileStream
+	// constructor (a 500 under #1826's surface) after AddAsync had already created the
+	// item's directory. These four cases pin both sides of that boundary on both entry
+	// points. The service derives the bound from its own temp format; the numbers are
+	// restated here deliberately, so a change to that format has to be a conscious one.
+
+	private const int LongestWritableFileNameLength = 217;
+
+	private static string FileNameOfLength(int length) => new string('a', length - ".iso".Length) + ".iso";
+
+	[Fact]
+	public async Task AddAsync_AtTheLongestWritableFileName_StoresItAndRoundTripsThroughTheIndex()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-add");
+		string fileName = FileNameOfLength(LongestWritableFileNameLength);
+
+		(ContentLibraryItemOperationOutcome outcome, ContentLibraryItem? item) =
+			await _service.AddAsync(library.Id, fileName, ContentStream("bytes"), null, CancellationToken.None);
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.Equal(fileName, item!.Name);
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, item.DirectoryName, fileName)));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
+	[Fact]
+	public async Task AddAsync_OneByteBeyondTheLongestWritableFileName_IsRejectedWithoutLeavingADirectory()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-add-over");
+		int directoriesBefore = Directory.GetDirectories(library.DiskPath).Length;
+
+		// An ArgumentException, exactly like every other rejected name -- not the
+		// PathTooLongException the write would otherwise raise -- and raised early
+		// enough that no item directory is created for a request that cannot succeed.
+		await Assert.ThrowsAsync<ArgumentException>(() => _service.AddAsync(
+			library.Id, FileNameOfLength(LongestWritableFileNameLength + 1), ContentStream("bytes"), null, CancellationToken.None));
+
+		Assert.Equal(directoriesBefore, Directory.GetDirectories(library.DiskPath).Length);
+	}
+
+	[Fact]
+	public async Task UpdateAsync_AtTheLongestWritableFileName_StoresIt()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-update");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream("v1"), null, CancellationToken.None);
+		string fileName = FileNameOfLength(LongestWritableFileNameLength);
+
+		(ContentLibraryItemOperationOutcome outcome, ContentLibraryItem? updated) =
+			await _service.UpdateAsync(library.Id, added!.Id, fileName, ContentStream("v2"), null, CancellationToken.None);
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.Equal(fileName, updated!.Name);
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, updated.DirectoryName, fileName)));
+		Assert.False(File.Exists(Path.Combine(library.DiskPath, updated.DirectoryName, "disk.iso")));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
+	[Fact]
+	public async Task UpdateAsync_OneByteBeyondTheLongestWritableFileName_IsRejected()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-update-over");
+		(_, ContentLibraryItem? maybeAdded) = await _service.AddAsync(library.Id, "disk.iso", ContentStream("v1"), null, CancellationToken.None);
+		ContentLibraryItem added = maybeAdded!;
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _service.UpdateAsync(
+			library.Id, added.Id, FileNameOfLength(LongestWritableFileNameLength + 1), ContentStream("v2"), null, CancellationToken.None));
+
+		// The rejected update left the prior payload and the documents exactly as they were.
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, added.DirectoryName, "disk.iso")));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
 	// ---- payload atomicity and mutation ordering (review round 1, F2 and F3) --------
 
 	private const int LargePayloadLength = 2 * 1024 * 1024;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Security.Cryptography;
+using System.Text;
 using Waypoint.Core.ContentLibraries;
 
 namespace Waypoint.Infrastructure.ContentLibraries;
@@ -20,6 +21,13 @@ namespace Waypoint.Infrastructure.ContentLibraries;
 /// <inheritdoc cref="IContentLibraryItemService"/>
 public sealed class ContentLibraryItemService : IContentLibraryItemService
 {
+	/// <summary>
+	/// The per-component name limit every filesystem this service runs on enforces
+	/// (Linux <c>NAME_MAX</c>, in BYTES rather than characters -- hence the UTF-8 byte
+	/// count in <see cref="ValidateFileName"/> rather than a character count).
+	/// </summary>
+	private const int ComponentNameMaxBytes = 255;
+
 	private readonly IContentLibraryRepository _libraries;
 	private readonly IContentLibraryItemRepository _items;
 	private readonly IContentLibraryWriter _writer;
@@ -217,7 +225,7 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 		cancellationToken.ThrowIfCancellationRequested();
 
 		string filePath = ResolveItemFilePath(itemDirectory, fileName);
-		string tempPath = Path.Combine(itemDirectory, $".{fileName}.{Guid.NewGuid():N}.tmp");
+		string tempPath = Path.Combine(itemDirectory, TempFileName(fileName, Guid.NewGuid()));
 		using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 		long size = 0;
 
@@ -293,7 +301,33 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 		{
 			throw new ArgumentException($"'{fileName}' is not a valid item file name.", nameof(fileName));
 		}
+
+		// The longest component this service actually writes for a given name is not
+		// the name itself but its temp form -- so the admissible length is derived from
+		// TempFileName rather than stated as a number, and the two cannot drift if that
+		// format ever changes. Without this clause the guard admits names the writer
+		// then cannot write: the temp decoration pushes them past NAME_MAX and the
+		// FileStream constructor throws PathTooLongException deep inside the write,
+		// which is an unhandled I/O error to the caller (a 500 under #1826) instead of
+		// the validation failure every other bad name gets here, and in AddAsync it
+		// escapes after Directory.CreateDirectory has already run, orphaning an empty
+		// item directory. Rejecting up front is what keeps both from happening.
+		int writtenBytes = Encoding.UTF8.GetByteCount(TempFileName(fileName, Guid.Empty));
+		if (writtenBytes > ComponentNameMaxBytes)
+		{
+			throw new ArgumentException(
+				$"'{fileName}' is too long to store: writing it needs a {writtenBytes}-byte file name and the limit is {ComponentNameMaxBytes}.",
+				nameof(fileName));
+		}
 	}
+
+	/// <summary>
+	/// The same-directory temp component <see cref="WriteFileAsync"/> writes before
+	/// renaming it over the final path. Factored out so
+	/// <see cref="ValidateFileName"/> can measure the real thing rather than restate
+	/// its overhead as a constant.
+	/// </summary>
+	private static string TempFileName(string fileName, Guid token) => $".{fileName}.{token:N}.tmp";
 
 	/// <summary>
 	/// The rooted-resolution half of this repository's escape-guard convention, applied
