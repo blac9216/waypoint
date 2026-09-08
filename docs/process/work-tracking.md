@@ -96,7 +96,7 @@ implied by *Done*; *Verified* tracks only post-merge live proof.
 
 | Layer | Created by | Maintained by |
 |---|---|---|
-| Project | Account owner, once | Automation — items, fields, board state |
+| Project board | Account owner, once | Automation — items, fields, board state |
 | Milestone | Automation | Automation — description is the rolled-up context |
 | Epic | Automation | Automation — body and comment thread |
 | Issue | Anyone | Whoever holds the work |
@@ -111,10 +111,28 @@ still use those labels and are immutable.
 
 Project: [Waypoint #5](https://github.com/users/blac9216/projects/5) — owner `blac9216`; automation account `machine-blac9216` (collaborator write, Project admin). Project node id `PVT_kwHOBk6Ni84Bh1KM`.
 
-Board field ids (for scripts and dispatch prompts):
-- Status: `PVTSSF_lAHOBk6Ni84Bh1KMzhgvbx0` — Triage `ba46c696` · Backlog `cf9d586a` · Ready `fbc01657` · In progress `dd3068fc` · In review `8e6f938a` · Done `ba1cea35`
-- Verified: `PVTSSF_lAHOBk6Ni84Bh1KMzhgvyCs` — n/a `65ec945a` · pending-live `12747daa` · live-verified `fa561fb5` · live-failed `6d630399`
-- Claimed by: `PVTF_lAHOBk6Ni84Bh1KMzhgxG-o` (text; `waypoint-NN @ <ISO timestamp>`)
+Board and field ids (for scripts and dispatch prompts). The `github-workflow` scripts
+parse this table by exact row label — `| <Label> | \`<id>\` |` — so the table shape, not
+just the values, is what they read. Keep every row on one line, with the id as the row's
+sole backtick-quoted token.
+
+| Label | Id | What it is |
+|---|---|---|
+| Project | `PVT_kwHOBk6Ni84Bh1KM` | Project node id (Waypoint #5) |
+| Project number | `5` | Project number for the gh project CLI; owner blac9216 |
+| Status | `PVTSSF_lAHOBk6Ni84Bh1KMzhgvbx0` | Status single-select field |
+| Status: Triage | `ba46c696` | Status option |
+| Status: Backlog | `cf9d586a` | Status option |
+| Status: Ready | `fbc01657` | Status option |
+| Status: In progress | `dd3068fc` | Status option |
+| Status: In review | `8e6f938a` | Status option |
+| Status: Done | `ba1cea35` | Status option |
+| Verified | `PVTSSF_lAHOBk6Ni84Bh1KMzhgvyCs` | Verified single-select field |
+| Verified: n/a | `65ec945a` | Verified option |
+| Verified: pending-live | `12747daa` | Verified option |
+| Verified: live-verified | `fa561fb5` | Verified option |
+| Verified: live-failed | `6d630399` | Verified option |
+| Claimed by | `PVTF_lAHOBk6Ni84Bh1KMzhgxG-o` | Text field, holding waypoint-NN @ ISO-timestamp |
 
 Reviewer identity: none — single account; the `## PR Review — …` comment plus the merge are the verdict of record.
 
