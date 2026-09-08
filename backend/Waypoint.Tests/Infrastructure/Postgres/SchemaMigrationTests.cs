@@ -622,7 +622,7 @@ public sealed class SchemaMigrationTests
 	/// folds into a surviving new-identity row -- see that migration's own header
 	/// comment for why a status VALUE was rejected in favor of a column -- bumping
 	/// 97 -&gt; 98 (0133, carried by PR #1831's <c>content_library_items</c> migration,
-	/// had not merged as of this rebase, so slot 0134 is still free); 0131 (PR #1816's
+	/// had not merged as of this rebase; 0134 was free then, taken since -- see below); 0131 (PR #1816's
 	/// consumer views) bumps it again, 98 -&gt; 99; and 0135 (issue #1790) adds the
 	/// Photon image-discovery runner grant -- originally authored as 0134, renumbered
 	/// to 0135 at rebase time because PR #1842 above merged first and also claimed
