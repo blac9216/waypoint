@@ -609,22 +609,50 @@ public sealed class ContentLibraryItemServiceTests : IAsyncLifetime
 	{
 		string itemsJsonPath = Path.Combine(library.DiskPath, "items.json");
 		byte[] bytes = await File.ReadAllBytesAsync(itemsJsonPath, CancellationToken.None);
-		using JsonDocument document = JsonDocument.Parse(bytes);
-		foreach (JsonElement item in document.RootElement.GetProperty("items").EnumerateArray())
+		List<string> missing = [];
+		using (JsonDocument document = JsonDocument.Parse(bytes))
 		{
-			string selfHref = item.GetProperty("selfHref").GetString()!;
-			string itemJsonPath = Path.Combine(library.DiskPath, Uri.UnescapeDataString(selfHref).Replace('/', Path.DirectorySeparatorChar));
-			Assert.True(File.Exists(itemJsonPath), $"items.json advertises '{selfHref}' but no item.json is there");
-			foreach (JsonElement file in item.GetProperty("files").EnumerateArray())
+			foreach (JsonElement item in document.RootElement.GetProperty("items").EnumerateArray())
 			{
-				foreach (JsonElement href in file.GetProperty("hrefs").EnumerateArray())
+				string selfHref = item.GetProperty("selfHref").GetString()!;
+				string itemJsonPath = Path.Combine(library.DiskPath, Uri.UnescapeDataString(selfHref).Replace('/', Path.DirectorySeparatorChar));
+				if (!File.Exists(itemJsonPath))
 				{
-					string relative = Uri.UnescapeDataString(href.GetString()!).Replace('/', Path.DirectorySeparatorChar);
-					string filePath = Path.Combine(library.DiskPath, relative);
-					Assert.True(File.Exists(filePath), $"items.json advertises '{href.GetString()}' but no file is there");
+					missing.Add(selfHref);
+				}
+
+				foreach (JsonElement file in item.GetProperty("files").EnumerateArray())
+				{
+					foreach (JsonElement href in file.GetProperty("hrefs").EnumerateArray())
+					{
+						string relative = Uri.UnescapeDataString(href.GetString()!).Replace('/', Path.DirectorySeparatorChar);
+						if (!File.Exists(Path.Combine(library.DiskPath, relative)))
+						{
+							missing.Add(href.GetString()!);
+						}
+					}
 				}
 			}
 		}
+
+		if (missing.Count == 0)
+		{
+			return;
+		}
+
+		// The scan above is not one instant. A mutation that republished between this
+		// reader's items.json read and its File.Exists calls makes the bytes in hand a
+		// description of a library that has since moved on, and an href dropped by that
+		// republish is stale reading, not an inconsistency in the tree -- exactly what a
+		// real subscriber re-polls lib.json.version to discover. Re-reading tells the two
+		// cases apart: if items.json is byte-for-byte the one that was just scanned, then
+		// this IS the current index and it really is advertising something that is not on
+		// disk, which is the F3 defect. (Under the delete-before-republish mutation the
+		// bytes are unchanged in exactly that window, so this still catches it.)
+		byte[] after = await File.ReadAllBytesAsync(itemsJsonPath, CancellationToken.None);
+		Assert.False(
+			after.AsSpan().SequenceEqual(bytes),
+			$"items.json advertises {string.Join(", ", missing.Select(href => $"'{href}'"))} but nothing is there, and it is still the current index");
 	}
 
 	/// <summary>
