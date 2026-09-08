@@ -39,7 +39,7 @@ const TERMINAL_STATES = "completed,completed_with_failures,aborted";
  * `catalog-pull`/`retention-sweep`) -- it parses `RunTypes.cs` itself at test time
  * and fails on any future drift, in either direction. */
 export const NON_COMPLIANCE_RUN_TYPES =
-	"discover,download,catalog-index,bundle-export,bundle-import,content-library-sync,content-pull,content-import,update,credential-test,tool-install,purge,depot-enrollment,catalog-pull,binaries-download,retention-sweep,photon-repo-discovery";
+	"discover,download,catalog-index,bundle-export,bundle-import,content-library-sync,content-pull,content-import,update,credential-test,tool-install,purge,depot-enrollment,catalog-pull,binaries-download,retention-sweep,photon-repo-discovery,photon-image-discovery";
 
 function defaultFilters(includeCompliance: boolean): RunHistoryFilters {
 	return {

@@ -15,12 +15,12 @@
 namespace Waypoint.Core.Downloads.Photon;
 
 /// <summary>
-/// Persists the Photon lane's discovered index (migration 0130). Only the RPM-repo
-/// side is exposed here -- <c>photon_image_index</c>/<c>photon_subscription_config</c>
-/// have no reader or writer yet (this issue's documented remainder: the
-/// image-discovery job and the sync/subscription lane, both separate issues) --
-/// this interface grows a matching method the moment either lands, following this
-/// repo's one-repository-per-domain-table convention.
+/// Persists the Photon lane's discovered index (migration 0130). Issue #1790 added the
+/// image-tree half (<c>photon_image_index</c>) alongside the RPM-repo half #1509
+/// shipped; <c>photon_subscription_config</c> still has no reader or writer (the
+/// sync/subscription lane, a separate issue) -- this interface grows a matching method
+/// the moment that lands, following this repo's one-repository-per-domain-table
+/// convention.
 /// </summary>
 public interface IPhotonIndexRepository
 {
@@ -44,4 +44,24 @@ public interface IPhotonIndexRepository
 	/// whatever else the shared test database happens to hold.
 	/// </summary>
 	Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(string version, string variant, string arch, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Inserts a new row, or updates the existing row for the same
+	/// (<see cref="PhotonImageIndexEntry.Version"/>, <see cref="PhotonImageIndexEntry.Channel"/>,
+	/// <see cref="PhotonImageIndexEntry.RelativePath"/>) triple -- re-discovery of an
+	/// unchanged upstream image touches <c>last_seen_at</c> and overwrites
+	/// <c>size_bytes</c>/<c>etag</c> without inserting a duplicate row or disturbing
+	/// <c>discovered_at</c> (this issue's idempotent-re-run AC).
+	/// </summary>
+	Task UpsertImageIndexEntryAsync(PhotonImageIndexEntry entry, CancellationToken cancellationToken);
+
+	/// <summary>Every currently-indexed image row, for tests and the future read API.</summary>
+	Task<IReadOnlyList<PhotonImageIndexEntry>> ListImageIndexEntriesAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// The single row for one (version, channel, relative path) triple, or <c>null</c>
+	/// if never discovered -- the point-lookup counterpart to
+	/// <see cref="ListImageIndexEntriesAsync"/>.
+	/// </summary>
+	Task<PhotonImageIndexEntry?> GetImageIndexEntryAsync(string version, string channel, string relativePath, CancellationToken cancellationToken);
 }

@@ -160,6 +160,12 @@ public static class ServiceCollectionExtensions
 		// (issue #619's convention).
 		services.AddSingleton<IJobHandler, Downloads.Photon.PhotonRepoDiscoveryJobHandler>();
 
+		// Issue #1790 (epic #1184): the Photon image-tree discovery job -- registers
+		// in the SAME change that adds "photon-image-discovery" to
+		// DownloadRunnerJobTypes.Allowed below, per that allowlist's own doc comment
+		// (issue #619's convention).
+		services.AddSingleton<IJobHandler, Downloads.Photon.PhotonImageDiscoveryJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 		// Issue #738: resolves a vCenter execution item's frozen catalog execution

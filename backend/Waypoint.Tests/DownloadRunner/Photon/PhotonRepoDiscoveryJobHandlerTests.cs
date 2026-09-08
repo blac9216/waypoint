@@ -83,6 +83,16 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 
 		public Task<PhotonRepoIndexEntry?> GetRepoIndexEntryAsync(string version, string variant, string arch, CancellationToken cancellationToken) =>
 			Task.FromResult(Upserted.LastOrDefault(e => e.Version == version && e.Variant == variant && e.Arch == arch));
+
+		/// <summary>Not exercised by this suite -- the image-index half belongs to <c>PhotonImageDiscoveryJobHandlerTests</c>.</summary>
+		public Task UpsertImageIndexEntryAsync(PhotonImageIndexEntry entry, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
+
+		public Task<IReadOnlyList<PhotonImageIndexEntry>> ListImageIndexEntriesAsync(CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
+
+		public Task<PhotonImageIndexEntry?> GetImageIndexEntryAsync(string version, string channel, string relativePath, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("Not exercised by PhotonRepoDiscoveryJobHandlerTests.");
 	}
 
 	private sealed class FakeEventPublisher : IJobEventPublisher
@@ -180,6 +190,52 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 		Assert.DoesNotContain(repository.Upserted, e => e.Variant == PhotonRepoVariants.Release && e.Arch == PhotonArches.Aarch64);
 		// Every other repo in the sweep still got indexed.
 		Assert.Equal(PhotonRepoVariants.All.Count * PhotonArches.All.Count - 1, repository.Upserted.Count);
+	}
+
+	/// <summary>
+	/// Issue #1835's second "Done when" box (Option B): a repo indexed with repodata on
+	/// one sweep must not be downgraded by the next sweep's weaker evidence. The fault
+	/// injected here is the one #1835's title names -- <c>repomd.xml</c> 404s while
+	/// upstream regenerates its metadata and the <c>repodata/</c> directory is still
+	/// present -- which <c>HttpPhotonRepoMetadataSource</c> now classifies
+	/// <see cref="PhotonRepomdProbeKind.Error"/> rather than
+	/// <see cref="PhotonRepomdProbeKind.NoRepodata"/> (proven at the transport level by
+	/// <c>HttpPhotonRepoMetadataSourceTests.TryGetRepomdRevisionAndPackageCountAsync_Repomd404ButRepodataDirectoryPresent_IsAnErrorNotNoRepodata</c>).
+	/// This asserts the half that classification exists for: the second sweep issues NO
+	/// upsert for that repo, so the row's <c>has_repodata</c>/<c>repomd_revision</c>/
+	/// <c>package_count</c> survive intact, and the sweep says so in its note instead of
+	/// reporting an unqualified success.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_PreviouslyIndexedRepo_IsNotDowngradedByATransientSweep()
+	{
+		FakeMetadataSource source = new();
+		string releaseRepoUrl = $"{BaseUrl}/5.0/{PhotonRepoDiscoveryJobHandler.RepoDirectoryName("5.0", PhotonRepoVariants.Release, PhotonArches.X8664)}";
+		source.ProbesByRepoBaseUrl[releaseRepoUrl] = PhotonRepomdProbeResult.Found("1700000000", 4242);
+		FakeIndexRepository repository = new();
+		PhotonRepoDiscoveryJobHandler handler = new(source, repository, NullLogger<PhotonRepoDiscoveryJobHandler>.Instance);
+
+		await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+		PhotonRepoIndexEntry? afterFirstSweep = await repository.GetRepoIndexEntryAsync(
+			"5.0", PhotonRepoVariants.Release, PhotonArches.X8664, CancellationToken.None);
+		Assert.NotNull(afterFirstSweep);
+		Assert.True(afterFirstSweep!.HasRepodata);
+
+		// Second sweep: upstream is mid-regeneration for that one repo.
+		source.ProbesByRepoBaseUrl[releaseRepoUrl] = PhotonRepomdProbeResult.Failed(
+			"repodata/repomd.xml was 404 while the repodata/ directory answered as present");
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Payload), CancellationToken.None);
+
+		PhotonRepoIndexEntry? afterSecondSweep = await repository.GetRepoIndexEntryAsync(
+			"5.0", PhotonRepoVariants.Release, PhotonArches.X8664, CancellationToken.None);
+		Assert.NotNull(afterSecondSweep);
+		Assert.True(afterSecondSweep!.HasRepodata);
+		Assert.Equal("1700000000", afterSecondSweep.RepomdRevision);
+		Assert.Equal(4242, afterSecondSweep.PackageCount);
+		// No second upsert at all for that repo -- the row was never rewritten.
+		Assert.Single(repository.Upserted.Where(
+			e => e.Variant == PhotonRepoVariants.Release && e.Arch == PhotonArches.X8664));
+		Assert.Contains("repodata/repomd.xml was 404", outcome.Note, StringComparison.Ordinal);
 	}
 
 	/// <summary>Round-0 review finding #3: an all-probes-failed sweep must fail the job, not report "Indexed 0" as success.</summary>

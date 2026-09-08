@@ -254,6 +254,11 @@ public static class ServiceCollectionExtensions
 		// what decides when discovery runs).
 		services.AddSingleton<Waypoint.Core.Downloads.Photon.IPhotonRepoMetadataSource, Downloads.Photon.HttpPhotonRepoMetadataSource>();
 
+		// Issue #1790: the Photon image-tree autoindex boundary -- same unconditional
+		// registration as the boundary above (no connection-string dependency of its
+		// own; PhotonImageDiscoveryJobHandler is what decides when discovery runs).
+		services.AddSingleton<Waypoint.Core.Downloads.Photon.IPhotonImageListingSource, Downloads.Photon.HttpPhotonImageListingSource>();
+
 		// Issue #1470: a pure filesystem/JSON read of the already-authenticated
 		// vendor catalog document -- no connection-string dependency, so it is
 		// registered unconditionally like the HTTP boundary above rather than inside

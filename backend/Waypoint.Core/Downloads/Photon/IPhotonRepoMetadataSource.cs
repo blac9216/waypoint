@@ -51,6 +51,15 @@ public interface IPhotonRepoMetadataSource
 	/// published) is a distinct outcome, <see cref="PhotonRepomdProbeResult.Absent"/> --
 	/// a plain 404 on <c>repodata/repomd.xml</c> cannot tell the two apart on its own, so
 	/// implementations probe the repo directory itself before classifying either way.
+	/// A <see cref="PhotonRepomdProbeResult.NotFound"/> classification is a POSITIVE
+	/// observation that this repo has no repodata (the caller writes it as
+	/// <c>has_repodata = false</c> over whatever a previous sweep recorded), so an
+	/// implementation must only return it on evidence that actually supports the claim:
+	/// where the evidence is merely absent -- a 404 on <c>repomd.xml</c> while the
+	/// <c>repodata/</c> directory is right there, i.e. upstream mid-regeneration -- the
+	/// outcome is <see cref="PhotonRepomdProbeResult.Failed(string)"/>, never
+	/// <see cref="PhotonRepomdProbeResult.NotFound"/> (issue #1835 Option B: one
+	/// transient sweep must not downgrade a previously-<c>Found</c> row).
 	/// </summary>
 	Task<PhotonRepomdProbeResult> TryGetRepomdRevisionAndPackageCountAsync(string repoBaseUrl, CancellationToken cancellationToken);
 }
