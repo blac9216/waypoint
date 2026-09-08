@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
-using System.Text.RegularExpressions;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Subscriptions;
-using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -25,7 +23,10 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// Issue #1421, migration 0104: this repo's real class-killing drift guard (the
 /// <see cref="RepoCredentialBindingConstraintDriftTests"/> convention) for every
 /// vocabulary migration 0104 hardcodes as a CHECK constraint -- parses the
-/// authoritative value set out of the embedded migration SQL and asserts it equals
+/// authoritative value set out of the embedded migration SQL, scoped to the owning
+/// table via <see cref="ConstraintDriftScan"/> (issue #1814 -- every
+/// <c>*ConstraintDriftTests</c> guard shares that one table-scoped, ALTER-visible
+/// helper rather than each carrying its own unscoped regex), and asserts it equals
 /// the C# side, in order, so adding/removing a value on either side without the other
 /// fails here rather than at runtime. Review round 1 finding F2 added the fourth test
 /// below (<c>presets_stack_check</c> against <see cref="PresetStacks.All"/>) after
@@ -37,59 +38,38 @@ public sealed class SubscriptionsConstraintDriftTests
 	[Fact]
 	public void SubscriptionLineGranularityValuesAll_EqualsSubscriptionsLineGranularityCheckConstraintValueSet()
 	{
-		string migration0104 = ReadMigrationSql("0104_subscriptions_presets.sql");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"subscriptions", "subscriptions_line_granularity_check", "line_granularity");
 
-		Assert.Equal(SubscriptionLineGranularityValues.All, ParseCheckInList(migration0104, "subscriptions_line_granularity_check"));
+		Assert.Equal(SubscriptionLineGranularityValues.All, constraintValues);
 	}
 
 	[Fact]
 	public void SubscriptionLineGranularityValuesAll_EqualsPresetsLineGranularityCheckConstraintValueSet()
 	{
-		string migration0104 = ReadMigrationSql("0104_subscriptions_presets.sql");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"presets", "presets_line_granularity_check", "line_granularity");
 
-		Assert.Equal(SubscriptionLineGranularityValues.All, ParseCheckInList(migration0104, "presets_line_granularity_check"));
+		Assert.Equal(SubscriptionLineGranularityValues.All, constraintValues);
 	}
 
 	[Fact]
 	public void RepoStoresAll_EqualsSubscriptionsLaneCheckConstraintValueSet()
 	{
-		string migration0104 = ReadMigrationSql("0104_subscriptions_presets.sql");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"subscriptions", "subscriptions_lane_check", "lane");
 
 		// subscriptions.lane reuses the RepoStores.All acquisition-lane vocabulary
 		// (migration 0104's own header comment) rather than a new one.
-		Assert.Equal(RepoStores.All, ParseCheckInList(migration0104, "subscriptions_lane_check"));
+		Assert.Equal(RepoStores.All, constraintValues);
 	}
 
 	[Fact]
 	public void PresetStacksAll_EqualsPresetsStackCheckConstraintValueSet()
 	{
-		string migration0104 = ReadMigrationSql("0104_subscriptions_presets.sql");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"presets", "presets_stack_check", "stack");
 
-		Assert.Equal(PresetStacks.All, ParseCheckInList(migration0104, "presets_stack_check"));
-	}
-
-	/// <summary>The raw text of one embedded migration resource, matched by its filename suffix.</summary>
-	private static string ReadMigrationSql(string fileName)
-	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string resourceName = Assert.Single(
-			assembly.GetManifestResourceNames().Where(name => name.EndsWith(fileName, StringComparison.Ordinal)));
-		using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-		using StreamReader reader = new(stream);
-		return reader.ReadToEnd();
-	}
-
-	/// <summary>Extracts the single-quoted value list of a named <c>CONSTRAINT ... CHECK (col IN ('a', 'b', ...))</c>, in file order.</summary>
-	private static List<string> ParseCheckInList(string sql, string constraintName)
-	{
-		Match constraint = Regex.Match(
-			sql,
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\([^)]*\bIN\s*\(([^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Assert.True(constraint.Success, $"Could not locate an IN-list CHECK named '{constraintName}'.");
-
-		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
-		Assert.NotEmpty(values);
-		return [.. values.Select(m => m.Groups[1].Value)];
+		Assert.Equal(PresetStacks.All, constraintValues);
 	}
 }

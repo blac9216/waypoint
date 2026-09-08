@@ -34,12 +34,12 @@ public sealed class ConstraintDriftScanTests
 		string[] migrations =
 		[
 			"""
-			CREATE TABLE other_thing (
-			    status TEXT NOT NULL CONSTRAINT widget_status_check CHECK (status IN ('bogus'))
-			);
-
 			CREATE TABLE IF NOT EXISTS widget (
 			    status TEXT NOT NULL CONSTRAINT widget_status_check CHECK (status IN ('active', 'retired'))
+			);
+
+			CREATE TABLE other_thing (
+			    status TEXT NOT NULL CONSTRAINT widget_status_check CHECK (status IN ('bogus'))
 			);
 			""",
 		];
@@ -57,8 +57,8 @@ public sealed class ConstraintDriftScanTests
 		[
 			"""
 			CREATE TABLE IF NOT EXISTS widget (
-			    kind TEXT NOT NULL CONSTRAINT widget_kind_check CHECK (kind IN ('bogus')),
-			    status TEXT NOT NULL CONSTRAINT widget_status_check CHECK (status IN ('active', 'retired'))
+			    status TEXT NOT NULL CONSTRAINT widget_status_check CHECK (status IN ('active', 'retired')),
+			    kind TEXT NOT NULL CONSTRAINT widget_kind_check CHECK (kind IN ('bogus'))
 			);
 			""",
 		];

@@ -31,12 +31,24 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// its OWN hand-copied <c>[InlineData]</c> constants, not the constraint's actual
 /// value list, so a value added to either C# set without a matching migration edit
 /// (or vice versa) passed silently. This is this repo's real class-killing drift
-/// guard for both vocabularies, the same convention as
+/// guard for both vocabularies, but the two tests below resolve the authoritative
+/// value set two different ways (PR #1832 review round 1, F6):
+/// <see cref="RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet"/>
+/// parses it straight out of the embedded migration SQL (the
 /// <c>SchemaMigrationTests.Migration0050_/Migration0051_CheckConstraintValueList(s)_
-/// MatchTheCSharpClosedVocabulary</c> and <c>OciBundleStatusesConstraintDriftTests</c>:
-/// parse the authoritative value set out of the embedded migration SQL and assert it
-/// equals the C# constant, in order, so adding/removing a value on either side without
-/// the other fails here.
+/// MatchTheCSharpClosedVocabulary</c>/<c>OciBundleStatusesConstraintDriftTests</c>
+/// convention), while
+/// <see cref="CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet"/>
+/// reads it live out of <c>pg_get_constraintdef</c> after actually applying every
+/// migration (issue #1660) -- see that test's own doc comment for why. Both compare
+/// in DECLARATION order, not as unordered sets: 0103's own <c>ADD CONSTRAINT</c>
+/// literal for <c>credentials_credential_type_check</c> lists its values in exactly
+/// <see cref="CredentialTypes.All"/>'s order, and Postgres's
+/// <c>pg_get_constraintdef</c> renders an <c>ARRAY[...]</c> CHECK in the order it was
+/// declared, so an ordered comparison is available on this side too and is preferred
+/// over an unordered one -- losing order (and duplicate-value) drift detection would
+/// be a real coverage regression for no gain, since neither guard needs to tolerate a
+/// live database that reorders the array.
 /// </summary>
 [Collection("Postgres")]
 public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
@@ -76,8 +88,16 @@ public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
 	/// application order -- see #1660's Motivation). Reading the CHECK definition back
 	/// out of <c>pg_constraint</c> after actually applying every embedded migration,
 	/// via <see cref="NpgsqlSchemaMigrator"/>, in its real applied order removes the
-	/// ordering question entirely: this asserts against what the fully-migrated
-	/// database actually enforces, not a guess about which file "looks latest".
+	/// ordering-of-MIGRATIONS question entirely: this asserts against what the
+	/// fully-migrated database actually enforces, not a guess about which file "looks
+	/// latest". Separately, <c>pg_get_constraintdef</c> renders the CHECK's own
+	/// <c>ARRAY[...]</c> literal in the order it was declared (PR #1832 review round
+	/// 1, F6), so the VALUE list itself is still compared in order against
+	/// <see cref="CredentialTypes.All"/>, exactly as
+	/// <see cref="RepoStoresAll_EqualsRepoCredentialBindingsStoreCheckConstraintValueSet"/>
+	/// compares its own value list -- reading the definition live only removes the
+	/// migration-ordering hazard, it does not trade away value-order/duplicate drift
+	/// detection.
 	/// </summary>
 	[Fact]
 	public async Task CredentialTypesAll_EqualsCredentialsCredentialTypeCheckConstraintValueSet()
@@ -94,14 +114,12 @@ public sealed class RepoCredentialBindingConstraintDriftTests : IAsyncLifetime
 		string? definition = (string?)await command.ExecuteScalarAsync();
 		Assert.NotNull(definition);
 
-		HashSet<string> schemaTypes = [.. Regex
+		List<string> schemaTypes = [.. Regex
 			.Matches(definition!, "'([^']+)'::text", RegexOptions.None, TimeSpan.FromSeconds(5))
 			.Select(match => match.Groups[1].Value)];
 
-		HashSet<string> codeTypes = [.. CredentialTypes.All];
-
 		Assert.NotEmpty(schemaTypes);
-		Assert.Equal(schemaTypes.OrderBy(type => type, StringComparer.Ordinal), codeTypes.OrderBy(type => type, StringComparer.Ordinal));
+		Assert.Equal(CredentialTypes.All, schemaTypes);
 	}
 
 	/// <summary>The raw text of one embedded migration resource, matched by its filename suffix.</summary>
