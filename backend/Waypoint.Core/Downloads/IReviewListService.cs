@@ -102,4 +102,17 @@ public interface IReviewListService
 	/// is a structurally different reason to skip). Pure read, no side effect.
 	/// </summary>
 	Task<bool> IsOutOfScopeAsync(Guid depotArtifactId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// The <c>reason</c> recorded for <paramref name="depotArtifactId"/>'s live
+	/// <c>download_out_of_scope_content</c> row, or <see langword="null"/> when it has
+	/// none -- <see cref="IsOutOfScopeAsync"/> plus the reason that answer rests on, so
+	/// a caller can tell WHICH report put the row on the list. Issue #1798:
+	/// <c>RetentionSweepService</c> needs exactly that distinction, because a row its
+	/// own manual-download dial reported must stay governed by that dial (a dial flipped
+	/// back to <see cref="ManualDownloadDial.AutoPrune"/> prunes it again), while a row
+	/// reported by anything else keeps #1687's unconditional never-auto-remove skip.
+	/// Pure read, no side effect.
+	/// </summary>
+	Task<string?> GetOutOfScopeReasonAsync(Guid depotArtifactId, CancellationToken cancellationToken);
 }

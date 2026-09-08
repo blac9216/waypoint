@@ -141,21 +141,31 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 	/// </summary>
 	private sealed class FakeReviewListService : IReviewListService
 	{
-		private readonly HashSet<Guid> _outOfScopeIds = [];
+		// Keyed by depot-artifact id with the reason alongside it, mirroring
+		// download_out_of_scope_content's own (unique depot_artifact_id, NOT NULL
+		// reason) shape -- issue #1798's dial reads the reason back to tell its own
+		// report apart from anyone else's, so a set of bare ids cannot stand in.
+		private readonly Dictionary<Guid, string> _outOfScope = [];
 
-		public void MarkOutOfScope(Guid depotArtifactId) => _outOfScopeIds.Add(depotArtifactId);
+		public void MarkOutOfScope(Guid depotArtifactId, string reason = "marked out of scope by test") =>
+			_outOfScope[depotArtifactId] = reason;
 
 		public Task<IReadOnlyList<ReviewListEntry>> ListAsync(CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<ReviewListEntry>>([]);
 
 		public Task ReportOutOfScopeAsync(Guid depotArtifactId, string reason, CancellationToken cancellationToken)
 		{
-			_outOfScopeIds.Add(depotArtifactId);
+			// Insert-or-update-reason, matching the real service's ON CONFLICT DO
+			// UPDATE SET reason = EXCLUDED.reason idempotency contract.
+			_outOfScope[depotArtifactId] = reason;
 			return Task.CompletedTask;
 		}
 
 		public Task<bool> IsOutOfScopeAsync(Guid depotArtifactId, CancellationToken cancellationToken) =>
-			Task.FromResult(_outOfScopeIds.Contains(depotArtifactId));
+			Task.FromResult(_outOfScope.ContainsKey(depotArtifactId));
+
+		public Task<string?> GetOutOfScopeReasonAsync(Guid depotArtifactId, CancellationToken cancellationToken) =>
+			Task.FromResult(_outOfScope.TryGetValue(depotArtifactId, out string? reason) ? reason : null);
 	}
 
 	/// <summary>
@@ -780,6 +790,88 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
 		Assert.Equal(RetainedContentStates.Purged, state!.State);
+	}
+
+	/// <summary>
+	/// Issue #1798 (round-1 review relay): the Review dial must keep governing on
+	/// EVERY pass, not just the first. Its own ReportOutOfScopeAsync writes a
+	/// persistent download_out_of_scope_content row, so before the fix the #1687
+	/// out-of-scope guard short-circuited the row on sweep 2 and the dial counter
+	/// silently stopped counting it -- pin both passes' counters, not just one.
+	/// </summary>
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadReviewDial_KeepsCountingAcrossRepeatedSweeps()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-review-dial-twice");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-review-dial-twice");
+
+		FakeReviewListService reviewList = new();
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), reviewList: reviewList);
+		RetentionSweepRequest request = new([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]);
+
+		RetentionSweepReport first = await service.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, first.ManualDownloadDialSkipped);
+		Assert.Equal(0, first.OutOfScopeSkipped);
+		Assert.Equal(0, first.AutoPruned);
+		Assert.True(await reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None));
+
+		// The second sweep sees the review-list row the first sweep's own dial wrote.
+		RetentionSweepReport second = await service.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, second.ManualDownloadDialSkipped); // still attributed to the dial...
+		Assert.Equal(0, second.OutOfScopeSkipped); // ...not silently re-labelled as out-of-scope
+		Assert.Equal(0, second.AutoPruned);
+		Assert.Empty(second.Errors);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched by both passes
+		Assert.True(File.Exists(Path.Combine(_depotRoot, "manual-download-review-dial-twice")));
+	}
+
+	/// <summary>
+	/// Issue #1798 (round-1 review relay): the dial is a dial, not a one-way door --
+	/// flipping the scope policy back to auto-prune must prune a row a previous
+	/// sweep's Review dial put on the review list, without an Admin having to purge
+	/// the content by hand to get out.
+	/// </summary>
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadDialFlippedBackToAutoPrune_PrunesPreviouslyReviewedRow()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-dial-flipped-back");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-dial-flipped-back");
+
+		FakeReviewListService reviewList = new();
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), reviewList: reviewList);
+		RetentionSweepRequest request = new([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]);
+
+		RetentionSweepReport underReview = await service.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, underReview.ManualDownloadDialSkipped);
+		Assert.Equal(0, underReview.AutoPruned);
+		Assert.True(await reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None));
+
+		// The Admin turns the dial back down.
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		RetentionSweepReport afterFlip = await service.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, afterFlip.AutoPruned);
+		Assert.Equal(0, afterFlip.ManualDownloadDialSkipped);
+		Assert.Equal(0, afterFlip.OutOfScopeSkipped);
+		Assert.Empty(afterFlip.Errors);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, state!.State);
+		Assert.False(File.Exists(Path.Combine(_depotRoot, "manual-download-dial-flipped-back")));
 	}
 
 	private void WriteDepotFile(string relativePath) =>
