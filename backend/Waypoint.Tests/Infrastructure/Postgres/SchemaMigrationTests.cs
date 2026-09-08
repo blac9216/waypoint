@@ -554,7 +554,7 @@ public sealed class SchemaMigrationTests
 	/// grant-hygiene convention, 0090 precedent): folder create/rename-move and item
 	/// assignment are Operator+ API-side, folder delete is Admin, reads are Viewer+,
 	/// all via <c>ContentLibraryFoldersController</c>; no runner ever gets a grant on
-	/// either table, proven both directions by <c>RunnerRoleGrantDriftTests</c> --
+	/// either table, proven both directions by <c>RunnerRoleGrantDriftTests</c>.
 	/// 0104 (issue #1421, epic #1182, split from design record #1045; approved
 	/// design #16 section 2, ADR-0028; slot pre-assigned 2026-08-30, inside the same
 	/// 0082-0106 numbering gap 0107's own header reserves for concurrently
@@ -597,16 +597,35 @@ public sealed class SchemaMigrationTests
 	/// <c>PhotonRepoDiscoveryJobHandler</c> is the only consumer this migration ships
 	/// alongside; the other two tables get no grant yet (0118's <c>oci_bundles</c>
 	/// precedent for the same shape of gap), proven both directions by
-	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> -- 0132 (issue #1783) added
+	/// <c>PhotonRepoIndexRunnerRoleGrantTests</c> --
+	/// 0131 (issue #1464, epic #1183; slot 0131 -- the issue body's pre-assigned
+	/// 0119 was reassigned at pick time since 0117-0130 had landed or were claimed
+	/// by then, verified against the migrations directory and open PRs
+	/// immediately before use): adds <c>consumer_views</c> -- named operator-defined
+	/// ESX platform-set views (<c>name</c> unique, ordered <c>platforms</c> TEXT[],
+	/// <c>is_default</c>). AT MOST one default is enforced by the partial unique
+	/// index <c>idx_consumer_views_default_unique</c> (database); EXACTLY one at any
+	/// time is enforced by a seeded default row plus the API/repository refusing to
+	/// delete the row currently holding the default or clear its <c>is_default</c>
+	/// (409 <c>default_required</c>), while marking a DIFFERENT row default MOVES the
+	/// flag atomically inside one transaction (PR #1816 round 2) -- see the
+	/// migration's own header for the full "at most" vs "exactly" split. Platform-key
+	/// values are validated against the static vocabulary in
+	/// <c>Waypoint.Core.Downloads.ConsumerViewPlatformVocabulary</c> at the API layer
+	/// only, never a schema CHECK, matching migration 0117's
+	/// <c>esx_acquisition_subscriptions.selected_platforms</c> precedent. No new
+	/// runner grants -- Admin-only API-side model/CRUD slice, no generation or
+	/// serving logic reads this table yet -- 0132 (issue #1783) added
 	/// <c>depot_artifacts.bundle_id</c>, bumping 96 -&gt; 97; 0134 (issue #1804) adds
 	/// <c>depot_artifacts.superseded_at</c> (nullable timestamp), the never-delete
 	/// marker <c>RekeyManyAsync</c>'s collision path sets on a stale legacy row it
 	/// folds into a surviving new-identity row -- see that migration's own header
 	/// comment for why a status VALUE was rejected in favor of a column -- bumping
 	/// 97 -&gt; 98 (0133, carried by PR #1831's <c>content_library_items</c> migration,
-	/// had not merged as of this rebase, so slot 0134 is still free) --
+	/// had not merged as of this rebase, so slot 0134 is still free); this branch's
+	/// own 0131 bumps it again, 98 -&gt; 99 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 98;
+	private const int ExpectedMigrationCount = 99;
 
 	private readonly PostgresFixture _fixture;
 
@@ -684,6 +703,42 @@ public sealed class SchemaMigrationTests
 		string definition = Assert.IsType<string>(await command.ExecuteScalarAsync());
 		Assert.Contains("credential_id, finished_at DESC, id DESC", definition, StringComparison.Ordinal);
 		Assert.Contains("finished_at IS NOT NULL", definition, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1464, PR #1816 round 1 Spec finding 1: migration 0131 must seed the
+	/// well-known default row itself (<see cref="ConsumerView.DefaultViewId"/>) --
+	/// a fresh database has exactly one <c>consumer_views</c> row and it is the
+	/// default, never a zero-default state reachable straight after migration. Uses
+	/// its own fresh database (<see cref="CreateFreshDatabaseAsync"/>), not the
+	/// collection-shared one -- other test classes in this collection
+	/// (<c>ConsumerViewRepositoryTests</c>, <c>ConsumerViewsApiTests</c>) reset
+	/// <c>consumer_views</c> in their own setup and re-create the seeded row
+	/// themselves, and since 0131 is already recorded applied on the shared database
+	/// by then, its <c>ON CONFLICT DO NOTHING</c> seed never re-runs there -- so only
+	/// a fresh database can prove the MIGRATION is what seeds the row.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_ConsumerViews_SeedsExactlyOneDefaultRow()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+		NpgsqlSchemaMigrator migrator = new(connectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(connectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand countCommand = new("SELECT count(*) FROM consumer_views", connection);
+		long count = (long)(await countCommand.ExecuteScalarAsync())!;
+		Assert.Equal(1, count);
+
+		await using NpgsqlCommand rowCommand = new(
+			"SELECT is_default, platforms FROM consumer_views WHERE id = $1", connection);
+		rowCommand.Parameters.AddWithValue(Waypoint.Core.Downloads.ConsumerView.DefaultViewId);
+		await using NpgsqlDataReader reader = await rowCommand.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.True(reader.GetBoolean(0));
+		Assert.Empty(reader.GetFieldValue<string[]>(1));
 	}
 
 	[Fact]
