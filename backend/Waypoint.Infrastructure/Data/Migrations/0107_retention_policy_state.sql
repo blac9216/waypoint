@@ -99,7 +99,7 @@ COMMENT ON TABLE download_retained_content_state IS
 COMMENT ON COLUMN download_retained_content_state.pinned_by IS
     'Actor who pinned this content, or NULL when not pinned. Pin/unpin is a #1453 API concern; this column only carries the resulting state. Issue #1624: RetainedContentStateRepository.TransitionAsync clears this (with pinned_at/pin_note) on any transition OUT of pinned, so this column is never stale once the content is no longer pinned.';
 COMMENT ON COLUMN download_retained_content_state.grace_started_at IS
-    'Timestamp the row most recently ENTERED grace, or NULL. Issue #1627: RetainedContentStateRepository.TransitionAsync clears this on any transition OUT of grace, so a tracked/pinned row never carries a stale timestamp from a prior grace period -- read this column only alongside state = ''grace''.';
+    'Timestamp the row most recently ENTERED grace, or NULL. Issue #1627: RetainedContentStateRepository.TransitionAsync clears this on any transition OUT of grace, so a tracked/pinned row never carries a stale timestamp from a prior grace period -- read this column only alongside state = ''grace''. Issue #1820: PinAsync is a second, independent writer of state (it does not route through TransitionAsync) and also clears this column on a grace -> pinned pin, so the "never stale" guarantee holds for that path too.';
 
 -- Runner grants: deliberately NONE. This issue introduces the model and
 -- persistence only -- no consumer reads or writes these tables yet, so there is

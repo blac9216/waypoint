@@ -175,4 +175,19 @@ public sealed class ReviewListService : IReviewListService
 		command.Parameters.AddWithValue(depotArtifactId);
 		return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 	}
+
+	public async Task<string?> GetOutOfScopeReasonAsync(Guid depotArtifactId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"SELECT reason FROM download_out_of_scope_content WHERE depot_artifact_id = $1", connection);
+		command.Parameters.AddWithValue(depotArtifactId);
+
+		// reason is NOT NULL (migration 0128), so a null scalar here means no row at
+		// all -- exactly the "not on the list" answer this method's contract returns
+		// null for, and the same answer IsOutOfScopeAsync would give as false.
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result as string;
+	}
 }

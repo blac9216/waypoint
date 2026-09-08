@@ -136,6 +136,42 @@ public sealed class RetentionSweepJobHandlerTests
 		Assert.Equal([candidateId], service.LastRequest.SupersededOrOutOfWindowDepotArtifactIds);
 	}
 
+	/// <summary>Issue #1798: manual_download_depot_artifact_ids is parsed and forwarded to RetentionSweepRequest.ManualDownloadDepotArtifactIds, same as candidate_depot_artifact_ids.</summary>
+	[Fact]
+	public async Task ExecuteAsync_SweepShape_PassesManualDownloadCandidatesThrough()
+	{
+		Guid manualCandidateId = Guid.NewGuid();
+		FakeSweepService service = new()
+		{
+			SweepResult = new RetentionSweepReport(false, null, EnteredGrace: 0, AutoPruned: 0, UntrackedCandidatesSkipped: 0, Errors: [], OutOfScopeSkipped: 0, ManualDownloadDialSkipped: 1),
+		};
+		RetentionSweepJobHandler handler = CreateHandler(service);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor($$"""{"listing_verified": true, "manual_download_depot_artifact_ids": ["{{manualCandidateId}}"]}"""),
+			CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.NotNull(service.LastRequest);
+		Assert.Equal([manualCandidateId], service.LastRequest!.ManualDownloadDepotArtifactIds);
+		Assert.Contains("manual-download-dialed", outcome.Note);
+	}
+
+	/// <summary>Issue #1798: a malformed manual-download id fails the job before the (destructive) sweep runs, same fail-fast contract as candidate_depot_artifact_ids.</summary>
+	[Fact]
+	public async Task ExecuteAsync_SweepShape_InvalidManualDownloadCandidateId_FailsBeforeSweepRuns()
+	{
+		FakeSweepService service = new();
+		RetentionSweepJobHandler handler = CreateHandler(service);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(
+			ContextFor("""{"listing_verified": true, "manual_download_depot_artifact_ids": ["not-a-guid"]}"""),
+			CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Null(service.LastRequest); // RunSweepAsync was never called -- zero side effects
+	}
+
 	[Fact]
 	public async Task ExecuteAsync_SweepShape_ListingUnverifiedFalse_StillCallsServiceWhichReportsSkipped()
 	{

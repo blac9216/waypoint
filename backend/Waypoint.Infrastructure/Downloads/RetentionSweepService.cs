@@ -24,6 +24,16 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <inheritdoc cref="IRetentionSweepService"/>
 public sealed partial class RetentionSweepService : IRetentionSweepService
 {
+	/// <summary>
+	/// The exact <c>download_out_of_scope_content.reason</c> this service's own
+	/// manual-download <see cref="ManualDownloadDial.Review"/> branch writes. Named
+	/// once rather than inlined at the write, because the auto-prune pass also READS
+	/// it back (via <see cref="IReviewListService.GetOutOfScopeReasonAsync"/>) to tell
+	/// a review-list row this dial itself reported apart from one reported by anything
+	/// else -- the two uses must not drift apart.
+	/// </summary>
+	private const string ManualDownloadReviewReason = "manual download retention dial set to 'review'";
+
 	private readonly IRetainedContentStateRepository _states;
 	private readonly IRetentionPolicyRepository _policies;
 	private readonly IDepotArtifactRepository _artifacts;
@@ -141,6 +151,13 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		// holds by construction, not by an extra check.
 		int autoPruned = 0;
 		int outOfScopeSkipped = 0;
+		int manualDownloadDialSkipped = 0;
+
+		// Issue #1798: caller-supplied manual/ad-hoc download candidates (see this
+		// request field's doc comment) -- a HashSet so the auto-prune pass below can
+		// test membership without re-scanning the list per row.
+		HashSet<Guid> manualDownloadCandidates = [.. request.ManualDownloadDepotArtifactIds ?? []];
+
 		IReadOnlyList<RetainedContentState> graceRows = await _states
 			.ListByStateAsync(RetainedContentStates.Grace, cancellationToken).ConfigureAwait(false);
 
@@ -163,13 +180,32 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 				continue;
 			}
 
+			bool isManualDownloadCandidate = manualDownloadCandidates.Contains(row.DepotArtifactId);
+
 			// Issue #1687: a tracked, grace-expired candidate that has since been
 			// reported on the review list (download_out_of_scope_content) is an
 			// explicit skip, not silence-by-accident -- the prior guarantee held
 			// only for the untracked case (no download_retained_content_state row
 			// at all); a tracked-but-out-of-scope row would otherwise be swept like
 			// any other candidate.
-			if (await _reviewList.IsOutOfScopeAsync(row.DepotArtifactId, cancellationToken).ConfigureAwait(false))
+			//
+			// Issue #1798: with ONE exception -- a caller-named manual-download
+			// candidate whose review-list row is the one this service's own Review
+			// dial wrote (ManualDownloadReviewReason). That row is on the list
+			// BECAUSE of the dial, so letting this guard short-circuit it would make
+			// the dial a one-shot: the row would be counted as OutOfScopeSkipped on
+			// every sweep after the first (under-reporting ManualDownloadDialSkipped,
+			// whose doc comment promises the opposite), and a dial flipped back to
+			// AutoPrune could never prune it again -- a one-way door out of which the
+			// only exit is an Admin purging the content. So for that row the dial
+			// below stays the decider on every pass, and it is the dial (not this
+			// guard) that skips it while it still reads Review or Keep. A named
+			// candidate reported by anything ELSE keeps the unconditional #1687 skip.
+			string? outOfScopeReason = await _reviewList
+				.GetOutOfScopeReasonAsync(row.DepotArtifactId, cancellationToken).ConfigureAwait(false);
+			bool governedByOwnDialReport = isManualDownloadCandidate
+				&& string.Equals(outOfScopeReason, ManualDownloadReviewReason, StringComparison.Ordinal);
+			if (outOfScopeReason is not null && !governedByOwnDialReport)
 			{
 				outOfScopeSkipped++;
 				continue;
@@ -196,6 +232,34 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 				if (policy is null)
 				{
 					errors.Add($"no retention policy resolvable for retained-content-state '{row.Id}'; grace window cannot be evaluated.");
+					continue;
+				}
+			}
+
+			// Issue #1798: a candidate the caller has named as a manual/ad-hoc
+			// download is governed by the resolved policy's ManualDownloadDial,
+			// evaluated HERE -- the auto-prune decision point -- against the same
+			// `policy` this pass already resolved above, rather than re-resolved at
+			// grace-entry time (see RetentionSweepRequest.ManualDownloadDepotArtifactIds'
+			// doc comment for that assumption). Review additionally surfaces the row
+			// on the review list via the same IReviewListService.ReportOutOfScopeAsync
+			// #1687 already wired for the out-of-scope skip above -- both are
+			// "never auto-removed, surfaced for explicit Admin disposition" per
+			// ADR-0034/approved design #16 section 2.
+			if (isManualDownloadCandidate)
+			{
+				ManualDownloadDial dial = ManualDownloadRetentionDialResolver.Resolve(policy);
+				if (ManualDownloadRetentionDialResolver.RequiresReview(dial))
+				{
+					await _reviewList.ReportOutOfScopeAsync(
+						row.DepotArtifactId,
+						ManualDownloadReviewReason,
+						cancellationToken).ConfigureAwait(false);
+				}
+
+				if (ManualDownloadRetentionDialResolver.SkipsAutoPrune(dial))
+				{
+					manualDownloadDialSkipped++;
 					continue;
 				}
 			}
@@ -261,7 +325,8 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			AutoPruned: autoPruned,
 			UntrackedCandidatesSkipped: untrackedSkipped,
 			Errors: errors,
-			OutOfScopeSkipped: outOfScopeSkipped);
+			OutOfScopeSkipped: outOfScopeSkipped,
+			ManualDownloadDialSkipped: manualDownloadDialSkipped);
 	}
 
 	public async Task<RetentionPurgeOutcome> PurgeImmediatelyAsync(
