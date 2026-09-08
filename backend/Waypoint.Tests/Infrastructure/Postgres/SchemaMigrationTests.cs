@@ -712,10 +712,11 @@ public sealed class SchemaMigrationTests
 	/// default, never a zero-default state reachable straight after migration. Uses
 	/// its own fresh database (<see cref="CreateFreshDatabaseAsync"/>), not the
 	/// collection-shared one -- other test classes in this collection
-	/// (<c>ConsumerViewRepositoryTests</c>, <c>ConsumerViewsApiTests</c>) delete every
-	/// row in <c>consumer_views</c> as part of their own setup, and since 0131 is
-	/// already recorded applied on the shared database by then, its
-	/// <c>ON CONFLICT DO NOTHING</c> seed never re-runs there.
+	/// (<c>ConsumerViewRepositoryTests</c>, <c>ConsumerViewsApiTests</c>) reset
+	/// <c>consumer_views</c> in their own setup and re-create the seeded row
+	/// themselves, and since 0131 is already recorded applied on the shared database
+	/// by then, its <c>ON CONFLICT DO NOTHING</c> seed never re-runs there -- so only
+	/// a fresh database can prove the MIGRATION is what seeds the row.
 	/// </summary>
 	[Fact]
 	public async Task Migrations_ConsumerViews_SeedsExactlyOneDefaultRow()
