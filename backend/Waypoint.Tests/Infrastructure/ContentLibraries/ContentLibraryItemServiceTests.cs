@@ -200,4 +200,453 @@ public sealed class ContentLibraryItemServiceTests : IAsyncLifetime
 			ContentLibraryItemOperationOutcome.ItemNotFound,
 			await _service.RemoveAsync(library.Id, Guid.NewGuid(), CancellationToken.None));
 	}
+
+	// ---- the traversal guard (review round 1, F1) -----------------------------------
+	//
+	// ContentLibraryItemService.ValidateFileName/ResolveItemFilePath is the only
+	// security guard this slice adds and round 1 proved it unpinned: the reviewer
+	// replaced its whole condition with `if (false)` and the suite stayed green,
+	// because nothing anywhere handed AddAsync/UpdateAsync a name that was not already
+	// a plain single segment. These cases hand it every shape the guard exists to
+	// reject, on BOTH entry points, and the traversal case additionally asserts that
+	// nothing landed outside the library root -- so a regression is caught by outcome,
+	// not only by exception type.
+
+	[Theory]
+	[InlineData("../escape.iso")]
+	[InlineData("../../escape.iso")]
+	[InlineData("sub/dir.iso")]
+	[InlineData("sub\\dir.iso")]
+	[InlineData("/abs/path.iso")]
+	[InlineData("..")]
+	[InlineData(".")]
+	[InlineData("")]
+	[InlineData("   ")]
+	public async Task AddAsync_RejectsAFileNameThatIsNotASinglePathSegment(string fileName)
+	{
+		ContentLibrary library = await SeedLibraryAsync($"vcsp-add-guard-{Guid.NewGuid():N}");
+
+		await Assert.ThrowsAsync<ArgumentException>(
+			() => _service.AddAsync(library.Id, fileName, ContentStream(), null, CancellationToken.None));
+	}
+
+	[Theory]
+	[InlineData("../escape.iso")]
+	[InlineData("../../escape.iso")]
+	[InlineData("sub/dir.iso")]
+	[InlineData("sub\\dir.iso")]
+	[InlineData("/abs/path.iso")]
+	[InlineData("..")]
+	[InlineData(".")]
+	[InlineData("")]
+	[InlineData("   ")]
+	public async Task UpdateAsync_RejectsAFileNameThatIsNotASinglePathSegment(string fileName)
+	{
+		ContentLibrary library = await SeedLibraryAsync($"vcsp-update-guard-{Guid.NewGuid():N}");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream(), null, CancellationToken.None);
+
+		await Assert.ThrowsAsync<ArgumentException>(
+			() => _service.UpdateAsync(library.Id, added!.Id, fileName, ContentStream(), null, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task AddAsync_WithATraversingFileName_WritesNothingOutsideTheItemDirectory()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-traversal");
+		string outsideLibrary = Path.Combine(_rootPath, "escape.iso");
+		string insideLibraryRoot = Path.Combine(library.DiskPath, "escape.iso");
+
+		await Assert.ThrowsAsync<ArgumentException>(
+			() => _service.AddAsync(library.Id, "../escape.iso", ContentStream("pwned"), null, CancellationToken.None));
+
+		Assert.False(File.Exists(outsideLibrary), $"the guard let a write escape to {outsideLibrary}");
+		Assert.False(File.Exists(insideLibraryRoot), $"the guard let a write escape to {insideLibraryRoot}");
+	}
+
+	[Fact]
+	public async Task UpdateAsync_WithATraversingFileName_LeavesThePriorPayloadAndDocumentsUntouched()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-traversal-update");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream("v1"), null, CancellationToken.None);
+		string itemDirectory = Path.Combine(library.DiskPath, added!.DirectoryName);
+		byte[] payloadBefore = await File.ReadAllBytesAsync(Path.Combine(itemDirectory, "disk.iso"));
+		byte[] itemsBefore = await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json"));
+
+		await Assert.ThrowsAsync<ArgumentException>(
+			() => _service.UpdateAsync(library.Id, added.Id, "../escape.iso", ContentStream("pwned"), null, CancellationToken.None));
+
+		Assert.False(File.Exists(Path.Combine(library.DiskPath, "escape.iso")));
+		Assert.False(File.Exists(Path.Combine(_rootPath, "escape.iso")));
+		Assert.Equal(payloadBefore, await File.ReadAllBytesAsync(Path.Combine(itemDirectory, "disk.iso")));
+		Assert.Equal(itemsBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json")));
+	}
+
+	// ---- payload atomicity and mutation ordering (review round 1, F2 and F3) --------
+
+	private const int LargePayloadLength = 2 * 1024 * 1024;
+
+	private static byte[] LargePayload(byte fill) => Enumerable.Repeat(fill, LargePayloadLength).ToArray();
+
+	/// <summary>
+	/// Every read a concurrent subscriber takes of an item's payload must see one
+	/// complete version of the file or the other -- never a truncated or half-rewritten
+	/// one. Both versions are uniform runs of a single byte and the same length, so
+	/// "complete" is checkable in one vectorised scan.
+	/// </summary>
+	private static void AssertPayloadIsAWholeVersion(byte[] bytes)
+	{
+		Assert.Equal(LargePayloadLength, bytes.Length);
+		byte first = bytes[0];
+		Assert.True(first is (byte)'a' or (byte)'b', $"payload started with an unexpected byte 0x{first:x2}");
+		Assert.True(
+			bytes.AsSpan().IndexOfAnyExcept(first) < 0,
+			"payload held a mix of the old and the new bytes -- a partially written file was observable");
+	}
+
+	[Fact]
+	public async Task UpdateAsync_ConcurrentReaders_NeverObserveAPartiallyWrittenPayload()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-update-atomic");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(
+			library.Id, "disk.iso", new MemoryStream(LargePayload((byte)'a')), null, CancellationToken.None);
+		string payloadPath = Path.Combine(library.DiskPath, added!.DirectoryName, "disk.iso");
+
+		using CancellationTokenSource stop = new();
+		int readCount = 0;
+		Task readerTask = Task.Run(async () =>
+		{
+			while (!stop.IsCancellationRequested)
+			{
+				// A truncate-in-place rewrite of the final path surfaces here either as
+				// a short/mixed buffer (caught by the assertion) or as a sharing
+				// violation on the exclusively held file -- File.Move's rename is the
+				// only thing standing between "always a whole file" and both.
+				AssertPayloadIsAWholeVersion(await File.ReadAllBytesAsync(payloadPath, CancellationToken.None));
+				Interlocked.Increment(ref readCount);
+			}
+		});
+
+		// Paced so the write occupies a window wide enough for the reader loop to land
+		// inside it, rather than relying on a full-speed 2 MiB copy being slow enough.
+		await using PacedStream content = new(LargePayload((byte)'b'), TimeSpan.FromMilliseconds(5));
+		(ContentLibraryItemOperationOutcome outcome, _) =
+			await _service.UpdateAsync(library.Id, added.Id, "disk.iso", content, null, CancellationToken.None);
+
+		await stop.CancelAsync();
+		await readerTask;
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.True(readCount > 0, "the reader loop never got a chance to run");
+		AssertPayloadIsAWholeVersion(await File.ReadAllBytesAsync(payloadPath));
+		Assert.Equal((byte)'b', (await File.ReadAllBytesAsync(payloadPath))[0]);
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	[Fact]
+	public async Task UpdateAsync_CancelledMidPayloadWrite_LeavesThePriorTreeCompletelyUntouched()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-update-cancel");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(
+			library.Id, "disk.iso", new MemoryStream(LargePayload((byte)'a')), null, CancellationToken.None);
+		string itemDirectory = Path.Combine(library.DiskPath, added!.DirectoryName);
+		string payloadPath = Path.Combine(itemDirectory, "disk.iso");
+		byte[] payloadBefore = await File.ReadAllBytesAsync(payloadPath);
+		byte[] itemsBefore = await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json"));
+		byte[] libBefore = await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "lib.json"));
+		byte[] itemJsonBefore = await File.ReadAllBytesAsync(Path.Combine(itemDirectory, "item.json"));
+
+		// Deterministically mid-write: the stream itself cancels the token the instant
+		// it has handed over its first chunk, so the cancellation is guaranteed to land
+		// after the payload copy has started and long before it could finish. No
+		// wall-clock polling is involved.
+		using CancellationTokenSource cts = new();
+		await using PacedStream content = new(LargePayload((byte)'b'), TimeSpan.Zero, cancelAfterFirstChunk: cts);
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(
+			() => _service.UpdateAsync(library.Id, added.Id, "disk.iso", content, null, cts.Token));
+
+		Assert.Equal(payloadBefore, await File.ReadAllBytesAsync(payloadPath));
+		Assert.Equal(itemsBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json")));
+		Assert.Equal(libBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "lib.json")));
+		Assert.Equal(itemJsonBefore, await File.ReadAllBytesAsync(Path.Combine(itemDirectory, "item.json")));
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	[Fact]
+	public async Task UpdateAsync_UnderARenamedReUpload_DeletesTheStaleFileOnlyAfterTheRepublish()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-update-order");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "old.iso", ContentStream("v1"), null, CancellationToken.None);
+		string itemDirectory = Path.Combine(library.DiskPath, added!.DirectoryName);
+
+		bool probing = false;
+		bool staleFileStillPresentAtRepublish = false;
+		bool newFileAlreadyPresentAtRepublish = false;
+		ContentLibraryItemService probed = new(_libraries, _items, new ProbingContentLibraryWriter(
+			new VcspContentLibraryWriter(),
+			() =>
+			{
+				if (!probing)
+				{
+					return;
+				}
+
+				staleFileStillPresentAtRepublish = File.Exists(Path.Combine(itemDirectory, "old.iso"));
+				newFileAlreadyPresentAtRepublish = File.Exists(Path.Combine(itemDirectory, "new.iso"));
+			}));
+
+		probing = true;
+		(ContentLibraryItemOperationOutcome outcome, _) =
+			await probed.UpdateAsync(library.Id, added.Id, "new.iso", ContentStream("v2"), null, CancellationToken.None);
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.True(newFileAlreadyPresentAtRepublish, "the new payload was not in place when items.json was rewritten to advertise it");
+		Assert.True(staleFileStillPresentAtRepublish, "the stale payload was unlinked while items.json still advertised it");
+		Assert.False(File.Exists(Path.Combine(itemDirectory, "old.iso")), "the stale payload was never cleaned up");
+		Assert.True(File.Exists(Path.Combine(itemDirectory, "new.iso")));
+	}
+
+	[Fact]
+	public async Task AddAsync_CancelledAtRepublish_LeavesTheIndexAndTheDiskAgreeing()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-add-cancel");
+		await _service.AddAsync(library.Id, "first.iso", ContentStream("v1"), null, CancellationToken.None);
+		byte[] itemsBefore = await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json"));
+		byte[] libBefore = await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "lib.json"));
+
+		using CancellationTokenSource cts = new();
+		ContentLibraryItemService probed = new(_libraries, _items, new ProbingContentLibraryWriter(
+			new VcspContentLibraryWriter(), () => cts.Cancel()));
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(
+			() => probed.AddAsync(library.Id, "second.iso", ContentStream("v2"), null, cts.Token));
+
+		// The republish never happened, so items.json/lib.json still describe exactly
+		// the previous library -- and every href they name still resolves. The new
+		// item's own directory exists but is advertised by nothing, which is the
+		// leftover shape the interface already documents, not an inconsistency.
+		Assert.Equal(itemsBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "items.json")));
+		Assert.Equal(libBefore, await File.ReadAllBytesAsync(Path.Combine(library.DiskPath, "lib.json")));
+		await AssertIndexAgreesWithDiskAsync(library);
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	[Fact]
+	public async Task RemoveAsync_RepublishesBeforeDeletingTheItemDirectory()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-remove-order");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream(), null, CancellationToken.None);
+		string itemDirectory = Path.Combine(library.DiskPath, added!.DirectoryName);
+
+		bool probing = false;
+		bool directoryStillPresentAtRepublish = false;
+		ContentLibraryItemService probed = new(_libraries, _items, new ProbingContentLibraryWriter(
+			new VcspContentLibraryWriter(),
+			() =>
+			{
+				if (probing)
+				{
+					directoryStillPresentAtRepublish = Directory.Exists(itemDirectory);
+				}
+			}));
+
+		probing = true;
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, await probed.RemoveAsync(library.Id, added.Id, CancellationToken.None));
+
+		Assert.True(
+			directoryStillPresentAtRepublish,
+			"the item directory was deleted before items.json stopped advertising it -- a reader in that window resolves an href to a missing path");
+		Assert.False(Directory.Exists(itemDirectory));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
+	[Fact]
+	public async Task RemoveAsync_CancelledAtRepublish_LeavesTheIndexAndTheDiskAgreeing()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-remove-cancel");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream(), null, CancellationToken.None);
+		string itemDirectory = Path.Combine(library.DiskPath, added!.DirectoryName);
+
+		using CancellationTokenSource cts = new();
+		ContentLibraryItemService probed = new(_libraries, _items, new ProbingContentLibraryWriter(
+			new VcspContentLibraryWriter(), () => cts.Cancel()));
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probed.RemoveAsync(library.Id, added.Id, cts.Token));
+
+		// The identity row is gone and the republish that would have dropped the entry
+		// from items.json never ran -- so items.json still lists the item, and the
+		// ordering under test is what keeps its directory there to back that listing.
+		// Deleting the directory first would have made this window self-contradictory.
+		Assert.True(Directory.Exists(itemDirectory), "the item directory was deleted even though items.json still advertises it");
+		await AssertIndexAgreesWithDiskAsync(library);
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	[Fact]
+	public async Task Mutations_ConcurrentReaders_NeverObserveAnAdvertisedItemWhoseFilesAreMissing()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-mutation-readers");
+		List<ContentLibraryItem> items = [];
+		for (int i = 0; i < 4; i++)
+		{
+			(_, ContentLibraryItem? seeded) = await _service.AddAsync(
+				library.Id, $"disk-{i}.iso", ContentStream($"seed-{i}"), null, CancellationToken.None);
+			items.Add(seeded!);
+		}
+
+		using CancellationTokenSource stop = new();
+		int readCount = 0;
+		Task readerTask = Task.Run(async () =>
+		{
+			while (!stop.IsCancellationRequested)
+			{
+				await AssertIndexAgreesWithDiskAsync(library);
+				Interlocked.Increment(ref readCount);
+			}
+		});
+
+		for (int round = 0; round < 4; round++)
+		{
+			await _service.UpdateAsync(
+				library.Id, items[round].Id, $"renamed-{round}.iso", ContentStream($"round-{round}"), null, CancellationToken.None);
+			await _service.AddAsync(library.Id, $"extra-{round}.iso", ContentStream($"extra-{round}"), null, CancellationToken.None);
+			await _service.RemoveAsync(library.Id, items[round].Id, CancellationToken.None);
+		}
+
+		await stop.CancelAsync();
+		await readerTask;
+
+		Assert.True(readCount > 0, "the reader loop never got a chance to run");
+		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	/// <summary>
+	/// The invariant every mutation must preserve at every instant a reader can look:
+	/// <c>items.json</c> parses, and every href it advertises -- each item's own
+	/// directory, its <c>item.json</c>, and each of its payload files -- resolves to a
+	/// file that is actually there.
+	/// </summary>
+	private static async Task AssertIndexAgreesWithDiskAsync(ContentLibrary library)
+	{
+		string itemsJsonPath = Path.Combine(library.DiskPath, "items.json");
+		byte[] bytes = await File.ReadAllBytesAsync(itemsJsonPath, CancellationToken.None);
+		using JsonDocument document = JsonDocument.Parse(bytes);
+		foreach (JsonElement item in document.RootElement.GetProperty("items").EnumerateArray())
+		{
+			string selfHref = item.GetProperty("selfHref").GetString()!;
+			string itemJsonPath = Path.Combine(library.DiskPath, Uri.UnescapeDataString(selfHref).Replace('/', Path.DirectorySeparatorChar));
+			Assert.True(File.Exists(itemJsonPath), $"items.json advertises '{selfHref}' but no item.json is there");
+			foreach (JsonElement file in item.GetProperty("files").EnumerateArray())
+			{
+				foreach (JsonElement href in file.GetProperty("hrefs").EnumerateArray())
+				{
+					string relative = Uri.UnescapeDataString(href.GetString()!).Replace('/', Path.DirectorySeparatorChar);
+					string filePath = Path.Combine(library.DiskPath, relative);
+					Assert.True(File.Exists(filePath), $"items.json advertises '{href.GetString()}' but no file is there");
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Wraps the real <see cref="VcspContentLibraryWriter"/> so a test can observe the
+	/// state of the tree at the exact moment the service republishes -- the ordering
+	/// findings F2 and F3 are both about what is on disk in that instant, which no
+	/// before/after assertion can see.
+	/// </summary>
+	private sealed class ProbingContentLibraryWriter : IContentLibraryWriter
+	{
+		private readonly IContentLibraryWriter _inner;
+		private readonly Action _atRepublish;
+
+		public ProbingContentLibraryWriter(IContentLibraryWriter inner, Action atRepublish)
+		{
+			_inner = inner;
+			_atRepublish = atRepublish;
+		}
+
+		public Task WriteAsync(ContentLibrary library, IReadOnlyList<ContentLibraryItemWrite> items, CancellationToken cancellationToken)
+		{
+			_atRepublish();
+			return _inner.WriteAsync(library, items, cancellationToken);
+		}
+	}
+
+	/// <summary>
+	/// An upload stream that hands its bytes over in fixed chunks, optionally pausing
+	/// between them so a payload write occupies a real window, and optionally
+	/// cancelling a token the moment its first chunk has been consumed so a mid-write
+	/// cancellation is deterministic instead of timing-dependent.
+	/// </summary>
+	private sealed class PacedStream : Stream
+	{
+		private const int ChunkSize = 64 * 1024;
+
+		private readonly byte[] _data;
+		private readonly TimeSpan _delay;
+		private readonly CancellationTokenSource? _cancelAfterFirstChunk;
+		private int _position;
+
+		public PacedStream(byte[] data, TimeSpan delay, CancellationTokenSource? cancelAfterFirstChunk = null)
+		{
+			_data = data;
+			_delay = delay;
+			_cancelAfterFirstChunk = cancelAfterFirstChunk;
+		}
+
+		public override bool CanRead => true;
+
+		public override bool CanSeek => false;
+
+		public override bool CanWrite => false;
+
+		public override long Length => _data.Length;
+
+		public override long Position
+		{
+			get => _position;
+			set => throw new NotSupportedException();
+		}
+
+		public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+		{
+			if (_delay > TimeSpan.Zero)
+			{
+				await Task.Delay(_delay, CancellationToken.None);
+			}
+
+			int count = Read(buffer.Span);
+			if (count > 0 && _cancelAfterFirstChunk is not null)
+			{
+				await _cancelAfterFirstChunk.CancelAsync();
+			}
+
+			return count;
+		}
+
+		public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+		public override int Read(Span<byte> buffer)
+		{
+			int count = Math.Min(Math.Min(ChunkSize, buffer.Length), _data.Length - _position);
+			if (count <= 0)
+			{
+				return 0;
+			}
+
+			_data.AsSpan(_position, count).CopyTo(buffer);
+			_position += count;
+			return count;
+		}
+
+		public override void Flush()
+		{
+		}
+
+		public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+		public override void SetLength(long value) => throw new NotSupportedException();
+
+		public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+	}
 }

@@ -89,22 +89,26 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 		}
 
 		// Reuses the SAME directory (== the item's own id) -- issue #1396 AC: an update
-		// never creates a new item identity. Stale files from a prior upload under a
-		// different name are removed first so this stays a one-file-per-item directory
-		// rather than accumulating orphaned bytes across renamed re-uploads.
+		// never creates a new item identity.
 		string itemDirectory = Path.Combine(library.DiskPath, existing.DirectoryName);
-		foreach (ContentLibraryItemFileWrite priorFile in existing.Files)
-		{
-			if (!string.Equals(priorFile.Name, fileName, StringComparison.Ordinal))
-			{
-				string stalePath = Path.Combine(itemDirectory, priorFile.Name);
-				if (File.Exists(stalePath))
-				{
-					File.Delete(stalePath);
-				}
-			}
-		}
 
+		// The ORDER of the four steps below is the atomicity contract, not an
+		// implementation detail. (1) The new payload lands via a same-directory temp
+		// file plus atomic rename (WriteFileAsync), so the file at the href items.json
+		// already advertises is never absent, truncated, or half-written for any
+		// instant -- a reader either gets the complete prior bytes or the complete new
+		// bytes. (2) The identity row moves. (3) The republish is what advertises the
+		// new name/size/content_hash, so it happens only once those bytes are already
+		// in place; a VCSP subscriber learns there is anything new solely by seeing
+		// lib.json.version move, and by then everything the new documents point at
+		// exists in full. (4) Stale files from a prior upload under a DIFFERENT name
+		// are deleted last, once nothing advertises them any more, keeping this a
+		// one-file-per-item directory without ever unlinking a file items.json still
+		// names. Doing (4) first -- the shape this method shipped with, caught in
+		// review round 1 -- left a window in which items.json advertised a file that
+		// was already gone, and truncating the final path in place left one in which
+		// it advertised a size and hash matching neither the file on disk nor
+		// anything else.
 		ContentLibraryItemFileWrite file = await WriteFileAsync(itemDirectory, fileName, content, cancellationToken).ConfigureAwait(false);
 		string type = InferType(fileName);
 
@@ -112,10 +116,28 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 			libraryId, itemId, fileName, type, description ?? string.Empty, [file], cancellationToken).ConfigureAwait(false);
 		if (outcome == ContentLibraryItemUpdateOutcome.NotFound)
 		{
+			// Lost a race against a concurrent remove of this item. The payload just
+			// renamed into place is orphaned inside a directory the winning remover
+			// deletes; nothing advertises it, so there is nothing reader-visible to
+			// compensate -- same shape of leftover AddAsync's library-delete race
+			// already accepts, surfaced honestly as item-not-found.
 			return (ContentLibraryItemOperationOutcome.ItemNotFound, null);
 		}
 
 		await RepublishAsync(library, cancellationToken).ConfigureAwait(false);
+
+		foreach (ContentLibraryItemFileWrite priorFile in existing.Files)
+		{
+			if (!string.Equals(priorFile.Name, fileName, StringComparison.Ordinal))
+			{
+				string stalePath = ResolveItemFilePath(itemDirectory, priorFile.Name);
+				if (File.Exists(stalePath))
+				{
+					File.Delete(stalePath);
+				}
+			}
+		}
+
 		ContentLibraryItem updated = (await _items.GetAsync(libraryId, itemId, cancellationToken).ConfigureAwait(false))!;
 		return (ContentLibraryItemOperationOutcome.Succeeded, updated);
 	}
@@ -140,13 +162,20 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 			return ContentLibraryItemOperationOutcome.ItemNotFound;
 		}
 
+		// Republish BEFORE unlinking anything (issue #1396 review round 1, F3). The
+		// republish rewrites items.json/lib.json from the identity table, which no
+		// longer holds this item, so it is the step that stops advertising the
+		// directory -- deleting the directory first left a window in which items.json
+		// still listed an item whose href resolved to a missing path. After the
+		// republish nothing points at these bytes and removing them is invisible.
+		await RepublishAsync(library, cancellationToken).ConfigureAwait(false);
+
 		string itemDirectory = Path.Combine(library.DiskPath, existing.DirectoryName);
 		if (Directory.Exists(itemDirectory))
 		{
 			Directory.Delete(itemDirectory, recursive: true);
 		}
 
-		await RepublishAsync(library, cancellationToken).ConfigureAwait(false);
 		return ContentLibraryItemOperationOutcome.Succeeded;
 	}
 
@@ -170,23 +199,57 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 	/// always-self-hash rule -- this service never trusts a caller-supplied hash), then
 	/// returns the <see cref="ContentLibraryItemFileWrite"/> the writer's own
 	/// per-write item-changed diff (<c>VcspContentLibraryWriter</c>) needs.
+	/// <para>
+	/// The bytes go to a same-directory temp file that is flushed to disk and then
+	/// renamed over the final path -- the same write-temp-then-rename primitive
+	/// <c>VcspContentLibraryWriter.WriteJsonAtomicAsync</c> uses for every VCSP
+	/// document, and for the same reason: the payload sits at an href
+	/// <c>items.json</c>/<c>item.json</c> already advertise, so a concurrent
+	/// subscriber must only ever fetch the complete prior file or the complete new
+	/// one, never a truncate-in-progress. Cancelling or failing before the rename
+	/// leaves the final path exactly as it was found and no <c>.tmp</c> artifact
+	/// behind.
+	/// </para>
 	/// </summary>
 	private static async Task<ContentLibraryItemFileWrite> WriteFileAsync(
 		string itemDirectory, string fileName, Stream content, CancellationToken cancellationToken)
 	{
-		string filePath = Path.Combine(itemDirectory, fileName);
+		cancellationToken.ThrowIfCancellationRequested();
+
+		string filePath = ResolveItemFilePath(itemDirectory, fileName);
+		string tempPath = Path.Combine(itemDirectory, $".{fileName}.{Guid.NewGuid():N}.tmp");
 		using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 		long size = 0;
 
-		await using (FileStream output = new(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
+		try
 		{
-			byte[] buffer = new byte[81920];
-			int read;
-			while ((read = await content.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+			await using (FileStream output = new(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
 			{
-				await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-				hasher.AppendData(buffer, 0, read);
-				size += read;
+				byte[] buffer = new byte[81920];
+				int read;
+				while ((read = await content.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+				{
+					await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+					hasher.AppendData(buffer, 0, read);
+					size += read;
+				}
+
+				await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+				// fsync before the rename, matching DepotIdentityTool.SeedMachineId
+				// (issue #760): a directory entry that reaches stable storage ahead of
+				// the payload's own data would leave the advertised href pointing at a
+				// short file after a host crash.
+				output.Flush(flushToDisk: true);
+			}
+
+			cancellationToken.ThrowIfCancellationRequested();
+			File.Move(tempPath, filePath, overwrite: true);
+		}
+		finally
+		{
+			if (File.Exists(tempPath))
+			{
+				File.Delete(tempPath);
 			}
 		}
 
@@ -211,16 +274,51 @@ public sealed class ContentLibraryItemService : IContentLibraryItemService
 	/// Same shape of guard as <c>VcspContentLibraryWriter.ValidateDirectoryName</c> and
 	/// <c>ContentLibraryRepository.ResolveDiskPath</c>: a single path segment, no
 	/// <c>.</c>/<c>..</c>, no separators, never absolute -- this is the code that
-	/// combines an operator-supplied file name with a real filesystem path.
+	/// combines an operator-supplied file name with a real filesystem path. Both
+	/// separator characters are rejected explicitly rather than left to
+	/// <see cref="Path.GetFileName(string)"/>, which on Linux does not treat
+	/// <c>\</c> as one and would happily admit <c>sub\dir.iso</c> as a single
+	/// segment; the closed set of invalid file-name characters is rejected too, so a
+	/// NUL-embedded name cannot reach the filesystem APIs below.
 	/// </summary>
 	private static void ValidateFileName(string fileName)
 	{
 		if (string.IsNullOrWhiteSpace(fileName)
 			|| fileName is "." or ".."
+			|| fileName.Contains('/', StringComparison.Ordinal)
+			|| fileName.Contains('\\', StringComparison.Ordinal)
+			|| fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
 			|| Path.GetFileName(fileName) != fileName
 			|| Path.IsPathRooted(fileName))
 		{
 			throw new ArgumentException($"'{fileName}' is not a valid item file name.", nameof(fileName));
 		}
+	}
+
+	/// <summary>
+	/// The rooted-resolution half of this repository's escape-guard convention, applied
+	/// at the one place a file name becomes a real path exactly as
+	/// <c>ContentLibraryRepository.ResolveDiskPath</c> applies it for a library name:
+	/// the name-level check above is re-run, then the combined path is fully resolved
+	/// and asserted to sit strictly under <paramref name="itemDirectory"/>. A
+	/// name-level check alone pins only the names its own author thought of; resolving
+	/// and comparing pins the property that actually matters -- nothing this service
+	/// writes, and nothing it deletes, can land outside the item's own directory.
+	/// </summary>
+	private static string ResolveItemFilePath(string itemDirectory, string fileName)
+	{
+		ValidateFileName(fileName);
+
+		string directoryFullPath = Path.GetFullPath(itemDirectory);
+		string filePath = Path.GetFullPath(Path.Combine(directoryFullPath, fileName));
+		string directoryWithSeparator = directoryFullPath.EndsWith(Path.DirectorySeparatorChar)
+			? directoryFullPath
+			: directoryFullPath + Path.DirectorySeparatorChar;
+		if (!filePath.StartsWith(directoryWithSeparator, StringComparison.Ordinal))
+		{
+			throw new ArgumentException($"'{fileName}' does not resolve inside the item directory.", nameof(fileName));
+		}
+
+		return filePath;
 	}
 }
