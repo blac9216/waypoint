@@ -172,4 +172,85 @@ public sealed class CatalogPullJobHandlerTests
 		(CatalogPullJobHandler handler, _) = CreateHandler(null);
 		Assert.Equal("catalog-pull", handler.JobType);
 	}
+
+	private static DepotArtifactUpsert Entry(string relativePath) =>
+		new(relativePath, "sha", DepotArtifactStatuses.Indexed, "{}");
+
+	/// <summary>
+	/// Issue #1852's second acceptance criterion. The legacy-identity map's KEY is
+	/// derived from its VALUE (the value's trailing path segment), so the shape a
+	/// violated bare-fileName-uniqueness invariant actually takes here is a key
+	/// collision: two catalog entries under different components sharing one file
+	/// name both derive the same legacy identity. The pre-fix indexer assignment
+	/// (<c>legacyRenames[legacyIdentity] = candidate.RelativePath</c>) silently kept
+	/// whichever entry the parser emitted last, so a pre-#1784 row keyed by that bare
+	/// name would have been renamed onto an arbitrary winner -- attributing one
+	/// product's binary to another. Asserts the collision is refused rather than
+	/// resolved by a guess: the ambiguous identity is absent from the map entirely
+	/// AND reported to the caller so the run can say so.
+	/// </summary>
+	[Fact]
+	public void BuildLegacyRenames_TwoEntriesShareOneBareFileName_ExcludesTheAmbiguousIdentityRatherThanPickingAWinner()
+	{
+		DepotArtifactUpsert[] parsed =
+		[
+			Entry("PROD/COMP/VCENTER/shared.iso"),
+			Entry("PROD/COMP/NSX/shared.iso"),
+			Entry("PROD/COMP/VCENTER/unique.iso"),
+		];
+
+		Dictionary<string, string> renames = CatalogPullJobHandler.BuildLegacyRenames(parsed, out IReadOnlyList<string> ambiguous);
+
+		Assert.Equal(["shared.iso"], ambiguous);
+		Assert.False(renames.ContainsKey("shared.iso"));
+		Assert.Equal("PROD/COMP/VCENTER/unique.iso", renames["unique.iso"]);
+		Assert.Single(renames);
+	}
+
+	/// <summary>
+	/// The exclusion above must not depend on which of the colliding entries the
+	/// parser happens to emit first -- the defect being fixed was precisely a
+	/// non-deterministic last-write-wins. Same two entries in the opposite order
+	/// must produce the identical outcome.
+	/// </summary>
+	[Fact]
+	public void BuildLegacyRenames_CollidingEntriesInEitherOrder_ProduceTheSameResult()
+	{
+		Dictionary<string, string> forward = CatalogPullJobHandler.BuildLegacyRenames(
+			[Entry("PROD/COMP/VCENTER/shared.iso"), Entry("PROD/COMP/NSX/shared.iso")],
+			out IReadOnlyList<string> forwardAmbiguous);
+		Dictionary<string, string> reverse = CatalogPullJobHandler.BuildLegacyRenames(
+			[Entry("PROD/COMP/NSX/shared.iso"), Entry("PROD/COMP/VCENTER/shared.iso")],
+			out IReadOnlyList<string> reverseAmbiguous);
+
+		Assert.Empty(forward);
+		Assert.Empty(reverse);
+		Assert.Equal(["shared.iso"], forwardAmbiguous);
+		Assert.Equal(["shared.iso"], reverseAmbiguous);
+	}
+
+	/// <summary>
+	/// The ordinary (non-violating) catalog must be unaffected by the new
+	/// enforcement: every distinct bare file name still maps to its depot-relative
+	/// path, an entry that is already bare (no <c>/</c>) is still skipped rather than
+	/// mapped onto itself, and nothing is reported ambiguous.
+	/// </summary>
+	[Fact]
+	public void BuildLegacyRenames_DistinctBareFileNames_MapsEveryEntryAndReportsNoAmbiguity()
+	{
+		DepotArtifactUpsert[] parsed =
+		[
+			Entry("PROD/COMP/VCENTER/a.iso"),
+			Entry("PROD/COMP/NSX/b.iso"),
+			Entry("already-bare.iso"),
+		];
+
+		Dictionary<string, string> renames = CatalogPullJobHandler.BuildLegacyRenames(parsed, out IReadOnlyList<string> ambiguous);
+
+		Assert.Empty(ambiguous);
+		Assert.Equal(2, renames.Count);
+		Assert.Equal("PROD/COMP/VCENTER/a.iso", renames["a.iso"]);
+		Assert.Equal("PROD/COMP/NSX/b.iso", renames["b.iso"]);
+		Assert.False(renames.ContainsKey("already-bare.iso"));
+	}
 }
