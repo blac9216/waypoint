@@ -1,0 +1,13 @@
+name: tmp-inotify-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe inotify ceiling
+        run: |
+          echo "max_user_instances:"
+          cat /proc/sys/fs/inotify/max_user_instances
+          echo "max_user_watches:"
+          cat /proc/sys/fs/inotify/max_user_watches
+          nproc
