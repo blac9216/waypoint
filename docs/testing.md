@@ -58,6 +58,78 @@ identifiers.
 
 ---
 
+## Bulk `WebApplicationFactory` failures: the inotify instance ceiling, not "contention" (issue #1858)
+
+If `Waypoint.Tests.Api`'s `WebApplicationFactory`-based tests fail in bulk with
+
+```
+System.InvalidOperationException: The entry point exited without ever building an IHost
+```
+
+**do not write this off as generic shared-host contention.** Every session that did
+so was wrong, including this one for several weeks. The xUnit message above is only
+the symptom xUnit reports; it hides the real exception, which is thrown one layer
+down inside `Host.CreateApplicationBuilder` by a `FileSystemWatcher` the host creates
+for configuration-reload watching:
+
+```
+IOException: The configured user limit (128) on the number of inotify instances has been reached
+```
+
+Every `WebApplicationFactory` instance takes one inotify instance. `128` is the Linux
+kernel default for `fs.inotify.max_user_instances`. On a shared devcontainer host
+running several agents' backend suites concurrently, that ceiling is reached quickly,
+and every host boot after that point fails the same way — not because the machine is
+"busy", but because the specific per-user resource is exhausted. Measured on this host
+on 2026-09-08 with seven agents in flight: one full-suite run reported 787 failures, of
+which 773 were this exact cause, and three separate reviewers in that same session
+independently mis-attributed it to load before the real cause was found (PR #1843
+round 1). Two other issues (#1657, #1670) were closed on the "contention" explanation
+and had to be reopened once this was understood.
+
+**How to confirm it, rather than guess:**
+
+1. Read the live ceiling: `cat /proc/sys/fs/inotify/max_user_instances`.
+2. Capture the **child process's own output**, not only the xUnit summary line — the
+   `IOException` text above appears there, not in `dotnet test`'s own top-level
+   failure message. Redirect or run with detailed verbosity so the inner exception is
+   not truncated.
+
+**How this environment's ceiling is set — and why raising it live does not stick.**
+`sudo sysctl -w fs.inotify.max_user_instances=1024` clears the symptom immediately
+but is process-lifetime only: it is lost on host reboot or on a fresh container, and
+it is not part of any file this repository controls. This repository ships no
+devcontainer definition of its own — the devcontainer used to develop it lives in a
+separate, personal, host-level configuration directory outside this repository's git
+history and outside this repo's review process; there is no `runArgs`,
+`initializeCommand`, or compose `sysctls:` entry in this repository to edit, because
+the devcontainer definition itself is not here. The honest, durable fix is therefore a
+**documented host prerequisite**, not a repository change:
+
+- Before running the backend suite (or any bulk `WebApplicationFactory` fixture run)
+  on a shared devcontainer host, confirm
+  `cat /proc/sys/fs/inotify/max_user_instances` reads at least `1024`.
+- If it reads the kernel default (`128`), raise it for the session with
+  `sudo sysctl -w fs.inotify.max_user_instances=1024`, and — if you maintain the
+  devcontainer definition for this host — persist it there (a `sysctls:` entry on the
+  devcontainer's compose service, or a `/etc/sysctl.d/*.conf` drop-in baked into the
+  container image) instead of re-running the live `sysctl` every session.
+
+**CI is checked for the same ceiling.** Verified 2026-09-09 by running a throwaway
+`pull_request`-triggered GitHub Actions workflow step on a real `ubuntu-latest` hosted
+runner that read `/proc/sys/fs/inotify/max_user_instances` directly: the hosted
+runner reported **1280**, not the Linux default of 128 — well above the level that
+caused failures on this shared devcontainer host. CI's backend job also runs alone per
+PR (`concurrency: cancel-in-progress` per workflow, one backend job per run), so it
+does not accumulate concurrent `WebApplicationFactory` hosts the way several agents
+sharing one devcontainer do. CI is therefore not currently a latent flake source for
+this failure mode. This was confirmed by direct measurement on a live hosted-runner
+run, not inferred from general documentation; the throwaway probe workflow used to
+take the reading was removed immediately afterward and does not ship in this
+repository.
+
+---
+
 ## Devcontainer bind mounts: source paths resolve on the host, not in the container
 
 If you are running `docker compose` (or plain `docker run -v`) from inside the
