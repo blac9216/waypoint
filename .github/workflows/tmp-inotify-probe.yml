@@ -1,5 +1,5 @@
 name: tmp-inotify-probe
-on: workflow_dispatch
+on: pull_request
 jobs:
   probe:
     runs-on: ubuntu-latest
