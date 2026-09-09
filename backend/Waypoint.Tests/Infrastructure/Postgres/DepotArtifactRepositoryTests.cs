@@ -332,6 +332,106 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1851: pins the edge case its own Motivation section verifies as
+	/// unreachable through the application today (<c>superseded_at</c> is only ever
+	/// set on a bare-fileName FROM identity, never on a
+	/// <c>PROD/COMP/&lt;product&gt;/&lt;fileName&gt;</c> TO identity) but not
+	/// guarded against in SQL -- fabricated directly against the table (not via
+	/// <see cref="DepotArtifactRepository.RekeyManyAsync"/> or
+	/// <see cref="DepotArtifactRepository.UpsertAsync"/>, neither of which can
+	/// produce it) since that is the only way to construct it. Before the fix, step
+	/// 2's rename guard (no <c>superseded_at</c> filter) saw the fabricated
+	/// superseded row and blocked the rename, and step 3's merge (no filter on its
+	/// own <c>target</c>) then folded the legacy row's facts into that
+	/// already-superseded row and superseded the legacy row too -- two superseded
+	/// rows, zero visible, permanently (issue #1851's "Current Behavior"). After the
+	/// fix (step 3's <c>target.superseded_at IS NULL</c>), this pair matches
+	/// neither step 2 (blocked by the real <c>depot_artifacts_relative_path_key</c>
+	/// UNIQUE constraint, which does not exempt superseded rows, regardless of any
+	/// SQL-level filter) nor step 3 -- the legacy row is left untouched rather than
+	/// corrupted.
+	/// </summary>
+	[Fact]
+	public async Task RekeyManyAsync_ToIdentityRowIsAlreadySuperseded_LeavesTheLegacyRowUntouchedRatherThanCorruptingIt()
+	{
+		string legacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string newId = $"PROD/COMP/VCENTER/{legacyId}";
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(legacyId, "sha-legacy", "indexed", "{}"), CancellationToken.None);
+
+		await using (NpgsqlConnection fabricate = new(_fixture.ConnectionString))
+		{
+			await fabricate.OpenAsync();
+			await using NpgsqlCommand insertSupersededToRow = new(
+				"INSERT INTO depot_artifacts (relative_path, status, superseded_at) VALUES ($1, 'indexed', now())",
+				fabricate);
+			insertSupersededToRow.Parameters.AddWithValue(newId);
+			await insertSupersededToRow.ExecuteNonQueryAsync();
+		}
+
+		int reconciled = await _repository.RekeyManyAsync(
+			new Dictionary<string, string> { [legacyId] = newId }, CancellationToken.None);
+
+		Assert.Equal(0, reconciled);
+
+		(IReadOnlyList<DepotArtifact> items, long total) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, CancellationToken.None);
+		DepotArtifact survivor = Assert.Single(items.Where(item => item.ExternalId == legacyId || item.ExternalId == newId));
+		Assert.Equal(legacyId, survivor.ExternalId);
+		Assert.Equal("sha-legacy", survivor.Sha256);
+		_ = total;
+	}
+
+	/// <summary>
+	/// Issue #1852's first gap: <c>RekeyManyAsync</c> replaced the per-artifact
+	/// <c>RekeyAsync(string, string)</c>, which began with
+	/// <c>ArgumentException.ThrowIfNullOrWhiteSpace</c> on both its FROM and TO
+	/// arguments. The batched shape validated only the dictionary itself, so a
+	/// whitespace-only value (a plausible real-world case: a bare-fileName legacy
+	/// identity that is itself just whitespace never occurs, but the derived TO
+	/// side is string-built by <c>CatalogPullJobHandler</c> and a defect there
+	/// could produce one) flowed unvalidated into the batched SQL. Asserts the
+	/// restored per-identity check throws before any connection is opened.
+	/// </summary>
+	[Fact]
+	public async Task RekeyManyAsync_WhitespaceOnlyToIdentity_ThrowsRatherThanFlowingIntoTheBatchedSql()
+	{
+		string legacyId = $"legacy-{Guid.NewGuid():N}.iso";
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _repository.RekeyManyAsync(
+			new Dictionary<string, string> { [legacyId] = "   " }, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Issue #1852's second gap: <c>CatalogPullJobHandler</c>'s batch-build comment
+	/// asserts "a Dictionary naturally dedupes -- two artifacts never share a bare
+	/// fileName under this catalog's own uniqueness", with no guard or test pinning
+	/// it. This does not touch that call site (out of this file's scope, per the
+	/// dispatch), but proves the defense added here instead: two different FROM
+	/// legacy identities renaming onto the SAME TO identity -- the shape a violated
+	/// bare-fileName-uniqueness invariant would actually produce, since two
+	/// dictionary keys can never collide but their VALUES can -- must refuse rather
+	/// than reach the batched SQL, where <c>depot_artifacts_relative_path_key</c>'s
+	/// real UNIQUE constraint would otherwise let whichever UNNEST row is processed
+	/// first win silently.
+	/// </summary>
+	[Fact]
+	public async Task RekeyManyAsync_TwoDifferentFromIdentitiesTargetTheSameToIdentity_ThrowsRatherThanSilentlyPickingAWinner()
+	{
+		string firstLegacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string secondLegacyId = $"legacy-{Guid.NewGuid():N}.iso";
+		string sharedNewId = $"PROD/COMP/VCENTER/{Guid.NewGuid():N}.iso";
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _repository.RekeyManyAsync(
+			new Dictionary<string, string>
+			{
+				[firstLegacyId] = sharedNewId,
+				[secondLegacyId] = sharedNewId,
+			}, CancellationToken.None));
+	}
+
+	/// <summary>
 	/// Issue #1488 acceptance criterion: migration 0100's <c>external_id</c> -&gt;
 	/// <c>relative_path</c> rename must run cleanly against a fixture carrying
 	/// pre-existing <c>depot_artifacts</c> rows from BOTH legacy namespaces --

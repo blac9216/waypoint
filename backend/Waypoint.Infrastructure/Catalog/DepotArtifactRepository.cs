@@ -123,6 +123,34 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 			return 0;
 		}
 
+		// Issue #1852: the per-artifact RekeyAsync(string, string) this method replaced
+		// began with ArgumentException.ThrowIfNullOrWhiteSpace on both arguments; the
+		// batched shape validated only the dictionary itself, letting a null/empty/
+		// whitespace key or value flow unvalidated into the text[] parameters below.
+		// Restore the same per-identity check the single-artifact path always had.
+		HashSet<string> seenToIdentities = new(StringComparer.Ordinal);
+		foreach (KeyValuePair<string, string> pair in renames)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(pair.Key);
+			ArgumentException.ThrowIfNullOrWhiteSpace(pair.Value);
+
+			// Issue #1852's second gap: CatalogPullJobHandler's caller-side dedup
+			// ("a Dictionary naturally dedupes -- two artifacts never share a bare
+			// fileName") is an unenforced comment, not a guard. This does not fix
+			// that call site (out of this file's scope), but it closes the same gap
+			// defensively here: two different FROM identities renaming onto the same
+			// TO identity would violate depot_artifacts_relative_path_key's real
+			// UNIQUE constraint at the SQL layer in an unpredictable way (whichever
+			// UNNEST row the rename statement processes first wins, silently). Refuse
+			// it explicitly instead.
+			if (!seenToIdentities.Add(pair.Value))
+			{
+				throw new ArgumentException(
+					$"RekeyManyAsync's renames must not map two different FROM identities onto the same TO identity ('{pair.Value}').",
+					nameof(renames));
+			}
+		}
+
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -154,7 +182,16 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 
 		// Step 2: rename every legacy row onto its TO identity in one statement,
 		// except where the TO identity already has a row (issue #1804's collision
-		// case -- step 3 below reconciles those).
+		// case -- step 3 below reconciles those). Deliberately unfiltered by
+		// superseded_at (issue #1851): unlike step 1 and step 3's legacy join, this
+		// guard exists to avoid a real depot_artifacts_relative_path_key UNIQUE
+		// violation, and that constraint applies to EVERY row regardless of
+		// superseded_at -- a superseded row still permanently occupies its
+		// relative_path (migration 0134: never cleared, never deleted), so ANY row
+		// at the TO identity, superseded or not, must block the rename here or the
+		// UPDATE below would fail outright. Step 3's target filter below is the
+		// half of this pair that issue #1851 actually needed: without it, this
+		// case fell through to a merge into an already-superseded target.
 		int renamed;
 		await using (NpgsqlCommand rename = new(
 			"""
@@ -185,6 +222,18 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 		// has no Delete/Remove/Purge-named member (design #16 section 2's
 		// never-auto-remove policy, ReviewListServiceTests.
 		// Interface_HasNoDeleteOrRemoveOrPurgeMethod).
+		//
+		// Issue #1851: target.superseded_at IS NULL is the fix. Without it, a TO
+		// identity occupied by an already-superseded row (verified unreachable
+		// today -- superseded_at is only ever set on a bare-fileName FROM identity,
+		// never on a "PROD/COMP/<product>/<fileName>" TO identity -- but not
+		// guarded against) would still match here as "target", folding the legacy
+		// row's facts into a row nothing lists and then superseding the legacy row
+		// too: two superseded rows, zero visible, permanently. With the filter,
+		// that pair matches neither step 2 (blocked by the real UNIQUE constraint
+		// on relative_path, which does not exempt superseded rows) nor step 3
+		// (blocked by this filter) -- the legacy row is left untouched rather than
+		// corrupted, and the next pull's step 1 finds it again and retries.
 		int superseded;
 		await using (NpgsqlCommand merge = new(
 			"""
@@ -196,7 +245,7 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 				    last_verified_at = COALESCE(target.last_verified_at, legacy.last_verified_at)
 				FROM pairs p
 				JOIN depot_artifacts legacy ON legacy.relative_path = p.from_path AND legacy.superseded_at IS NULL
-				WHERE target.relative_path = p.to_path
+				WHERE target.relative_path = p.to_path AND target.superseded_at IS NULL
 				RETURNING legacy.id AS legacy_id
 			)
 			UPDATE depot_artifacts d
