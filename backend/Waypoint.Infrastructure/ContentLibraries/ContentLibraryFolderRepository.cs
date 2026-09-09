@@ -334,6 +334,21 @@ public sealed class ContentLibraryFolderRepository : IContentLibraryFolderReposi
 			}
 		}
 
+		// Migration 0133 (issue #1396) added a real FK from this table's item_id
+		// onto content_library_items -- an unchecked INSERT for a non-existent item
+		// would otherwise raise an uncaught SQLSTATE 23503 here, surfacing as a 500
+		// instead of a clean ItemNotFound.
+		await using (NpgsqlCommand itemCheck = new(
+			"SELECT 1 FROM content_library_items WHERE id = $1 AND library_id = $2", connection, transaction))
+		{
+			itemCheck.Parameters.AddWithValue(itemId);
+			itemCheck.Parameters.AddWithValue(libraryId);
+			if (await itemCheck.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+			{
+				return ContentLibraryItemAssignmentOutcome.ItemNotFound;
+			}
+		}
+
 		await using NpgsqlCommand upsert = new(
 			"""
 			INSERT INTO content_library_item_folders (library_id, item_id, folder_id)

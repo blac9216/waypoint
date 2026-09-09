@@ -181,7 +181,7 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-api-assign");
 		Guid folderId = await CreateFolderAsync(libraryId, "Holds-item", null);
-		Guid itemId = Guid.NewGuid();
+		Guid itemId = await SeedItemAsync(libraryId);
 
 		HttpResponseMessage assign = await SendAsync(
 			HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{itemId}/folder", "Admin", new { folder_id = folderId });
@@ -241,6 +241,7 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-api-rbac-operator");
 		Guid folderId = await CreateFolderAsync(libraryId, "Gate", null);
+		Guid itemId = await SeedItemAsync(libraryId);
 
 		Assert.Equal(
 			HttpStatusCode.Created,
@@ -250,7 +251,7 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Operator", new { name = "Renamed-by-operator" })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.NoContent,
-			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{Guid.NewGuid()}/folder", "Operator", new { folder_id = folderId })).StatusCode);
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{itemId}/folder", "Operator", new { folder_id = folderId })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.Forbidden,
 			(await SendAsync(HttpMethod.Delete, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Operator", body: null)).StatusCode);
@@ -261,13 +262,14 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 	{
 		Guid libraryId = await SeedLibraryAsync("vcsp-api-admin-ok");
 		Guid folderId = await CreateFolderAsync(libraryId, "Ok", null);
+		Guid itemId = await SeedItemAsync(libraryId);
 
 		Assert.Equal(
 			HttpStatusCode.OK,
 			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Admin", new { name = "Renamed" })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.NoContent,
-			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{Guid.NewGuid()}/folder", "Admin", new { folder_id = folderId })).StatusCode);
+			(await SendAsync(HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{itemId}/folder", "Admin", new { folder_id = folderId })).StatusCode);
 		Assert.Equal(
 			HttpStatusCode.Conflict,
 			(await SendAsync(HttpMethod.Delete, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Admin", body: null)).StatusCode);
@@ -293,6 +295,29 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
+	/// <summary>
+	/// Migration 0133 (issue #1396) added a real FK from
+	/// <c>content_library_item_folders.item_id</c> onto <c>content_library_items</c> --
+	/// every assignment test below now needs a real item row, not an arbitrary
+	/// <see cref="Guid"/>.
+	/// </summary>
+	private async Task<Guid> SeedItemAsync(Guid libraryId)
+	{
+		Guid itemId = Guid.NewGuid();
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO content_library_items (id, library_id, directory_name, name, type, description, version, files)
+			VALUES ($1, $2, $3, 'disk.iso', 'vcsp.iso', '', 1, '[{"name":"disk.iso","size":1,"content_hash":"hash"}]'::jsonb)
+			""", connection);
+		insert.Parameters.AddWithValue(itemId);
+		insert.Parameters.AddWithValue(libraryId);
+		insert.Parameters.AddWithValue(itemId.ToString("N"));
+		await insert.ExecuteNonQueryAsync();
+		return itemId;
+	}
+
 	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)
 	{
 		HttpRequestMessage request = new(method, path);
@@ -310,7 +335,8 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync().ConfigureAwait(false);
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE content_library_item_folders, content_library_folders, content_libraries RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE content_library_item_folders, content_library_items, content_library_folders, content_libraries RESTART IDENTITY CASCADE",
+			connection);
 		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
 	}
 }
