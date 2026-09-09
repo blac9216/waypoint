@@ -42,3 +42,9 @@ align these 1:1 with the issue's Acceptance Criteria.
 `n/a` | `pending-live` — <what only the real stack can prove>. Copied from the issue;
 the reviewer sets the board's `Verified` field from this line at merge.
 ```
+
+This section is required on PRs opened on branches created on or after workflow v2's
+install date; older in-flight branches are exempt (reviewer infers-and-notes instead
+of blocking the round). See `docs/process/work-tracking.md`'s "`## Verified
+expectation` (PR-body section) and its retroactivity rule" section for the exact date
+and the rule's scope (#1205).

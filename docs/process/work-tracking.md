@@ -55,6 +55,23 @@ Only two. Every field is something a human or the orchestrator must keep honest.
 Unit, integration and synthetic end-to-end tests gate the merge and are therefore
 implied by *Done*; *Verified* tracks only post-merge live proof.
 
+### `## Verified expectation` (PR-body section) and its retroactivity rule
+
+The board's *Verified* field above is set at merge; the PR body's
+[`## Verified expectation`](../../.claude/skills/github-workflow/references/templates/pr-body.md)
+section is the pre-merge prediction the reviewer copies it from — `n/a` or
+`pending-live`, plus what only the real stack can prove. Both sides read the same
+contract: an author writes the section, a reviewer sets the field from it.
+
+**Retroactivity** (#1205): the section is **required** on any PR opened on a branch
+created on or after workflow v2's install date, `2026-08-29` (commit `46b7aa5`).
+Branches opened before that date, still in flight, are not retroactively required to
+add it — a reviewer on such a PR infers the expectation from the issue and the PR's
+own content (as PR #1151's round-2 review did, inferring `n/a`) and notes the
+inference in the review comment rather than blocking the round on a missing header.
+Already-merged pre-v2 PRs (#1188, #1145, #1141 among others) are not amended
+retroactively; this rule governs PRs still open or yet to open, not history.
+
 ## Rules
 
 - **Acceptance criteria must be provable when the PR merges.** An issue closes at

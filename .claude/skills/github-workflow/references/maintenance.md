@@ -19,6 +19,14 @@ basic labels; the filer cannot decide precedence. For each item:
   is a standalone theme. Check the target epic's child count.
 - **Sequence it**: `priority:*`; native `blocked by` links where order matters; fold
   small items into the in-flight issue whose natural home they are (say so on both).
+- **Acceptance-criteria gate** (#1253): before moving anything to Ready, check the
+  issue has an `## Acceptance Criteria` section with native checkboxes — the merge-time
+  proof record a reviewer ticks. If it does not, derive one now from the issue's own
+  prose (its "Proposed Enhancement"/"Proposed Changes"/motivation bullets) and add it;
+  never move an issue to Ready without one. An issue already In progress or beyond
+  found missing one during a pass is backfilled the same way, retroactively, so the
+  record matches what its PR will be judged against — do not wait for a reviewer to
+  reconstruct it from prose the way PR #1221 (issue #1115) had to.
 - **Move it**: Ready if the owner has released it for work; Backlog if not (add the
   `backlog` label; a milestone may or may not be set — Backlog means "don't work it", not
   "unplanned").

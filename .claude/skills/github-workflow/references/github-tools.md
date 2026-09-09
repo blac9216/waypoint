@@ -102,3 +102,87 @@ Native reviews therefore need a second account; with one account the verdict of 
 stays the `## PR Review — …` comment plus the merge. Caveat 8: **`gh auth switch` is
 global** — never switch accounts mid-session; give the reviewer its identity via
 `GH_TOKEN` in its own process.
+
+## Scripts — home-only, not in this repo checkout (#1854)
+
+The skill's helper scripts (`post-comment.sh`, `check-manifest.sh`,
+`check-test-steps.sh`, `preflight.sh`, `stamp-claim.sh`, `home-deferred.sh`,
+`batch-deferred.sh`, `board-audit.sh`, `save-log.sh`, `stall-check.sh`, and the
+`scripts/lib/` helpers they source) exist only in each host's home-directory skill
+install, e.g. `/home/vscode/.claude/skills/github-workflow/scripts/` — **verified**:
+`git log --all -- .claude/skills/github-workflow/scripts` on this repo is empty, and
+`.claude/skills/github-workflow/` here contains only `SKILL.md` and `references/`.
+Any instruction that names a repo-relative path
+(`.claude/skills/github-workflow/scripts/<name>.sh`) does not resolve in this
+checkout — invoke the script by its **absolute** home path instead:
+
+```
+bash /home/vscode/.claude/skills/github-workflow/scripts/post-comment.sh <issue-or-pr> <body-file>
+```
+
+**Cloud sandbox / any environment without that home install**: fall back to the `gh`
+or MCP equivalent named for the operation elsewhere in this file — for posting a
+comment specifically, `gh pr comment <N> --repo <owner>/<repo> --body-file <file>`
+(compose the body in a file first; never `gh … --body "@<path>"`, which posts the
+literal path string rather than the file's contents).
+
+**Why not sync `scripts/` into the repo instead** (the alternative this issue
+weighed): the skill's own regression suite (`tests/test_agent_rules_drift.sh`,
+`tests/test_rule_pointer_drift.sh`, `tests/test_stamp_claim.sh`) cross-checks the
+scripts against files that do not exist anywhere in this repo either —
+`references/agent-rules.md`, `references/templates/session-card.md`,
+`configure-workflow/manifests/family.json`, and the `.claude/agents/workflow-*.md`
+subagent definitions (an entire top-level directory this repo has never had). Copying
+only `scripts/` and `tests/` in without those made the suite fail on first run
+(`test_agent_rules_drift: FAILED`, `test_rule_pointer_drift: FAILED`,
+`test_stamp_claim: FAILED` — a pre-existing `stamp-claim.sh` vs `claims.md`
+exit-code-contract drift surfaced in that last one, independent of the sync question).
+Landing a working sync therefore means bringing all of that across at once, which is a
+change far larger than one repo-relative-path fix — it is exactly the byte-for-byte,
+owner-authorized fast-path sync **#1538** already exists to do (whole family +
+`.claude/agents/workflow-*.md` from `storage@main`, self-merge after its own drift
+suites go green), not a scope this issue should reach for on its own. This is why
+**option 2** (correct the paths, document the gap) was chosen over
+**option 1** (sync `scripts/` in) for #1854, even though option 1 was the issue's own
+recommendation — the recommendation predated running the suite against a real sync
+attempt.
+
+**CI-job scope**: the two required checks named `shellcheck .claude/skills` and
+`test .claude/skills` (`.github/workflows/skills-shellcheck.yml`) run
+`find .claude/skills -type f -name "*.sh"` / `find .claude/skills -type f -path
+"*/tests/*.sh"` — genuine, unfiltered path scans, not scoped to a hardcoded skill list.
+Counted against the tree (not inferred), that is **18** `.sh` files in six installed
+skills, and the split matters:
+
+| Skill | `.sh` files | Linted by `shellcheck .claude/skills` | Executed by `test .claude/skills` |
+| --- | --- | --- | --- |
+| `configure-workflow` | 8 (`scripts/{_lib,audit,capture,grant,labels,process-docs,project,rulesets}.sh`) | yes — all 8 | no — ships no `tests/` dir |
+| `design-docs` | 6 (3 `scripts/`, 3 `tests/`) | yes — all 6 | yes — its 3 `tests/*.sh` |
+| `plan-work` | 4 (2 `scripts/`, 2 `tests/`) | yes — all 4 | yes — its 2 `tests/*.sh` |
+| `github-workflow` | 0 | n/a | n/a |
+| `github-pr-review` | 0 | n/a | n/a |
+| `interrogate` | 0 | n/a | n/a |
+
+So `shellcheck .claude/skills` really does check 18 files (at `-S warning`, per #1235)
+and `test .claude/skills` really does run 5 test files — `configure-workflow`'s 8
+scripts are linted and passing, they are simply never *executed*, because the
+"scripts are mentioned in a test" soft gate is deliberately scoped to skills that
+already have a `tests/` dir (#1349). The three skills that report **success** without
+anything of theirs being checked are the three that currently ship **zero** `.sh` files
+in this repo: `github-workflow`, `github-pr-review` and `interrogate`. Reading either
+job's green status as coverage of *those* three skills' scripts — including every
+script this section says lives only in the home install — is exactly the misreading
+this note exists to foreclose.
+
+**This skill's own repo copy is stale relative to the executing copy.** The gap is not
+limited to `scripts/`: this repo's `.claude/skills/github-workflow/SKILL.md` is 182
+lines against the home install's 331, and the diff runs 205 added / 56 removed lines.
+Whole concepts that the workflow *as actually executed* depends on are absent from the
+repo copy — the thirteen-item startup checklist and its `startup-item` /
+`startup-complete` session-log events, the `readiness-gate` step, the `Unit:`
+deferred-batching marker rule, and every `batch-deferred` reference (each of these
+greps to 0 hits in the repo copy and 1+ in the home copy). A reader who trusts the repo
+copy is reading an older process. Read the home install when the two disagree, and
+track the fix at **#1538**, which owns the byte-for-byte sync and now carries the
+measured drift — do not attempt a partial sync here (see the paragraph above: #1854
+tried it and it fails CI).
