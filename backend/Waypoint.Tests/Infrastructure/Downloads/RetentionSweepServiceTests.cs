@@ -106,15 +106,26 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		RecordingEventPublisher? events = null,
 		IDepotArtifactRepository? artifacts = null,
 		IRetentionPolicyRepository? policies = null,
-		IReviewListService? reviewList = null) => new(
-		_states,
-		policies ?? _policies,
-		artifacts ?? new DepotArtifactRepository(_fixture.ConnectionString),
-		reviewList ?? new FakeReviewListService(),
-		events ?? new RecordingEventPublisher(),
-		Options.Create(new CatalogOptions { DepotPath = _depotRoot }),
-		NullLogger<RetentionSweepService>.Instance,
-		clock);
+		IReviewListService? reviewList = null)
+	{
+		// FakeReviewListService also implements IOutOfScopeContentEraser (issue
+		// #1862), the same "one type backs both interfaces" shape the real
+		// ReviewListService uses in production -- so a test-supplied reviewList
+		// stand-in must implement it too.
+		IReviewListService effectiveReviewList = reviewList ?? new FakeReviewListService();
+		IOutOfScopeContentEraser eraser = effectiveReviewList as IOutOfScopeContentEraser
+			?? throw new InvalidOperationException($"{effectiveReviewList.GetType().Name} must also implement {nameof(IOutOfScopeContentEraser)}.");
+		return new(
+			_states,
+			policies ?? _policies,
+			artifacts ?? new DepotArtifactRepository(_fixture.ConnectionString),
+			effectiveReviewList,
+			eraser,
+			events ?? new RecordingEventPublisher(),
+			Options.Create(new CatalogOptions { DepotPath = _depotRoot }),
+			NullLogger<RetentionSweepService>.Instance,
+			clock);
+	}
 
 	private sealed class RecordingEventPublisher : IJobEventPublisher
 	{
@@ -137,9 +148,12 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 	/// mark a depot-artifact id out-of-scope without needing the real
 	/// <see cref="Waypoint.Infrastructure.Downloads.ReviewListService"/>'s own
 	/// storage. Defaults (no ids marked) mean "nothing is out-of-scope", matching
-	/// every existing test's expectations before this type existed.
+	/// every existing test's expectations before this type existed. Also implements
+	/// <see cref="IOutOfScopeContentEraser"/> (issue #1862), mirroring the real
+	/// <see cref="Waypoint.Infrastructure.Downloads.ReviewListService"/>'s "one type
+	/// backs both interfaces" shape.
 	/// </summary>
-	private sealed class FakeReviewListService : IReviewListService
+	private sealed class FakeReviewListService : IReviewListService, IOutOfScopeContentEraser
 	{
 		// Keyed by depot-artifact id with the reason alongside it, mirroring
 		// download_out_of_scope_content's own (unique depot_artifact_id, NOT NULL
@@ -166,6 +180,12 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		public Task<string?> GetOutOfScopeReasonAsync(Guid depotArtifactId, CancellationToken cancellationToken) =>
 			Task.FromResult(_outOfScope.TryGetValue(depotArtifactId, out string? reason) ? reason : null);
+
+		public Task EraseAsync(Guid depotArtifactId, CancellationToken cancellationToken)
+		{
+			_outOfScope.Remove(depotArtifactId);
+			return Task.CompletedTask;
+		}
 	}
 
 	/// <summary>
@@ -875,8 +895,72 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
 		Assert.Equal(RetainedContentStates.Purged, state!.State);
 		Assert.False(File.Exists(Path.Combine(_depotRoot, "manual-download-dial-flipped-back")));
+
+		// Issue #1862: the row's download_out_of_scope_content entry -- written by
+		// this same test's first (Review-dialed) sweep above -- must not survive the
+		// purge; otherwise the admin review list would keep offering a "delete
+		// out-of-scope content" action against content that no longer exists.
+		Assert.False(await reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None));
 	}
 
 	private void WriteDepotFile(string relativePath) =>
 		File.WriteAllText(Path.Combine(_depotRoot, relativePath), "fixture bytes");
+
+	/// <summary>
+	/// Issue #1866: <see cref="RetentionSweepService.ManualDownloadReviewReason"/>'s
+	/// exact literal text is the ONLY thing distinguishing "this dial's own report"
+	/// from "somebody else's report" for a row already persisted in the database --
+	/// editing it strands every existing row silently (see that constant's own doc
+	/// comment). Pinning the literal here means a future edit fails THIS test loudly,
+	/// forcing a deliberate decision (and a data-migration plan for existing rows)
+	/// rather than an invisible accident.
+	/// </summary>
+	[Fact]
+	public void ManualDownloadReviewReason_LiteralTextIsPinned()
+	{
+		Assert.Equal("manual download retention dial set to 'review'", RetentionSweepService.ManualDownloadReviewReason);
+	}
+
+	/// <summary>
+	/// Issue #1866 done-when: "a regression test covers a row persisted with a
+	/// different reason than the current constant." A row an EARLIER build's dial
+	/// wrote under different wording (or reported by anything other than this
+	/// service's own dial) must keep #1687's unconditional never-auto-remove skip --
+	/// not be silently reinterpreted as this dial's own report -- exactly the
+	/// failure mode a constant edit (or a second reporter, #1654) would otherwise
+	/// cause with nothing failing.
+	/// </summary>
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadCandidateWithDifferentPersistedReason_KeepsUnconditionalSkip()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-stranded-reason");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-stranded-reason");
+
+		FakeReviewListService reviewList = new();
+		// A reason string that is NOT the current ManualDownloadReviewReason literal
+		// -- simulating a row an earlier build's dial wrote before the constant was
+		// (hypothetically) edited, or one #1654's evaluator reported.
+		await reviewList.ReportOutOfScopeAsync(artifactId, "an earlier build's differently-worded review reason", CancellationToken.None);
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), reviewList: reviewList);
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		// Even though the dial itself now reads AutoPrune, a non-matching persisted
+		// reason must NOT be treated as "governed by this dial" -- #1687's
+		// unconditional skip applies, same as any other out-of-scope report.
+		Assert.Equal(0, report.AutoPruned);
+		Assert.Equal(1, report.OutOfScopeSkipped);
+		Assert.Equal(0, report.ManualDownloadDialSkipped);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, state!.State); // untouched, not pruned
+		Assert.True(File.Exists(Path.Combine(_depotRoot, "manual-download-stranded-reason")));
+	}
 }

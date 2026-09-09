@@ -96,6 +96,8 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 					serviceProvider.GetRequiredService<IUnknownCatalogFileRepository>(),
 					serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 					serviceProvider.GetRequiredService<IJobEventPublisher>()));
+				services.AddSingleton<IOutOfScopeContentEraser>(serviceProvider =>
+					(IOutOfScopeContentEraser)serviceProvider.GetRequiredService<IReviewListService>());
 				services.AddSingleton(catalogOptions);
 				services.AddSingleton<ILogger<RetentionSweepService>>(SweepLogger);
 				services.AddSingleton<ILogger<ReviewListDeletionService>>(DeletionLogger);
@@ -104,6 +106,7 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 					serviceProvider.GetRequiredService<IRetentionPolicyRepository>(),
 					serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 					serviceProvider.GetRequiredService<IReviewListService>(),
+					serviceProvider.GetRequiredService<IOutOfScopeContentEraser>(),
 					serviceProvider.GetRequiredService<IJobEventPublisher>(),
 					catalogOptions,
 					SweepLogger));

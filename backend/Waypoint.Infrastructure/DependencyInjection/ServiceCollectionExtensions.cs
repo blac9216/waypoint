@@ -351,7 +351,20 @@ public static class ServiceCollectionExtensions
 				connectionString,
 				serviceProvider.GetRequiredService<IUnknownCatalogFileRepository>(),
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
-				serviceProvider.GetRequiredService<IJobEventPublisher>()));
+				serviceProvider.GetRequiredService<IJobEventPublisher>(),
+				serviceProvider.GetRequiredService<ILogger<Downloads.ReviewListService>>()));
+
+			// Issue #1862: the same ReviewListService instance also implements
+			// IOutOfScopeContentEraser -- registered as its own resolvable interface
+			// (rather than only cast inline where consumed) so
+			// AddWaypointExecution's reflection-based
+			// AddSingleton<IRetentionSweepService, RetentionSweepService> registration
+			// (a runner host) can resolve RetentionSweepService's new constructor
+			// parameter without a factory of its own. Casting the already-resolved
+			// IReviewListService singleton guarantees exactly one live
+			// ReviewListService instance, not two.
+			services.AddSingleton<Waypoint.Core.Downloads.IOutOfScopeContentEraser>(serviceProvider =>
+				(Waypoint.Core.Downloads.IOutOfScopeContentEraser)serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IReviewListService>());
 
 			// Issue #1453: the API process's IRetentionSweepService consumer
 			// (RetentionController's purge-now endpoint and the review-list deletion
@@ -371,6 +384,12 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IRetentionPolicyRepository>(),
 				serviceProvider.GetRequiredService<IDepotArtifactRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IReviewListService>(),
+				// Issue #1862: the narrower seam allowed to delete a
+				// download_out_of_scope_content row once its content has been purged
+				// (registered above, resolving to the same singleton
+				// ReviewListService instance), kept separate from
+				// IReviewListService's own never-deletes guarantee.
+				serviceProvider.GetRequiredService<Waypoint.Core.Downloads.IOutOfScopeContentEraser>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>(),
 				serviceProvider.GetRequiredService<IOptions<CatalogOptions>>(),
 				serviceProvider.GetRequiredService<ILogger<Downloads.RetentionSweepService>>()));

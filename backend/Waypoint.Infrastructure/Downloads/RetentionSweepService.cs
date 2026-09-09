@@ -31,13 +31,26 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 	/// it back (via <see cref="IReviewListService.GetOutOfScopeReasonAsync"/>) to tell
 	/// a review-list row this dial itself reported apart from one reported by anything
 	/// else -- the two uses must not drift apart.
+	///
+	/// Issue #1866: this string is also the ONLY thing distinguishing "my own dial's
+	/// report" from "somebody else's report" for a row already persisted in the
+	/// database. Editing this literal strands every <c>download_out_of_scope_content</c>
+	/// row an earlier build already wrote with the old text -- they silently stop
+	/// matching, revert to the unconditional #1687 never-auto-remove skip, and the
+	/// one-way door #1841 closed reopens for exactly those rows, with nothing failing.
+	/// <c>RetentionSweepServiceConstantsTests</c> pins this exact literal so that any
+	/// future edit is a deliberate, reviewed act (with a data-migration plan for
+	/// existing rows) rather than an invisible accident. internal, not private, so
+	/// that pin test can reference it directly (<c>InternalsVisibleTo</c>, same
+	/// convention as <c>RunPurgeService</c>'s own doc comment on the same attribute).
 	/// </summary>
-	private const string ManualDownloadReviewReason = "manual download retention dial set to 'review'";
+	internal const string ManualDownloadReviewReason = "manual download retention dial set to 'review'";
 
 	private readonly IRetainedContentStateRepository _states;
 	private readonly IRetentionPolicyRepository _policies;
 	private readonly IDepotArtifactRepository _artifacts;
 	private readonly IReviewListService _reviewList;
+	private readonly IOutOfScopeContentEraser _outOfScopeEraser;
 	private readonly IJobEventPublisher _events;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly TimeProvider _clock;
@@ -48,6 +61,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		IRetentionPolicyRepository policies,
 		IDepotArtifactRepository artifacts,
 		IReviewListService reviewList,
+		IOutOfScopeContentEraser outOfScopeEraser,
 		IJobEventPublisher events,
 		IOptions<CatalogOptions> catalogOptions,
 		ILogger<RetentionSweepService> logger,
@@ -57,6 +71,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		ArgumentNullException.ThrowIfNull(policies);
 		ArgumentNullException.ThrowIfNull(artifacts);
 		ArgumentNullException.ThrowIfNull(reviewList);
+		ArgumentNullException.ThrowIfNull(outOfScopeEraser);
 		ArgumentNullException.ThrowIfNull(events);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(logger);
@@ -65,6 +80,7 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		_policies = policies;
 		_artifacts = artifacts;
 		_reviewList = reviewList;
+		_outOfScopeEraser = outOfScopeEraser;
 		_events = events;
 		_catalogOptions = catalogOptions;
 		_logger = logger;
@@ -399,6 +415,19 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			}
 
 			await _states.TransitionAsync(row.Id, RetainedContentStates.Purged, occurredAt, cancellationToken).ConfigureAwait(false);
+
+			// Issue #1862: the content this row named no longer exists once the
+			// transition above lands, so ANY download_out_of_scope_content row for
+			// the same depot_artifact_id (whether this dial's own Review report or
+			// one this same call's #1687 guard would otherwise have protected --
+			// unreachable here, since that guard skips the row entirely rather than
+			// reaching this point) is now stale: the admin review list must not keep
+			// offering a "delete out-of-scope content" action against content
+			// already gone. IReviewListService itself still cannot delete (that
+			// guarantee is untouched); this goes through the narrower
+			// IOutOfScopeContentEraser seam instead. A no-op, not an error, for the
+			// common case of a row that was never out-of-scope-reported at all.
+			await _outOfScopeEraser.EraseAsync(row.DepotArtifactId, cancellationToken).ConfigureAwait(false);
 
 			LogPurged(_logger, row.DepotArtifactId, row.Id, actor, reason ?? "(none)", deleted);
 			return new RetentionPurgeOutcome(row.Id, true, null);
