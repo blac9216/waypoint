@@ -238,9 +238,9 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			// a binary by its bare fileName (the trailing segment of each entry's NEW
 			// depot-relative identity below); a pre-#1784 pull may have left a row
 			// under that legacy identity. Derive every artifact's candidate
-			// legacy-identity -> new-identity pair up front (a Dictionary naturally
-			// dedupes -- two artifacts never share a bare fileName under this
-			// catalog's own uniqueness) and reconcile the WHOLE batch in one bounded
+			// legacy-identity -> new-identity pair up front (see BuildLegacyRenames,
+			// which ENFORCES the bare-fileName uniqueness this comment used to merely
+			// assert) and reconcile the WHOLE batch in one bounded
 			// call, not one per artifact (#1818: the per-artifact shape this replaced
 			// issued one round trip per artifact on EVERY pull -- 1291 on the owner's
 			// live stack -- because the guard fires on identity SHAPE, not on whether
@@ -251,14 +251,16 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			// before this pull ever ran) rather than leaving it stale -- see its own
 			// doc comment. Called BEFORE the upsert loop below so a rename has a row
 			// to act on before UpsertAsync creates one at the TO identity itself.
-			Dictionary<string, string> legacyRenames = new(StringComparer.Ordinal);
-			foreach (DepotArtifactUpsert candidate in parsed)
+			Dictionary<string, string> legacyRenames = BuildLegacyRenames(parsed, out IReadOnlyList<string> ambiguousLegacyIdentities);
+			if (ambiguousLegacyIdentities.Count > 0)
 			{
-				string legacyIdentity = candidate.RelativePath[(candidate.RelativePath.LastIndexOf('/') + 1)..];
-				if (!string.Equals(legacyIdentity, candidate.RelativePath, StringComparison.Ordinal))
-				{
-					legacyRenames[legacyIdentity] = candidate.RelativePath;
-				}
+				await EmitProgressAsync(
+					context,
+					"Skipping legacy-identity reconciliation for " +
+					$"{ambiguousLegacyIdentities.Count} ambiguous bare fileName(s) shared by more than one catalog entry: " +
+					$"{string.Join(", ", ambiguousLegacyIdentities)}. Any pre-#1784 row still keyed under one of these " +
+					"names cannot be attributed to a single artifact and is left as-is rather than renamed onto a guess.",
+					cancellationToken).ConfigureAwait(false);
 			}
 
 			await _artifacts.RekeyManyAsync(legacyRenames, cancellationToken).ConfigureAwait(false);
@@ -319,6 +321,72 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		string note = _redactor.Redact(reason);
 		await _pullState.RecordFailureAsync(isAuthFailure, note, cancellationToken).ConfigureAwait(false);
 		return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
+	}
+
+	/// <summary>
+	/// Issue #1852's second gap: prior to this, the legacy-identity map was built by a
+	/// bare indexer assignment (<c>legacyRenames[legacyIdentity] = candidate.RelativePath</c>)
+	/// under a comment asserting that "two artifacts never share a bare fileName under
+	/// this catalog's own uniqueness" -- an assumption with nothing enforcing it. The
+	/// key is DERIVED from the value (the trailing segment of the depot-relative path),
+	/// so the shape an actual violation takes is a KEY collision, not a value collision:
+	/// <c>PROD/COMP/VCENTER/x.iso</c> and <c>PROD/COMP/NSX/x.iso</c> both derive the
+	/// legacy identity <c>x.iso</c>, and the indexer assignment silently kept whichever
+	/// one the parser happened to emit last. A pre-#1784 row keyed <c>x.iso</c> would
+	/// then have been renamed onto that arbitrary winner -- attributing one product's
+	/// downloaded binary to another, silently and non-deterministically.
+	///
+	/// This enforces the invariant where it can actually be violated. A legacy identity
+	/// derived from two or more DIFFERENT depot-relative paths is genuinely ambiguous:
+	/// nothing in the catalog says which artifact a legacy bare-fileName row belonged
+	/// to, so there is no correct rename. Such identities are excluded from the map
+	/// entirely (never renamed onto a guess) and returned in
+	/// <paramref name="ambiguousLegacyIdentities"/> so the caller can surface them on
+	/// the run rather than letting the collision pass unobserved. The consequence of
+	/// exclusion is the pre-#1784 status quo for those artifacts alone -- the legacy row
+	/// stays under its bare fileName while <c>UpsertAsync</c> creates the new-identity
+	/// rows -- which is a visible stale row, not a mis-attribution. Deliberately NOT a
+	/// throw: the ambiguity is confined to a backwards-compatibility reconciliation
+	/// step, and aborting a whole 1000+ artifact catalog pull over it would turn a
+	/// recoverable data oddity into an outage.
+	/// </summary>
+	internal static Dictionary<string, string> BuildLegacyRenames(
+		IReadOnlyList<DepotArtifactUpsert> parsed,
+		out IReadOnlyList<string> ambiguousLegacyIdentities)
+	{
+		ArgumentNullException.ThrowIfNull(parsed);
+
+		Dictionary<string, string> legacyRenames = new(StringComparer.Ordinal);
+		SortedSet<string> ambiguous = new(StringComparer.Ordinal);
+		foreach (DepotArtifactUpsert candidate in parsed)
+		{
+			string legacyIdentity = candidate.RelativePath[(candidate.RelativePath.LastIndexOf('/') + 1)..];
+			if (string.Equals(legacyIdentity, candidate.RelativePath, StringComparison.Ordinal))
+			{
+				continue;
+			}
+
+			if (legacyRenames.TryGetValue(legacyIdentity, out string? alreadyMapped))
+			{
+				if (string.Equals(alreadyMapped, candidate.RelativePath, StringComparison.Ordinal))
+				{
+					continue;
+				}
+
+				_ = ambiguous.Add(legacyIdentity);
+				continue;
+			}
+
+			legacyRenames[legacyIdentity] = candidate.RelativePath;
+		}
+
+		foreach (string collided in ambiguous)
+		{
+			_ = legacyRenames.Remove(collided);
+		}
+
+		ambiguousLegacyIdentities = [.. ambiguous];
+		return legacyRenames;
 	}
 
 	private static async Task EmitProgressAsync(JobExecutionContext context, string message, CancellationToken cancellationToken)

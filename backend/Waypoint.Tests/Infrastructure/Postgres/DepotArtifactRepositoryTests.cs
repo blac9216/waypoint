@@ -392,7 +392,9 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 	/// identity that is itself just whitespace never occurs, but the derived TO
 	/// side is string-built by <c>CatalogPullJobHandler</c> and a defect there
 	/// could produce one) flowed unvalidated into the batched SQL. Asserts the
-	/// restored per-identity check throws before any connection is opened.
+	/// restored per-identity check throws. (The check does run before the connection
+	/// is opened -- see the method -- but this test asserts only the throw, so it
+	/// does not claim to prove the ordering.)
 	/// </summary>
 	[Fact]
 	public async Task RekeyManyAsync_WhitespaceOnlyToIdentity_ThrowsRatherThanFlowingIntoTheBatchedSql()
@@ -404,17 +406,41 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #1852's second gap: <c>CatalogPullJobHandler</c>'s batch-build comment
-	/// asserts "a Dictionary naturally dedupes -- two artifacts never share a bare
-	/// fileName under this catalog's own uniqueness", with no guard or test pinning
-	/// it. This does not touch that call site (out of this file's scope, per the
-	/// dispatch), but proves the defense added here instead: two different FROM
-	/// legacy identities renaming onto the SAME TO identity -- the shape a violated
-	/// bare-fileName-uniqueness invariant would actually produce, since two
-	/// dictionary keys can never collide but their VALUES can -- must refuse rather
-	/// than reach the batched SQL, where <c>depot_artifacts_relative_path_key</c>'s
-	/// real UNIQUE constraint would otherwise let whichever UNNEST row is processed
-	/// first win silently.
+	/// Round-1 note 1: the sibling test above pinned only the VALUE half of the
+	/// per-identity validation issue #1852 asked to restore -- deleting
+	/// <c>ThrowIfNullOrWhiteSpace(pair.Key)</c> left the suite green, so half the
+	/// restoration was regression-proof and half was not (the recurring
+	/// unpinned-guard defect class this session, cf. #1849). This is the missing
+	/// mirror: a whitespace-only FROM identity must be refused by the same check
+	/// rather than flowing into the batched SQL's <c>text[]</c> parameter, where it
+	/// would silently match nothing and make the rekey a confusing no-op.
+	/// </summary>
+	[Fact]
+	public async Task RekeyManyAsync_WhitespaceOnlyFromIdentity_ThrowsRatherThanFlowingIntoTheBatchedSql()
+	{
+		string newId = $"PROD/COMP/VCENTER/{Guid.NewGuid():N}.iso";
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _repository.RekeyManyAsync(
+			new Dictionary<string, string> { ["   "] = newId }, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Pins <c>RekeyManyAsync</c>'s repository-boundary backstop: two different FROM
+	/// legacy identities renaming onto the SAME TO identity must refuse rather than
+	/// reach the batched SQL, where <c>depot_artifacts_relative_path_key</c>'s real
+	/// UNIQUE constraint would otherwise let whichever UNNEST row is processed first
+	/// win silently.
+	///
+	/// This is explicitly NOT the shape issue #1852's bare-fileName violation takes
+	/// at the real call site, and the earlier version of this comment had it exactly
+	/// backwards. <c>CatalogPullJobHandler</c> derives each map KEY from its VALUE
+	/// (the value's trailing path segment), so from that caller two distinct keys can
+	/// never share a value -- what a genuine violation produces there is two entries
+	/// collapsing onto ONE key (<c>PROD/COMP/VCENTER/x.iso</c> and
+	/// <c>PROD/COMP/NSX/x.iso</c> both deriving <c>x.iso</c>). That case is enforced
+	/// in <c>CatalogPullJobHandler.BuildLegacyRenames</c> and pinned by
+	/// <c>CatalogPullJobHandlerTests</c>. The guard exercised here is a backstop for
+	/// future callers that build their maps some other way.
 	/// </summary>
 	[Fact]
 	public async Task RekeyManyAsync_TwoDifferentFromIdentitiesTargetTheSameToIdentity_ThrowsRatherThanSilentlyPickingAWinner()

@@ -134,15 +134,23 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 			ArgumentException.ThrowIfNullOrWhiteSpace(pair.Key);
 			ArgumentException.ThrowIfNullOrWhiteSpace(pair.Value);
 
-			// Issue #1852's second gap: CatalogPullJobHandler's caller-side dedup
-			// ("a Dictionary naturally dedupes -- two artifacts never share a bare
-			// fileName") is an unenforced comment, not a guard. This does not fix
-			// that call site (out of this file's scope), but it closes the same gap
-			// defensively here: two different FROM identities renaming onto the same
-			// TO identity would violate depot_artifacts_relative_path_key's real
-			// UNIQUE constraint at the SQL layer in an unpredictable way (whichever
-			// UNNEST row the rename statement processes first wins, silently). Refuse
-			// it explicitly instead.
+			// Repository-boundary invariant, kept deliberately as defence in depth:
+			// two different FROM identities renaming onto the same TO identity would
+			// violate depot_artifacts_relative_path_key's real UNIQUE constraint at
+			// the SQL layer in an unpredictable way (whichever UNNEST row the rename
+			// statement processes first wins, silently), so refuse it explicitly.
+			//
+			// It is NOT where issue #1852's bare-fileName gap is fixed, and it cannot
+			// be: the sole caller today (CatalogPullJobHandler.BuildLegacyRenames)
+			// DERIVES each key from its value as the value's trailing path segment,
+			// so two distinct keys can never share a value and this branch is
+			// unreachable from that call site by construction. The shape a violated
+			// bare-fileName-uniqueness invariant actually produces there is a KEY
+			// collision, and BuildLegacyRenames enforces it at that point. This check
+			// stays because it costs one HashSet over a dictionary the method already
+			// walks for the null/whitespace checks, and because RekeyManyAsync is a
+			// public repository API whose next caller may build its map some other
+			// way -- but it is a backstop, not the enforcement #1852 asked for.
 			if (!seenToIdentities.Add(pair.Value))
 			{
 				throw new ArgumentException(
