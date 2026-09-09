@@ -76,7 +76,13 @@ public interface IReviewListService
 	/// raises an alert -- alerting happens once, on first report, in
 	/// <see cref="ReportOutOfScopeAsync"/> and in
 	/// <see cref="Waypoint.Core.Catalog.IUnknownCatalogFileRepository.RecordSeenAsync"/>,
-	/// not on every read).
+	/// not on every read). Issue #1819: an out-of-scope row whose
+	/// <c>depot_artifacts</c> row does not resolve (should be unreachable under
+	/// migration 0128's <c>ON DELETE CASCADE</c> FK) still surfaces as a structured
+	/// warning log, not a per-read alert -- observable without becoming a side
+	/// effect, and without the alert channel flooding in proportion to read
+	/// traffic (this method backs <c>GET /api/v1/download-retention/review-list</c>,
+	/// so every poll is a read).
 	/// </summary>
 	Task<IReadOnlyList<ReviewListEntry>> ListAsync(CancellationToken cancellationToken);
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Reflection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -24,6 +25,7 @@ using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Tests.Infrastructure.Postgres;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Downloads;
@@ -148,21 +150,36 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task ListAsync_UnresolvableOutOfScopeArtifact_RaisesAlertAndIsSkippedNotSilentlyDropped()
+	public async Task ListAsync_UnresolvableOutOfScopeArtifact_LogsWarningAndIsSkippedNotSilentlyDropped()
 	{
 		Guid artifactId = await InsertDepotArtifactAsync("photon/unresolvable-out-of-scope.iso");
 		await _reviewList.ReportOutOfScopeAsync(artifactId, "retired lane", CancellationToken.None);
 		_events.EmittedPayloads.Clear(); // drop the out_of_scope_reported alert raised by the report call above
 
+		// Issue #1819: ListAsync's own doc contract says it "never raises an alert" --
+		// this branch (an artifact this safety-critical, never-auto-removed list
+		// cannot resolve, which migration 0128's ON DELETE CASCADE FK should make
+		// unreachable) must be observable without violating that contract, so it logs
+		// a structured warning instead of emitting a SystemNotice job event.
+		CapturingLogger<ReviewListService> logger = new();
 		ReviewListService reviewListWithUnresolvableArtifacts = new(
-			_fixture.ConnectionString, _unknownCatalogFiles, new NullArtifactRepository(), _events);
+			_fixture.ConnectionString, _unknownCatalogFiles, new NullArtifactRepository(), _events, logger);
 
 		IReadOnlyList<ReviewListEntry> entries = await reviewListWithUnresolvableArtifacts.ListAsync(CancellationToken.None);
 
 		Assert.Empty(entries); // still skipped -- no path/size to show
-		string payload = Assert.Single(_events.EmittedPayloads);
-		Assert.Contains("download.retention.review_list_entry_unresolved", payload);
-		Assert.Contains(artifactId.ToString(), payload);
+		Assert.Empty(_events.EmittedPayloads); // no alert -- ListAsync's own contract
+		CapturedLogEntry warning = logger.OnlyEntryAt(LogLevel.Warning);
+		Assert.Contains(artifactId.ToString(), warning.Message);
+
+		// Issue #1819 AC: "a test that pins the repeat-read behaviour (a second
+		// ListAsync over the same unresolvable row)" -- a second read logs again
+		// (this IS a per-read signal, just not an alert), it never raises an alert
+		// either time, and it never throws or otherwise mutates state.
+		IReadOnlyList<ReviewListEntry> entriesSecondRead = await reviewListWithUnresolvableArtifacts.ListAsync(CancellationToken.None);
+		Assert.Empty(entriesSecondRead);
+		Assert.Empty(_events.EmittedPayloads);
+		Assert.Equal(2, logger.EntriesAt(LogLevel.Warning).Count);
 	}
 
 	[Fact]
@@ -290,6 +307,7 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 			policies,
 			_artifacts,
 			_reviewList,
+			_reviewList,
 			new RecordingEventPublisher(),
 			Options.Create(new Waypoint.Core.Catalog.CatalogOptions { DepotPath = _depotRoot }),
 			NullLogger<RetentionSweepService>.Instance);
@@ -343,6 +361,7 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 			policies,
 			_artifacts,
 			_reviewList,
+			_reviewList,
 			new RecordingEventPublisher(),
 			Options.Create(new Waypoint.Core.Catalog.CatalogOptions { DepotPath = _depotRoot }),
 			NullLogger<RetentionSweepService>.Instance);
@@ -360,5 +379,66 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 
 		IReadOnlyList<ReviewListEntry> entriesAfterSweep = await _reviewList.ListAsync(CancellationToken.None);
 		Assert.Contains(entriesAfterSweep, e => e.Kind == ReviewListEntryKind.OutOfScope && e.DepotArtifactId == artifactId);
+	}
+
+	/// <summary>
+	/// Issue #1862 AC: "the full sequence: sweep under Review puts the row on the
+	/// list, the dial is flipped, a second sweep prunes it, and the review list's
+	/// resulting state is asserted." Real <see cref="ReviewListService"/> (backing
+	/// both <see cref="IReviewListService"/> and <see cref="IOutOfScopeContentEraser"/>)
+	/// and <see cref="RetentionSweepService"/> against the same database, per #1440's
+	/// own "integration test running both services together" AC.
+	/// </summary>
+	[Fact]
+	public async Task RunSweepAsync_DialFlippedBackToAutoPruneAfterReview_ClearsReviewListEntry()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("dial-flip-clears-review-list.iso");
+		File.WriteAllText(Path.Combine(_depotRoot, "dial-flip-clears-review-list.iso"), "fixture bytes");
+
+		RetentionPolicyRepository policies = new(_fixture.ConnectionString);
+		await policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Review, CancellationToken.None);
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+		Guid stateId = await states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		// Grace window already well past due (this sweep uses the real system clock,
+		// not a FakeTimeProvider) -- must be due for purge the moment the dial flips.
+		await states.TransitionAsync(stateId, RetainedContentStates.Grace, DateTimeOffset.UtcNow.AddDays(-30), CancellationToken.None);
+
+		RetentionSweepService sweep = new(
+			states,
+			policies,
+			_artifacts,
+			_reviewList,
+			_reviewList,
+			new RecordingEventPublisher(),
+			Options.Create(new Waypoint.Core.Catalog.CatalogOptions { DepotPath = _depotRoot }),
+			NullLogger<RetentionSweepService>.Instance);
+		RetentionSweepRequest request = new([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]);
+
+		RetentionSweepReport underReview = await sweep.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, underReview.ManualDownloadDialSkipped);
+		Assert.Equal(0, underReview.AutoPruned);
+		IReadOnlyList<ReviewListEntry> entriesUnderReview = await _reviewList.ListAsync(CancellationToken.None);
+		Assert.Contains(entriesUnderReview, e => e.Kind == ReviewListEntryKind.OutOfScope && e.DepotArtifactId == artifactId);
+
+		// The Admin turns the dial back down.
+		await policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		RetentionSweepReport afterFlip = await sweep.RunSweepAsync(request, CancellationToken.None);
+
+		Assert.Equal(1, afterFlip.AutoPruned);
+		Assert.Equal(0, afterFlip.ManualDownloadDialSkipped);
+		Assert.Equal(0, afterFlip.OutOfScopeSkipped);
+		Assert.Empty(afterFlip.Errors);
+
+		RetainedContentState? state = await states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, state!.State);
+		Assert.False(File.Exists(Path.Combine(_depotRoot, "dial-flip-clears-review-list.iso")));
+
+		// The heart of #1862: the review list must not keep offering an action
+		// against content that is now gone.
+		IReadOnlyList<ReviewListEntry> entriesAfterPrune = await _reviewList.ListAsync(CancellationToken.None);
+		Assert.DoesNotContain(entriesAfterPrune, e => e.Kind == ReviewListEntryKind.OutOfScope && e.DepotArtifactId == artifactId);
+		Assert.False(await _reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None));
 	}
 }

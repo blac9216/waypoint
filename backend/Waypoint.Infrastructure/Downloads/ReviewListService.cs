@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
@@ -21,24 +22,31 @@ using Waypoint.Core.Jobs;
 namespace Waypoint.Infrastructure.Downloads;
 
 /// <inheritdoc cref="IReviewListService"/>
-public sealed class ReviewListService : IReviewListService
+public sealed partial class ReviewListService : IReviewListService, IOutOfScopeContentEraser
 {
 	private readonly string _connectionString;
 	private readonly IUnknownCatalogFileRepository _unknownCatalogFiles;
 	private readonly IDepotArtifactRepository _artifacts;
 	private readonly IJobEventPublisher? _events;
+	private readonly ILogger<ReviewListService>? _logger;
 
 	/// <summary>
 	/// <paramref name="events"/> is optional (default null, same "best-effort
 	/// observability, not every caller needs it" convention as
 	/// <see cref="Waypoint.Infrastructure.Catalog.UnknownCatalogFileRepository"/>'s
-	/// own <c>IJobEventPublisher?</c> constructor parameter).
+	/// own <c>IJobEventPublisher?</c> constructor parameter). <paramref name="logger"/>
+	/// is likewise optional -- issue #1819: <see cref="ListAsync"/> is a pure read
+	/// and must never raise an alert, so the one signal it can still emit for an
+	/// otherwise-impossible state (see <see cref="ListAsync"/>'s own doc comment) goes
+	/// to structured logging, not the job-event alert channel <see cref="_events"/>
+	/// backs.
 	/// </summary>
 	public ReviewListService(
 		string connectionString,
 		IUnknownCatalogFileRepository unknownCatalogFiles,
 		IDepotArtifactRepository artifacts,
-		IJobEventPublisher? events = null)
+		IJobEventPublisher? events = null,
+		ILogger<ReviewListService>? logger = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 		ArgumentNullException.ThrowIfNull(unknownCatalogFiles);
@@ -48,6 +56,7 @@ public sealed class ReviewListService : IReviewListService
 		_unknownCatalogFiles = unknownCatalogFiles;
 		_artifacts = artifacts;
 		_events = events;
+		_logger = logger;
 	}
 
 	public async Task<IReadOnlyList<ReviewListEntry>> ListAsync(CancellationToken cancellationToken)
@@ -105,17 +114,17 @@ public sealed class ReviewListService : IReviewListService
 				// practice -- but this is a safety-critical, never-auto-removed
 				// list, and silently skipping means the row disappears from the one
 				// surface whose entire purpose is that nothing disappears (issue
-				// #1688). Raise the same SystemNotice ReportOutOfScopeAsync uses for
-				// a genuinely new entry, so an impossible state is loud rather than
-				// silent, then skip the row (there is still no path/size to show).
-				if (_events is not null)
+				// #1688). Issue #1819: ListAsync's own doc comment says it "never
+				// raises an alert" -- a per-read SystemNotice job event (this
+				// method's ONLY caller-visible read path, invoked by every poll of
+				// GET /api/v1/download-retention/review-list) would flood the
+				// alert channel in proportion to read traffic and contradict that
+				// contract. A structured warning log is still loud (an impossible
+				// state is never silent), but it is not an alert, so ListAsync
+				// remains a side-effect-free read no matter how often it is called.
+				if (_logger is not null)
 				{
-					string unresolvedPayload = JsonSerializer.Serialize(new
-					{
-						kind = "download.retention.review_list_entry_unresolved",
-						depot_artifact_id = depotArtifactId,
-					});
-					await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, unresolvedPayload, cancellationToken).ConfigureAwait(false);
+					LogUnresolvedOutOfScopeArtifact(_logger, depotArtifactId);
 				}
 				continue;
 			}
@@ -190,4 +199,24 @@ public sealed class ReviewListService : IReviewListService
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return result as string;
 	}
+
+	/// <inheritdoc cref="IOutOfScopeContentEraser.EraseAsync"/>
+	public async Task EraseAsync(Guid depotArtifactId, CancellationToken cancellationToken)
+	{
+		// Not exposed on IReviewListService (see that interface's own structural
+		// never-deletes guarantee, ReviewListServiceTests.Interface_HasNoDeleteOrRemoveOrPurgeMethod)
+		// -- this class also implements the separate, narrower IOutOfScopeContentEraser
+		// seam (issue #1862) for RetentionSweepService's exclusive use. A missing row
+		// deletes zero rows, which is success, not an error -- most purged artifacts
+		// were never out-of-scope-reported at all.
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"DELETE FROM download_out_of_scope_content WHERE depot_artifact_id = $1", connection);
+		command.Parameters.AddWithValue(depotArtifactId);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "review-list: out-of-scope entry for depot artifact {DepotArtifactId} has no resolvable depot_artifacts row (should be unreachable under migration 0128's ON DELETE CASCADE FK) -- skipped, not shown")]
+	private static partial void LogUnresolvedOutOfScopeArtifact(ILogger logger, Guid depotArtifactId);
 }
