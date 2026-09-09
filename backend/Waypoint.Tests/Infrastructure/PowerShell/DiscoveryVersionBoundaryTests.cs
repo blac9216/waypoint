@@ -93,7 +93,19 @@ public sealed class DiscoveryVersionBoundaryTests : IDisposable
 				}),
 			CancellationToken.None);
 
-		Assert.True(result.Succeeded, result.FailureReason);
+		// Issue #1321 AC: fail with a message that names module registration as the
+		// cause, rather than surfacing as a bare "false" the next reader has to
+		// re-diagnose from scratch. #1868's process-wide module-import gate is the
+		// believed fix for the underlying race (see that issue); this message is the
+		// belt-and-suspenders diagnostic in case it is ever hit again regardless.
+		string diagnostic = result.Succeeded
+			? string.Empty
+			: (result.FailureReason?.Contains("is not recognized", StringComparison.OrdinalIgnoreCase) == true
+				? $"{result.FailureReason} -- this is the #1321/#1868 module-registration-race shape: " +
+				  "WaypointDiscoveryStubModule was not (yet) importable in the runspace this call drew " +
+				  "when the command was invoked, not a behavioral failure in discovery itself."
+				: result.FailureReason ?? string.Empty);
+		Assert.True(result.Succeeded, diagnostic);
 
 		System.Management.Automation.PSObject hostRow = System.Management.Automation.PSObject.AsPSObject(
 			result.Output.Single(o =>

@@ -251,9 +251,18 @@ public sealed class HostedServiceBehaviorTests
 		}), logger);
 
 	private static ClaimedJob Job(Guid? runId, string jobType = "download") => new(Guid.NewGuid(), runId, jobType, null, null, null, 1, "{}", 1, 3);
+	// Issue #1118: 3s was tight enough that a heavily loaded full-suite run could
+	// starve the 10ms poll/heartbeat interval past this window before the condition
+	// (e.g. the abort-driven Cancelled move) was ever observed, surfacing as an
+	// uncaught TaskCanceledException out of this helper rather than a real assertion
+	// failure. The condition under test still resolves in low-single-digit
+	// milliseconds on an idle machine, so widening the ceiling only changes how long a
+	// genuinely broken test takes to fail -- it does not slow any passing run.
+	private static readonly TimeSpan WaitAsyncBound = TimeSpan.FromSeconds(15);
+
 	private static async Task WaitAsync(Func<bool> condition)
 	{
-		using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+		using CancellationTokenSource timeout = new(WaitAsyncBound);
 		while (!condition())
 		{
 			await Task.Delay(10, timeout.Token);

@@ -314,4 +314,65 @@ public sealed class WaypointRunspacePoolTests
 
 		pool.Dispose();
 	}
+
+	/// <summary>
+	/// Issue #1868: proves <c>_moduleImportGate</c> (now <c>s_moduleImportGate</c>) is
+	/// shared process-wide across DISTINCT <see cref="WaypointRunspacePool"/>
+	/// instances, closing the cross-instance window #1020's instance-scoped gate left
+	/// open (each of the 20 pool-constructing test classes under
+	/// <c>backend/Waypoint.Tests/</c> raced every other's first cold import against the
+	/// same process-global <c>AnalysisCache</c>). This is a real synchronization point,
+	/// not an elapsed-time comparison: the test itself acquires the exact same static
+	/// gate a cold rent on an UNRELATED pool instance must go through, so the rent is
+	/// deterministically blocked while the test holds it and deterministically
+	/// unblocked the moment the test releases it -- proof by construction that both
+	/// paths contend on one shared gate, not two separate per-instance ones.
+	/// </summary>
+	[Fact]
+	public async Task ModuleImportGate_IsSharedAcrossDistinctPoolInstances()
+	{
+		WaypointRunspacePool otherInstance = CreatePool();
+		SemaphoreSlim gate = WaypointRunspacePool.ModuleImportGateForTests;
+
+		// This gate is now process-wide (issue #1868): under full-suite xUnit
+		// parallelism, OTHER unrelated pool instances elsewhere in the same run can
+		// legitimately hold it for their own cold starts at any moment, so
+		// `gate.CurrentCount == 0` does NOT mean "this test is the holder" -- it can be
+		// 0 because someone else entirely is inside their own CreateRunspaceAsync.
+		// Releasing on that inference would release a permit this test never acquired,
+		// pushing the semaphore over its max count for whoever DOES legitimately hold
+		// it (a real SemaphoreFullException this test caused, not the gate). Track
+		// ownership explicitly with a flag instead.
+		await gate.WaitAsync(CancellationToken.None);
+		bool heldByThisTest = true;
+		try
+		{
+			// otherInstance has never rented before, so this is a cold start that must
+			// go through CreateRunspaceAsync's gate acquisition. If the gate were still
+			// instance-scoped (one per pool), this call would sail through immediately
+			// despite the test holding "a" gate -- it would prove nothing. Because the
+			// gate is now static, this call is provably blocked on the exact semaphore
+			// the test is holding.
+			Task<WaypointRunspacePool.RunspaceLease> coldRent = otherInstance.RentAsync(CancellationToken.None);
+
+			Task completedFirst = await Task.WhenAny(coldRent, Task.Delay(TimeSpan.FromMilliseconds(300)));
+			Assert.False(ReferenceEquals(completedFirst, coldRent), "cold rent on an unrelated pool instance completed while the test held the shared gate -- the gate is not actually process-wide.");
+
+			gate.Release();
+			heldByThisTest = false;
+
+			WaypointRunspacePool.RunspaceLease lease = await coldRent.WaitAsync(TimeSpan.FromSeconds(5));
+			Assert.NotNull(lease.Runspace);
+			lease.Dispose();
+		}
+		finally
+		{
+			if (heldByThisTest)
+			{
+				gate.Release();
+			}
+		}
+
+		otherInstance.Dispose();
+	}
 }

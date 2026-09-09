@@ -159,7 +159,11 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 			ExecutableName = "vcf-download-tool",
 			ExecutableRelativePath = "bin/vcf-download-tool",
 			LibraryRelativePath = "lib",
-			SmokeTestTimeout = TimeSpan.FromSeconds(10),
+			// Issue #1610: 10s was tight enough that real subprocess (/bin/true) fork/exec
+			// contention under full-suite parallel load could exceed it, producing a false
+			// SmokeTestFailed reject on an otherwise-successful install -- no scenario in
+			// this file depends on the bound being tight, so widen it generously instead.
+			SmokeTestTimeout = TimeSpan.FromSeconds(60),
 		};
 		return new ManagedToolInstallJobHandler(
 			verifier,

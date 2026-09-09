@@ -360,6 +360,52 @@ public sealed class ManagedToolDistributionInstaller : IManagedToolDistributionI
 	/// platform/architecture. stdin is redirected from an empty stream so a tool that
 	/// unexpectedly waits on input cannot hang the job past <see cref="ManagedToolOptions.SmokeTestTimeout"/>.
 	/// </summary>
+	/// <summary>
+	/// Issue #1610: <c>Process.Start</c> can throw a <see cref="Win32Exception"/> with
+	/// "Text file busy" (ETXTBSY) for a freshly-extracted, perfectly valid executable
+	/// when it races an UNRELATED concurrent <c>fork()</c> elsewhere in this process --
+	/// Linux duplicates every open file descriptor into a forking child regardless of
+	/// O_CLOEXEC, and if this executable's own now-closed write handle was still being
+	/// torn down at the instant some other thread's <c>Process.Start</c> forked, the
+	/// child can hold a transient duplicate write-mode reference to this exact inode
+	/// until its own <c>execve</c> closes it microseconds later. That is a genuine,
+	/// previously undiagnosed Linux kernel race under concurrent full-suite/CI process
+	/// spawning (matching #1610's and its sibling's "Expected: Succeeded, Actual:
+	/// Failed" sightings) -- not a corrupt archive, not a shared-temp-path collision
+	/// (already ruled out; every install gets its own <c>Guid</c>-named extract root),
+	/// and not something a longer <see cref="ManagedToolOptions.SmokeTestTimeout"/>
+	/// touches, since the failure is immediate, not a timeout. A short bounded retry is
+	/// the standard mitigation for this exact race (the same shape dotnet's own build
+	/// tooling retries on Linux CI) -- the window is microseconds wide, so a handful of
+	/// retries with a small backoff resolves it without masking a genuinely unrunnable
+	/// executable, which fails identically on every attempt and is never ETXTBSY.
+	/// </summary>
+	private static async Task<Process> StartWithTextFileBusyRetryAsync(ProcessStartInfo startInfo, CancellationToken cancellationToken)
+	{
+		const int maxAttempts = 5;
+		for (int attempt = 1; attempt <= maxAttempts; attempt++)
+		{
+			try
+			{
+				return Process.Start(startInfo)
+					?? throw new InvalidOperationException("Process.Start returned null.");
+			}
+			catch (Win32Exception exception) when (attempt < maxAttempts && IsTextFileBusy(exception))
+			{
+				await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt), cancellationToken).ConfigureAwait(false);
+			}
+		}
+
+		// Unreachable: the loop above either returns or throws on its final attempt
+		// (the exception filter's `attempt < maxAttempts` guard lets the last ETXTBSY,
+		// and any non-ETXTBSY Win32Exception/InvalidOperationException at any attempt,
+		// propagate to the caller instead of looping).
+		throw new InvalidOperationException("StartWithTextFileBusyRetryAsync exhausted its attempts without returning or throwing.");
+	}
+
+	private static bool IsTextFileBusy(Win32Exception exception) =>
+		exception.Message.Contains("Text file busy", StringComparison.OrdinalIgnoreCase);
+
 	private static async Task<ManagedToolDistributionInstallResult> SmokeTestAsync(
 		string executablePath, string libraryPath, ManagedToolOptions options, CancellationToken cancellationToken)
 	{
@@ -382,8 +428,7 @@ public sealed class ManagedToolDistributionInstaller : IManagedToolDistributionI
 		Process process;
 		try
 		{
-			process = Process.Start(startInfo)
-				?? throw new InvalidOperationException("Process.Start returned null.");
+			process = await StartWithTextFileBusyRetryAsync(startInfo, linkedSource.Token).ConfigureAwait(false);
 		}
 		catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
 		{
