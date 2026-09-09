@@ -138,9 +138,11 @@ only `scripts/` and `tests/` in without those made the suite fail on first run
 `test_stamp_claim: FAILED` — a pre-existing `stamp-claim.sh` vs `claims.md`
 exit-code-contract drift surfaced in that last one, independent of the sync question).
 Landing a working sync therefore means bringing all of that across at once, which is a
-change far larger than one repo-relative-path fix and belongs to a dedicated
-skill-parity effort (deferred, see the issue this note is filed from), not this issue.
-This is why **option 2** (correct the paths, document the gap) was chosen over
+change far larger than one repo-relative-path fix — it is exactly the byte-for-byte,
+owner-authorized fast-path sync **#1538** already exists to do (whole family +
+`.claude/agents/workflow-*.md` from `storage@main`, self-merge after its own drift
+suites go green), not a scope this issue should reach for on its own. This is why
+**option 2** (correct the paths, document the gap) was chosen over
 **option 1** (sync `scripts/` in) for #1854, even though option 1 was the issue's own
 recommendation — the recommendation predated running the suite against a real sync
 attempt.
