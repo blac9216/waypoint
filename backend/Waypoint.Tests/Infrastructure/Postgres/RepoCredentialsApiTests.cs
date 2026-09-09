@@ -120,6 +120,39 @@ public sealed class RepoCredentialsApiTests : IAsyncLifetime
 		Assert.False(document.RootElement.TryGetProperty("secret", out _));
 	}
 
+	/// <summary>
+	/// Issue #1659, gap 2: the round-1 assertion above only proved there is no field
+	/// literally named "secret" -- against a fixture that never stored a secret value
+	/// in the first place, so it could not have failed even if a leak existed under a
+	/// different key. This asserts the response's key set is EXACTLY the five
+	/// documented <see cref="Waypoint.Api.Contracts.RepoCredentialBindingResponse"/>
+	/// fields, so a leak under any key (not just literal "secret") fails here.
+	/// </summary>
+	[Fact]
+	public async Task SetThenGet_ResponseKeySetIsExactlyTheDocumentedFiveFields()
+	{
+		Guid credentialId = await SeedCredentialAsync("keyset-repo-cred", "repo-basic-auth");
+		await SendAsync(HttpMethod.Put, "/api/v1/repo-credentials/depot", "Admin", new { credential_ref = credentialId });
+
+		HttpResponseMessage get = await SendAsync(HttpMethod.Get, "/api/v1/repo-credentials/depot", "Admin", body: null);
+		using JsonDocument document = JsonDocument.Parse(await get.Content.ReadAsStringAsync());
+
+		HashSet<string> keys = [.. document.RootElement.EnumerateObject().Select(p => p.Name)];
+		Assert.Equal(
+			new HashSet<string> { "store", "credential_ref", "credential_name", "created_at", "updated_at" },
+			keys);
+	}
+
+	/// <summary>Issue #1659, gap 1: the `credential_ref`-required branch had no test -- a regression that let a null credential id reach <c>SetAsync</c> would have passed every existing test.</summary>
+	[Fact]
+	public async Task Set_MissingCredentialRef_Is400ValidationFailed()
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Put, "/api/v1/repo-credentials/depot", "Admin", new { });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		Assert.Contains("validation_failed", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task List_ReturnsOnlyStoresWithABinding()
 	{

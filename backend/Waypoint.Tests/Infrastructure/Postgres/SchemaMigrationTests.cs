@@ -20,6 +20,7 @@ using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -431,7 +432,6 @@ public sealed class SchemaMigrationTests
 	/// (enabled=false UPDATE, never a DELETE) so a preset's history survives; no new
 	/// runner grant (the sync job that reads this table, #1484, grants itself what it
 	/// needs when it lands) --
-	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/> --
 	/// 0100 (issue #1488, epic #1180, split from design record #1038; slots 0099/0117
 	/// claimed by parallel migrations at this migration's own commit time): rekeys
 	/// <c>depot_artifacts</c>'s identity from the two incompatible legacy
@@ -622,12 +622,16 @@ public sealed class SchemaMigrationTests
 	/// folds into a surviving new-identity row -- see that migration's own header
 	/// comment for why a status VALUE was rejected in favor of a column -- bumping
 	/// 97 -&gt; 98 (0133, carried by PR #1831's <c>content_library_items</c> migration,
-	/// had not merged as of this rebase; 0134 was free then, taken since -- see below); 0131 (PR #1816's
-	/// consumer views) bumps it again, 98 -&gt; 99; and 0135 (issue #1790) adds the
+	/// had not merged as of this rebase; 0134 was free then, taken since -- see below); 0131
+	/// itself, described above, bumps it again, 98 -&gt; 99; and 0135 (issue #1790) adds the
 	/// Photon image-discovery runner grant -- originally authored as 0134, renumbered
 	/// to 0135 at rebase time because PR #1842 above merged first and also claimed
-	/// slot 0134 -- bumping 99 -&gt; 100 --
-	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	/// slot 0134 -- bumping 99 -&gt; 100.
+	///
+	/// <para>This is the ledger's closing instruction, not part of any one migration's
+	/// entry above: bump <see cref="ExpectedMigrationCount"/> alongside adding a new
+	/// <c>Data/Migrations/*.sql</c> file.</para>
+	/// </summary>
 	private const int ExpectedMigrationCount = 100;
 
 	private readonly PostgresFixture _fixture;
@@ -1333,19 +1337,19 @@ public sealed class SchemaMigrationTests
 
 		Assert.Equal(
 			CatalogKinds.All.OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_content_releases_kind_check"));
+			ParseCheckInList(migration, "catalog_content_releases", "catalog_content_releases_kind_check", "kind"));
 		Assert.Equal(
 			CatalogTransports.All.OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_components_transport_check"));
+			ParseCheckInList(migration, "catalog_components", "catalog_components_transport_check", "transport"));
 		Assert.Equal(
 			CatalogSelectorKinds.All.OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_components_selector_kind_check"));
+			ParseCheckInList(migration, "catalog_components", "catalog_components_selector_kind_check", "selector_kind"));
 		Assert.Equal(
 			CatalogOutputKinds.All.OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_execution_profiles_output_kind_check"));
+			ParseCheckInList(migration, "catalog_execution_profiles", "catalog_execution_profiles_output_kind_check", "output_kind"));
 		Assert.Equal(
 			CredentialPurposes.All.Where(p => p != CredentialPurposes.VcfApi).OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_credential_requirements_purpose_check"));
+			ParseCheckInList(migration, "catalog_credential_requirements", "catalog_credential_requirements_purpose_check", "purpose"));
 	}
 
 	/// <summary>
@@ -1404,7 +1408,7 @@ public sealed class SchemaMigrationTests
 
 		Assert.Equal(
 			CatalogImportEntryDispositions.All.OrderBy(v => v, StringComparer.Ordinal),
-			ParseCheckInList(migration, "catalog_import_report_entries_disposition_check"));
+			ParseCheckInList(migration, "catalog_import_report_entries", "catalog_import_report_entries_disposition_check", "disposition"));
 	}
 
 	/// <summary>
@@ -2249,20 +2253,24 @@ public sealed class SchemaMigrationTests
 	}
 
 	/// <summary>
-	/// Extracts the single-quoted value list of a named <c>... CHECK (col IN ('a', 'b', ...))</c>
-	/// constraint from migration SQL, returned ordinal-sorted for order-independent set equality.
+	/// Extracts the single-quoted value list of a named, table-scoped
+	/// <c>CONSTRAINT &lt;name&gt; CHECK (&lt;column&gt; IN ('a', 'b', ...))</c> from a
+	/// single migration's SQL text, returned ordinal-sorted for order-independent set
+	/// equality. Delegates to <see cref="ConstraintDriftScan"/> (issue #1814) with a
+	/// one-element migration list, so this stays scoped to <paramref name="tableName"/>
+	/// (and ALTER-visible) exactly like every other <c>*ConstraintDriftTests</c> guard,
+	/// without picking up a later migration's own re-declaration of the same
+	/// constraint name -- callers here deliberately want only what THIS ONE migration
+	/// declared (see <see cref="Migration0050_CheckConstraintValueLists_MatchTheCSharpClosedVocabulary"/>'s
+	/// own doc comment on why 0069's later widening is proven separately, against the
+	/// live database, rather than folded into this static parse).
 	/// </summary>
-	private static IEnumerable<string> ParseCheckInList(string sql, string constraintName)
+	private static IEnumerable<string> ParseCheckInList(string sql, string tableName, string constraintName, string columnName)
 	{
-		Match constraint = Regex.Match(
-			sql,
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\([^)]*\bIN\s*\(([^)]*)\)",
-			RegexOptions.IgnoreCase);
-		Assert.True(constraint.Success, $"Could not locate an IN-list CHECK named '{constraintName}' in the 0050 migration.");
-
-		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
-		Assert.NotEmpty(values);
-		return values.Select(m => m.Groups[1].Value).OrderBy(v => v, StringComparer.Ordinal);
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql([sql], tableName, constraintName, columnName);
+		Assert.NotNull(values);
+		Assert.NotEmpty(values!);
+		return values!.OrderBy(v => v, StringComparer.Ordinal);
 	}
 
 	/// <summary>

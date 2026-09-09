@@ -280,15 +280,48 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 			.ToList();
 		string firstNewItemJson = Path.Combine(library.DiskPath, "new-item-0000", "item.json");
 
+		// Issue #1811: the original approach polled File.Exists from a Task.Run/
+		// Task.Delay(1) loop -- both scheduled on the SAME thread pool the writer's
+		// own async I/O awaits compete for, so under CI contention the poll could be
+		// starved long enough that the writer finished all 300 items before the loop
+		// ever got scheduled to observe the first one, and cancellation never fired
+		// mid-write (flaked twice on unrelated PRs the same night). A
+		// FileSystemWatcher would remove the polling interval, but this sandbox's
+		// inotify instance quota is a genuinely shared, exhaustible resource across
+		// concurrently running agents/processes, so a watcher-based fix trades one
+		// flake for another failure mode entirely outside this test's control.
+		// Instead: poll from a dedicated, non-pooled <see cref="Thread"/> (never
+		// queued behind the writer's own async continuations) with no sleep at all --
+		// a tight spin loop is the cheapest way to guarantee this watcher thread is
+		// never starved relative to the writer's own progress, and it holds no OS
+		// watch handle. The outcome asserted below is still an exception KIND
+		// (OperationCanceledException) and file CONTENTS, never elapsed time.
 		using CancellationTokenSource cts = new();
-		Task cancelOnFirstItemWritten = Task.Run(async () =>
+		using ManualResetEventSlim firstItemWritten = new(initialState: false);
+		using ManualResetEventSlim stopPolling = new(initialState: false);
+		Thread poller = new(() =>
 		{
 			while (!File.Exists(firstNewItemJson))
 			{
-				await Task.Delay(1);
+				if (stopPolling.IsSet)
+				{
+					return;
+				}
+
+				Thread.SpinWait(1000);
 			}
 
-			await cts.CancelAsync();
+			firstItemWritten.Set();
+		})
+		{
+			IsBackground = true,
+		};
+		poller.Start();
+
+		Task cancelOnFirstItemWritten = Task.Run(() =>
+		{
+			firstItemWritten.Wait();
+			cts.Cancel();
 		});
 
 		// Simulates a writer killed mid-run: a cancellation that fires after some
@@ -296,9 +329,29 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 		// touched must leave both of those documents byte-for-byte the same file they
 		// were before this call, and must leave no partial temp artifact behind for
 		// any document the cancellation interrupted.
-		await Assert.ThrowsAnyAsync<OperationCanceledException>(
-			() => writer.WriteAsync(library, newItems, cts.Token));
-		await cancelOnFirstItemWritten;
+		try
+		{
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(
+				() => writer.WriteAsync(library, newItems, cts.Token));
+			await cancelOnFirstItemWritten;
+		}
+		finally
+		{
+			// PR #1832 round-2 note N2c. Without this finally, a WriteAsync that threw
+			// some OTHER exception before the first item.json appeared made the assert
+			// above throw first, so the dedicated spin-loop poller was never told to
+			// stop -- it pinned one core for the remainder of the process, on a host
+			// docs/process/testing.md documents as shared with concurrent agents, and
+			// went on reading ManualResetEventSlims the `using` declarations above were
+			// meanwhile disposing. Releasing the poller, unblocking the waiter behind
+			// firstItemWritten and joining the thread makes teardown unconditional:
+			// reachable only when the test is already failing, which is exactly when a
+			// leaked hot thread is least welcome.
+			stopPolling.Set();
+			firstItemWritten.Set();
+			poller.Join(TimeSpan.FromSeconds(5));
+			await cancelOnFirstItemWritten;
+		}
 
 		Assert.True(File.Exists(firstNewItemJson), "the cancellation fired before any new item.json was written -- this run did not exercise a mid-write cancellation");
 		Assert.Equal(itemsBefore, File.ReadAllBytes(itemsJsonPath));

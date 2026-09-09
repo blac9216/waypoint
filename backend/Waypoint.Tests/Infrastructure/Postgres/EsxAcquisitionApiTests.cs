@@ -240,6 +240,58 @@ public sealed class EsxAcquisitionApiTests : IAsyncLifetime
 		Assert.Contains(listDocument.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == id);
 	}
 
+	/// <summary>
+	/// Issue #1604: the shared <c>ValidateAgainstVocabularyAsync</c> validation helper
+	/// is already covered via <see cref="PostSubscription_UnknownPlatformKey_Returns400"/>,
+	/// but nothing pinned the PATCH call site's own guard -- a future refactor that
+	/// dropped the <c>if (request.SelectedPlatforms is not null)</c> branch on PATCH
+	/// would strand a subscription holding a platform key absent from the vendor
+	/// vocabulary with no test noticing.
+	/// </summary>
+	[Fact]
+	public async Task PatchSubscription_UnknownPlatformKey_Returns400()
+	{
+		(_, string id) = await CreateSubscriptionAsync("Baseline ESX 8.0", ["esx-8.0-standard"]);
+
+		string[] selectedPlatforms = ["not-a-real-platform"];
+		HttpRequestMessage patch = new(HttpMethod.Patch, $"/api/v1/downloads/esx/subscriptions/{id}")
+		{
+			Content = JsonBody(new { selected_platforms = selectedPlatforms }),
+		};
+		patch.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage patchResponse = await _client.SendAsync(patch);
+
+		Assert.Equal(HttpStatusCode.BadRequest, patchResponse.StatusCode);
+
+		// The rejected PATCH must not have taken effect -- selected_platforms is
+		// still whatever the subscription was created with.
+		HttpRequestMessage get = new(HttpMethod.Get, $"/api/v1/downloads/esx/subscriptions/{id}");
+		get.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage getResponse = await _client.SendAsync(get);
+		using JsonDocument document = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
+		string[] selected = document.RootElement.GetProperty("selected_platforms").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Equal(["esx-8.0-standard"], selected);
+	}
+
+	/// <summary>Issue #1604: PATCH's own write floor, at the HTTP layer (already pinned in <c>EndpointRoleMatrixTests</c>, but not here at this controller's own API test file, matching this file's existing <see cref="PostSubscription_BelowAdmin_Returns403"/> coverage for POST).</summary>
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Operator")]
+	public async Task PatchSubscription_BelowAdmin_Returns403(string role)
+	{
+		(_, string id) = await CreateSubscriptionAsync("Baseline ESX 8.0", ["esx-8.0-standard"]);
+
+		HttpRequestMessage patch = new(HttpMethod.Patch, $"/api/v1/downloads/esx/subscriptions/{id}")
+		{
+			Content = JsonBody(new { enabled = false }),
+		};
+		patch.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+
+		HttpResponseMessage response = await _client.SendAsync(patch);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
 	[Fact]
 	public async Task PatchSubscription_UnknownId_Returns404()
 	{

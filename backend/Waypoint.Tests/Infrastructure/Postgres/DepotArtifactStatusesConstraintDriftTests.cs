@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
 using System.Text.RegularExpressions;
 using Waypoint.Core.Catalog;
-using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -35,7 +34,8 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// assert against the LAST declaration, the one the fully-migrated database actually
 /// enforces, rather than reading a single named file (review round 1, PR #1744,
 /// finding 1 -- reading 0129 alone let a later migration silently re-widen the
-/// constraint with nothing here noticing). The psm1 half is still read from the one
+/// constraint with nothing here noticing), now table-scoped to <c>depot_artifacts</c>
+/// via the shared <see cref="ConstraintDriftScan"/> (issue #1814). The psm1 half is still read from the one
 /// shipped module file directly. A value added to any one of the three places (SQL
 /// CHECK across all migrations, <see cref="DepotArtifactStatuses"/>, the psm1's
 /// <c>ValidateSet</c>) without the others fails here -- mutation-proof in both
@@ -51,7 +51,8 @@ public sealed class DepotArtifactStatusesConstraintDriftTests
 	[Fact]
 	public void DepotArtifactStatusesAll_EqualsDepotArtifactsStatusCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseLatestCheckAcrossMigrations("depot_artifacts_status_check", "status");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			"depot_artifacts", "depot_artifacts_status_check", "status");
 
 		Assert.Equal(DepotArtifactStatuses.All, constraintValues);
 	}
@@ -85,49 +86,6 @@ public sealed class DepotArtifactStatusesConstraintDriftTests
 		{
 			Assert.Contains(status, DepotArtifactStatuses.All);
 		}
-	}
-
-	/// <summary>
-	/// Reads every embedded <c>Data/Migrations/*.sql</c> resource in migration order
-	/// (ordinal on the zero-padded filename prefix, matching
-	/// <see cref="NpgsqlSchemaMigrator"/>) and returns the value list of the LAST
-	/// <paramref name="constraintName"/> CHECK constraint declared across them -- i.e.
-	/// the constraint the fully-migrated database actually enforces. This repo's
-	/// <c>RepoCredentialBindingConstraintDriftTests.ParseLatestCheckAcrossMigrations</c>
-	/// convention: <c>depot_artifacts_status_check</c> is declared once in
-	/// <c>0001_initial_schema.sql</c> and widened again by migration 0129's DROP/ADD,
-	/// so only scanning every migration and keeping the last hit is safe against a
-	/// further widening this test would otherwise miss (review round 1, PR #1744,
-	/// finding 1).
-	/// </summary>
-	private static List<string> ParseLatestCheckAcrossMigrations(string constraintName, string columnName)
-	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string[] resourceNames = [.. assembly.GetManifestResourceNames()
-			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
-			.OrderBy(name => name, StringComparer.Ordinal)];
-
-		Regex checkPattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
-
-		List<string>? latest = null;
-		foreach (string resourceName in resourceNames)
-		{
-			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
-
-			foreach (Match match in checkPattern.Matches(sql))
-			{
-				latest = [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
-			}
-		}
-
-		Assert.NotNull(latest);
-		Assert.NotEmpty(latest!);
-		return latest!;
 	}
 
 	/// <summary>

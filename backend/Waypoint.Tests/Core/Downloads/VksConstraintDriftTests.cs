@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
-using System.Text.RegularExpressions;
 using Waypoint.Core.Downloads;
-using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Core.Downloads;
@@ -26,10 +24,12 @@ namespace Waypoint.Tests.Core.Downloads;
 /// 0111's four named CHECK constraints on <c>vks_library_items</c>
 /// (<c>vks_library_items_source_check</c>, <c>_release_line_check</c>,
 /// <c>_naming_era_check</c>, <c>_parse_status_check</c>), following this repo's
-/// <c>DepotArtifactStatusesConstraintDriftTests</c>/<c>VmToolsConstraintDriftTests</c>
 /// convention of parsing the migration SQL itself rather than a live database.
-/// Resolution is scoped by BOTH the owning table and the constraint name (#1795 AC1):
-/// a CHECK is only read when it is declared inside <c>vks_library_items</c>' own
+/// Resolution is scoped by BOTH the owning table and the constraint name (#1795 AC1)
+/// via the shared <see cref="ConstraintDriftScan"/> helper (issue #1814 -- every
+/// <c>*ConstraintDriftTests</c> guard shares that one table-scoped, ALTER-visible
+/// helper rather than each carrying its own private copy of the same scan): a CHECK
+/// is only read when it is declared inside <c>vks_library_items</c>' own
 /// <c>CREATE TABLE</c> body or added to that table by a later
 /// <c>ALTER TABLE ... ADD CONSTRAINT</c>, so neither a differently-named nor an
 /// identically-named <c>source IN (...)</c> CHECK on some other table can be picked up
@@ -49,7 +49,7 @@ public sealed class VksConstraintDriftTests
 	{
 		Assert.Equal(
 			VksItemSources.All,
-			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_source_check", "source"));
+			ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(Table, "vks_library_items_source_check", "source"));
 	}
 
 	[Fact]
@@ -57,7 +57,7 @@ public sealed class VksConstraintDriftTests
 	{
 		Assert.Equal(
 			VksReleaseLines.All,
-			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_release_line_check", "release_line"));
+			ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(Table, "vks_library_items_release_line_check", "release_line"));
 	}
 
 	[Fact]
@@ -65,7 +65,7 @@ public sealed class VksConstraintDriftTests
 	{
 		Assert.Equal(
 			VksNamingEras.All,
-			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_naming_era_check", "naming_era"));
+			ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(Table, "vks_library_items_naming_era_check", "naming_era"));
 	}
 
 	[Fact]
@@ -73,7 +73,7 @@ public sealed class VksConstraintDriftTests
 	{
 		Assert.Equal(
 			VksParseStatuses.All,
-			ParseLatestCheckAcrossMigrations(ReadEmbeddedMigrations(), Table, "vks_library_items_parse_status_check", "parse_status"));
+			ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(Table, "vks_library_items_parse_status_check", "parse_status"));
 	}
 
 	/// <summary>
@@ -83,10 +83,12 @@ public sealed class VksConstraintDriftTests
 	/// (<c>vks_library_items_source_check</c>) on <c>reviewer_probe_table</c>. That is
 	/// the round-2 reviewer's own probe, which turned a name-only guard red with
 	/// <c>Actual: ["bogus"]</c>; table scoping is what makes the real
-	/// <c>['depot','public']</c> still resolve.
+	/// <c>['depot','public']</c> still resolve. The real declaration comes first in
+	/// this fixture's text (PR #1832 review round 1, F3) so the test cannot pass
+	/// vacuously on a scan that keeps the LAST match regardless of table.
 	/// </summary>
 	[Fact]
-	public void ParseLatestCheckAcrossMigrations_IgnoresAnIdenticallyNamedCheckOnADifferentTable()
+	public void ParseLatestTableScopedCheckAcrossSql_IgnoresAnIdenticallyNamedCheckOnADifferentTable()
 	{
 		string[] migrations =
 		[
@@ -94,15 +96,14 @@ public sealed class VksConstraintDriftTests
 			CREATE TABLE IF NOT EXISTS vks_library_items (
 			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public'))
 			);
-			""",
-			"""
+
 			CREATE TABLE reviewer_probe_table (
 			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('bogus'))
 			);
 			""",
 		];
 
-		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql(migrations, Table, "vks_library_items_source_check", "source");
 
 		Assert.Equal(["depot", "public"], values);
 	}
@@ -113,7 +114,7 @@ public sealed class VksConstraintDriftTests
 	/// ship -- must likewise leave the real value set untouched.
 	/// </summary>
 	[Fact]
-	public void ParseLatestCheckAcrossMigrations_IgnoresADifferentlyNamedSourceCheckOnADifferentTable()
+	public void ParseLatestTableScopedCheckAcrossSql_IgnoresADifferentlyNamedSourceCheckOnADifferentTable()
 	{
 		string[] migrations =
 		[
@@ -121,8 +122,7 @@ public sealed class VksConstraintDriftTests
 			CREATE TABLE IF NOT EXISTS vks_library_items (
 			    source TEXT NOT NULL CONSTRAINT vks_library_items_source_check CHECK (source IN ('depot', 'public'))
 			);
-			""",
-			"""
+
 			CREATE TABLE managed_tool_installs (
 			    source TEXT NOT NULL,
 			    CONSTRAINT managed_tool_installs_source_check CHECK (source IN ('local-repository', 'depot', 'upload'))
@@ -130,7 +130,7 @@ public sealed class VksConstraintDriftTests
 			""",
 		];
 
-		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql(migrations, Table, "vks_library_items_source_check", "source");
 
 		Assert.Equal(["depot", "public"], values);
 	}
@@ -142,7 +142,7 @@ public sealed class VksConstraintDriftTests
 	/// fails when the vocabulary genuinely diverges rather than passing vacuously.
 	/// </summary>
 	[Fact]
-	public void ParseLatestCheckAcrossMigrations_DetectsAGenuinelyWidenedRealConstraint()
+	public void ParseLatestTableScopedCheckAcrossSql_DetectsAGenuinelyWidenedRealConstraint()
 	{
 		string[] migrations =
 		[
@@ -153,7 +153,7 @@ public sealed class VksConstraintDriftTests
 			""",
 		];
 
-		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql(migrations, Table, "vks_library_items_source_check", "source");
 
 		Assert.NotEqual(VksItemSources.All, values);
 	}
@@ -167,7 +167,7 @@ public sealed class VksConstraintDriftTests
 	/// declaration -- the one a fully-migrated database actually enforces.
 	/// </summary>
 	[Fact]
-	public void ParseLatestCheckAcrossMigrations_PicksUpALaterAlterTableDropAddConstraint()
+	public void ParseLatestTableScopedCheckAcrossSql_PicksUpALaterAlterTableDropAddConstraint()
 	{
 		string[] migrations =
 		[
@@ -182,134 +182,8 @@ public sealed class VksConstraintDriftTests
 			""",
 		];
 
-		List<string> values = ParseLatestCheckAcrossMigrations(migrations, Table, "vks_library_items_source_check", "source");
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql(migrations, Table, "vks_library_items_source_check", "source");
 
 		Assert.Equal(["depot"], values);
-	}
-
-	private static List<string> ReadEmbeddedMigrations()
-	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string[] resourceNames = [.. assembly.GetManifestResourceNames()
-			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
-			.OrderBy(name => name, StringComparer.Ordinal)];
-
-		List<string> sqlTexts = [];
-		foreach (string resourceName in resourceNames)
-		{
-			using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-			using StreamReader reader = new(stream);
-			sqlTexts.Add(reader.ReadToEnd());
-		}
-
-		return sqlTexts;
-	}
-
-	/// <summary>
-	/// Reads every migration text, in migration order (ordinal on the zero-padded
-	/// filename prefix, matching <see cref="NpgsqlSchemaMigrator"/>), and returns the
-	/// value list of the LAST <paramref name="constraintName"/> CHECK constraint
-	/// declared ON <paramref name="table"/> across them -- i.e. the constraint the
-	/// fully-migrated database actually enforces. Both scopes are load-bearing: the
-	/// TABLE scope is what #1795 AC1 requires (a same-named CHECK on another table is
-	/// invisible here), and the NAME scope is what keeps sibling CHECKs on the same
-	/// column of the same table apart.
-	/// </summary>
-	private static List<string> ParseLatestCheckAcrossMigrations(
-		IEnumerable<string> migrationSqlTexts, string table, string constraintName, string columnName)
-	{
-		List<string>? latest = null;
-		foreach (string sql in migrationSqlTexts)
-		{
-			foreach (List<string> values in FindTableScopedChecks(sql, table, constraintName, columnName))
-			{
-				latest = values;
-			}
-		}
-
-		Assert.NotNull(latest);
-		Assert.NotEmpty(latest!);
-		return latest!;
-	}
-
-	/// <summary>
-	/// Every declaration of <paramref name="constraintName"/> on
-	/// <paramref name="table"/> within one migration text, in the order it appears.
-	/// Two shapes count, and only these two: a <c>CONSTRAINT &lt;name&gt; CHECK (...)</c>
-	/// inside that table's own <c>CREATE TABLE</c> body (inline on a column or as a
-	/// table-level constraint), and an <c>ALTER TABLE &lt;table&gt; ADD CONSTRAINT
-	/// &lt;name&gt; CHECK (...)</c> re-declaration. Anything declared inside another
-	/// table's body -- however it is named -- is not a declaration on this table and is
-	/// skipped.
-	/// </summary>
-	private static List<List<string>> FindTableScopedChecks(string sql, string table, string constraintName, string columnName)
-	{
-		Regex checkPattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-		Regex alterPattern = new(
-			$@"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?{Regex.Escape(table)}\s+ADD\s+CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\((?<values>[^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-		List<(int Position, List<string> Values)> found = [];
-
-		foreach ((int bodyStart, int bodyEnd) in CreateTableBodies(sql, table))
-		{
-			foreach (Match match in checkPattern.Matches(sql[bodyStart..bodyEnd]))
-			{
-				found.Add((bodyStart + match.Index, ParseValues(match)));
-			}
-		}
-
-		foreach (Match match in alterPattern.Matches(sql))
-		{
-			found.Add((match.Index, ParseValues(match)));
-		}
-
-		return [.. found.OrderBy(entry => entry.Position).Select(entry => entry.Values)];
-	}
-
-	/// <summary>
-	/// The (start, end) character bounds of the body of every
-	/// <c>CREATE TABLE [IF NOT EXISTS] &lt;table&gt; (...)</c> in one migration text,
-	/// found by walking parentheses from the opening one to its match so that nested
-	/// parens (a <c>CHECK (...)</c>, a <c>NUMERIC(10, 2)</c>) do not end the body early.
-	/// </summary>
-	private static List<(int Start, int End)> CreateTableBodies(string sql, string table)
-	{
-		Regex headerPattern = new(
-			$@"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{Regex.Escape(table)}\s*\(",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-		List<(int Start, int End)> bodies = [];
-		foreach (Match header in headerPattern.Matches(sql))
-		{
-			int start = header.Index + header.Length;
-			int depth = 1;
-			int index = start;
-			while (index < sql.Length && depth > 0)
-			{
-				if (sql[index] == '(')
-				{
-					depth++;
-				}
-				else if (sql[index] == ')')
-				{
-					depth--;
-				}
-
-				index++;
-			}
-
-			bodies.Add((start, depth == 0 ? index - 1 : sql.Length));
-		}
-
-		return bodies;
-	}
-
-	private static List<string> ParseValues(Match match)
-	{
-		Regex valuePattern = new(@"'(?<v>[^']*)'", RegexOptions.Singleline);
-		return [.. valuePattern.Matches(match.Groups["values"].Value).Select(m => m.Groups["v"].Value)];
 	}
 }

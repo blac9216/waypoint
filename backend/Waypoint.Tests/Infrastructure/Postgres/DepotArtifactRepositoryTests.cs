@@ -82,6 +82,36 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1612: <c>UpsertAsync</c>'s SQL uses
+	/// <c>COALESCE(EXCLUDED.size_bytes, depot_artifacts.size_bytes)</c> so a NULL
+	/// incoming size preserves the stored one -- <c>sha256</c> already has an
+	/// overwrite-wins test above, but nothing proved the equivalent direction for
+	/// <c>size_bytes</c>: a NON-NULL incoming size must still overwrite a previously
+	/// stored one. Reversing the COALESCE arguments (matching
+	/// <c>depot_artifacts.size_bytes, EXCLUDED.size_bytes</c>) makes this fail.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_ReUpsertWithNewSizeBytes_OverwritesPreviouslyRecordedSize()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}""", SizeBytes: 123456),
+			CancellationToken.None);
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}""", SizeBytes: 999),
+			CancellationToken.None);
+
+		(IReadOnlyList<DepotArtifact> items, _) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
+
+		DepotArtifact[] matching = items.Where(item => item.ExternalId == relativePath).ToArray();
+		Assert.Single(matching);
+		Assert.Equal(999, matching[0].SizeBytes);
+	}
+
+	/// <summary>
 	/// Issue #1705 regression: the #1503 presence sweep's absent-from-disk result
 	/// (<see cref="DepotArtifactStatuses.Missing"/>) used to violate
 	/// <c>depot_artifacts_status_check</c> (only 'indexed'/'downloading'/'present'/
@@ -324,54 +354,90 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
-		// Reconstruct the pre-0100 shape: rename the column back so the two rows
-		// below are inserted exactly as CatalogIndexJobHandler/VendorProductVersionCatalogParser
-		// would have written them under the OLD external_id identity column.
-		await using (NpgsqlCommand revert = new("ALTER TABLE depot_artifacts RENAME COLUMN relative_path TO external_id", connection))
-		{
-			await revert.ExecuteNonQueryAsync();
-		}
-
-		await using (NpgsqlCommand seed = new(
-			"""
-			INSERT INTO depot_artifacts (external_id, status, metadata) VALUES
-				($1, 'indexed', '{}'::jsonb),
-				($2, 'indexed', '{}'::jsonb)
-			""", connection))
-		{
-			seed.Parameters.AddWithValue(nestedLegacyPath);
-			seed.Parameters.AddWithValue(bareLegacyFilename);
-			await seed.ExecuteNonQueryAsync();
-		}
-
 		string migration0100 = await ReadMigrationSqlAsync("0100_catalog_identity_rekey.sql");
-		await using (NpgsqlCommand reapply = new(migration0100, connection))
-		{
-			await reapply.ExecuteNonQueryAsync();
-		}
 
-		await using (NpgsqlCommand verify = new(
-			"SELECT relative_path FROM depot_artifacts WHERE relative_path = ANY($1)", connection))
+		// Issue #1614: this test mutates the SHARED fixture's schema in place. If
+		// anything between the revert and the reapply below throws, a naive version of
+		// this test would leave depot_artifacts permanently on the pre-0100 column
+		// name, cascading failures into every other test in the Postgres collection.
+		// Migration 0100's own guards (IF EXISTS/NOT EXISTS on both the column rename
+		// and the constraint rename) make it safe to unconditionally re-run in a
+		// finally block regardless of where a failure occurred -- that always restores
+		// the forward (post-0100) schema shape, the same guarantee every other
+		// migration file's re-application idempotency already provides.
+		try
 		{
-			verify.Parameters.AddWithValue(new[] { nestedLegacyPath, bareLegacyFilename });
-			await using NpgsqlDataReader reader = await verify.ExecuteReaderAsync();
-			HashSet<string> found = [];
-			while (await reader.ReadAsync())
+			// Reconstruct the pre-0100 shape: rename BOTH the column and the
+			// constraint back, so the two rows below are inserted exactly as
+			// CatalogIndexJobHandler/VendorProductVersionCatalogParser would have
+			// written them under the OLD external_id identity column, AND migration
+			// 0100's second DO $$ block (which renames
+			// depot_artifacts_external_id_key -> depot_artifacts_relative_path_key)
+			// exercises its real branch instead of always finding the constraint
+			// already renamed and taking the no-op path (Postgres does not
+			// auto-rename a constraint when its column is renamed).
+			await using (NpgsqlCommand revert = new("ALTER TABLE depot_artifacts RENAME COLUMN relative_path TO external_id", connection))
 			{
-				found.Add(reader.GetString(0));
+				await revert.ExecuteNonQueryAsync();
 			}
 
-			Assert.Equal(2, found.Count);
-			Assert.Contains(nestedLegacyPath, found);
-			Assert.Contains(bareLegacyFilename, found);
-		}
+			await using (NpgsqlCommand revertConstraint = new(
+				"ALTER TABLE depot_artifacts RENAME CONSTRAINT depot_artifacts_relative_path_key TO depot_artifacts_external_id_key", connection))
+			{
+				await revertConstraint.ExecuteNonQueryAsync();
+			}
 
-		// Running the migration a SECOND time (already-migrated state, matching
-		// every other migration file's re-application guarantee) must still be a
-		// no-op, not an error.
-		await using (NpgsqlCommand reapplyAgain = new(migration0100, connection))
+			await using (NpgsqlCommand seed = new(
+				"""
+				INSERT INTO depot_artifacts (external_id, status, metadata) VALUES
+					($1, 'indexed', '{}'::jsonb),
+					($2, 'indexed', '{}'::jsonb)
+				""", connection))
+			{
+				seed.Parameters.AddWithValue(nestedLegacyPath);
+				seed.Parameters.AddWithValue(bareLegacyFilename);
+				await seed.ExecuteNonQueryAsync();
+			}
+
+			await using (NpgsqlCommand reapply = new(migration0100, connection))
+			{
+				await reapply.ExecuteNonQueryAsync();
+			}
+
+			await using (NpgsqlCommand verify = new(
+				"SELECT relative_path FROM depot_artifacts WHERE relative_path = ANY($1)", connection))
+			{
+				verify.Parameters.AddWithValue(new[] { nestedLegacyPath, bareLegacyFilename });
+				await using NpgsqlDataReader reader = await verify.ExecuteReaderAsync();
+				HashSet<string> found = [];
+				while (await reader.ReadAsync())
+				{
+					found.Add(reader.GetString(0));
+				}
+
+				Assert.Equal(2, found.Count);
+				Assert.Contains(nestedLegacyPath, found);
+				Assert.Contains(bareLegacyFilename, found);
+			}
+
+			await using (NpgsqlCommand verifyConstraint = new(
+				"SELECT 1 FROM pg_constraint WHERE conname = 'depot_artifacts_relative_path_key'", connection))
+			{
+				Assert.NotNull(await verifyConstraint.ExecuteScalarAsync());
+			}
+
+			// Running the migration a SECOND time (already-migrated state, matching
+			// every other migration file's re-application guarantee) must still be a
+			// no-op, not an error.
+			await using (NpgsqlCommand reapplyAgain = new(migration0100, connection))
+			{
+				await reapplyAgain.ExecuteNonQueryAsync();
+			}
+		}
+		finally
 		{
-			await reapplyAgain.ExecuteNonQueryAsync();
+			await using NpgsqlCommand restore = new(migration0100, connection);
+			await restore.ExecuteNonQueryAsync();
 		}
 	}
 

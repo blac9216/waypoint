@@ -107,7 +107,19 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		_enrollment = new DepotEnrollmentRepository(_fixture.ConnectionString);
 	}
 
-	public Task DisposeAsync() => Task.CompletedTask;
+	/// <summary>
+	/// Issue #1810: this class writes real <c>jobs</c> rows with
+	/// <c>job_type = 'binaries-download'</c>, a value only a later migration's widened
+	/// <c>jobs_job_type_check</c> admits. The <c>[Collection("Postgres")]</c> fixture is
+	/// shared across every class in the collection for the whole test-assembly run, and
+	/// <c>SchemaMigrationTests</c>' idempotency test replays every EARLIER migration's raw
+	/// SQL (including its narrower <c>jobs_job_type_check</c>) directly against that same
+	/// live connection -- a leftover row here throws <c>23514</c> if that test runs after
+	/// this class in the same process. Cleaning up on every test exit (not just relying on
+	/// the next test's own <c>InitializeAsync</c> reset) closes that window regardless of
+	/// collection ordering.
+	/// </summary>
+	public async Task DisposeAsync() => await _fixture.ResetJobEngineDataAsync();
 
 	public void Dispose()
 	{
