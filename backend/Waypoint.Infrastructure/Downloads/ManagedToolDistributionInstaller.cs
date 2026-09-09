@@ -353,14 +353,6 @@ public sealed class ManagedToolDistributionInstaller : IManagedToolDistributionI
 		relativePath.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
 
 	/// <summary>
-	/// Runs the extracted candidate executable once, noninteractively, with its managed
-	/// library directory on the environment before any activation happens -- the direct
-	/// fix for issue #686's <c>Exec format error</c> regression: an archive can pass
-	/// every path/layout check and still not be a real, runnable executable for this
-	/// platform/architecture. stdin is redirected from an empty stream so a tool that
-	/// unexpectedly waits on input cannot hang the job past <see cref="ManagedToolOptions.SmokeTestTimeout"/>.
-	/// </summary>
-	/// <summary>
 	/// Issue #1610: <c>Process.Start</c> can throw a <see cref="Win32Exception"/> with
 	/// "Text file busy" (ETXTBSY) for a freshly-extracted, perfectly valid executable
 	/// when it races an UNRELATED concurrent <c>fork()</c> elsewhere in this process --
@@ -406,6 +398,14 @@ public sealed class ManagedToolDistributionInstaller : IManagedToolDistributionI
 	private static bool IsTextFileBusy(Win32Exception exception) =>
 		exception.Message.Contains("Text file busy", StringComparison.OrdinalIgnoreCase);
 
+	/// <summary>
+	/// Runs the extracted candidate executable once, noninteractively, with its managed
+	/// library directory on the environment before any activation happens -- the direct
+	/// fix for issue #686's <c>Exec format error</c> regression: an archive can pass
+	/// every path/layout check and still not be a real, runnable executable for this
+	/// platform/architecture. stdin is redirected from an empty stream so a tool that
+	/// unexpectedly waits on input cannot hang the job past <see cref="ManagedToolOptions.SmokeTestTimeout"/>.
+	/// </summary>
 	private static async Task<ManagedToolDistributionInstallResult> SmokeTestAsync(
 		string executablePath, string libraryPath, ManagedToolOptions options, CancellationToken cancellationToken)
 	{
