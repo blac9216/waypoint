@@ -74,10 +74,14 @@ standalone issue). Refuse anything live-claimed by someone else; take over stale
 with an event comment. [references/claims.md](references/claims.md).
 
 **3. Readiness gate** — the target must look like planning produced it: template-shaped
-bodies, provable acceptance criteria, type + `area:*` labels, an epic with >1 child, a
-milestone with epics, dependencies set where order matters. If it does not, **stop and
-ask** — "this doesn't look like it has been through planning; proceed anyway?" — and do
-nothing until answered. This skill never decomposes work; a separate planning skill does.
+bodies, an `## Acceptance Criteria` section with native checkboxes (prose bullets under
+some other heading do not satisfy this — #1253 found #1115 reached the active line with
+none, leaving PR #1221's reviewer to reconstruct requirements from "Proposed
+Enhancement" prose instead of ticking a merge-time proof record), type + `area:*`
+labels, an epic with >1 child, a milestone with epics, dependencies set where order
+matters. If it does not, **stop and ask** — "this doesn't look like it has been through
+planning; proceed anyway?" — and do nothing until answered. This skill never decomposes
+work; a separate planning skill does.
 
 **4. Maintenance** — run the full pass ([references/maintenance.md](references/maintenance.md)):
 triage drain (with sequencing), host audit, cleanup, rule audit, state audit. Runs here,
