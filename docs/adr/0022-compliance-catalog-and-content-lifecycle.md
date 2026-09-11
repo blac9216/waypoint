@@ -1,7 +1,7 @@
 # ADR-0022: Closed compliance catalog and atomic content lifecycle
 
-Status: Accepted (planned; implementation tracked by epic
-[#726](https://github.com/blac9216/waypoint/issues/726))
+Status: Accepted
+Date: 2026-08-25
 
 ## Context
 

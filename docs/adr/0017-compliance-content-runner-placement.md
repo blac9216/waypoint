@@ -1,6 +1,8 @@
 # ADR-0017: Compliance-content pull/import execute in the compliance-runner
 
 Status: Accepted
+Amends: 0013
+Date: 2026-08-23
 
 Supersedes the `content-pull`/`content-import` job-type placement in
 [ADR-0013](0013-control-plane-and-runners.md) §2's `download-runner` bullet.

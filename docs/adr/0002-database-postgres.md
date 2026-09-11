@@ -1,6 +1,7 @@
 # ADR-0002: PostgreSQL for app data, catalogs, job queue, and Keycloak
 
 Status: Accepted
+Date: 2026-08-02
 
 ## Context
 

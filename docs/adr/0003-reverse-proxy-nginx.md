@@ -1,6 +1,7 @@
 # ADR-0003: nginx reverse proxy with operator-provided TLS
 
 Status: Accepted
+Date: 2026-08-02
 
 ## Context
 

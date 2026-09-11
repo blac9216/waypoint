@@ -1,6 +1,7 @@
 # ADR-0020: Capacity lease pool protocol, recovery, and fairness policy
 
 Status: Accepted
+Date: 2026-08-23
 
 Delivers the shared capacity lease pool whose direction ADR-0018 §4 recorded (Option B,
 owner ruling on issue #555, 2026-08-23) and deliberately deferred to issue #569.

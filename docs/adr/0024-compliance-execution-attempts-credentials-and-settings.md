@@ -1,7 +1,8 @@
 # ADR-0024: Compliance execution items, attempts, credentials, and control settings
 
-Status: Accepted (planned; implementation tracked by epic
-[#726](https://github.com/blac9216/waypoint/issues/726))
+Status: Accepted
+Amends: 0021
+Date: 2026-08-26
 
 Supersedes ADR-0021 §§4–7 where that decision resolves only target bindings, rejects a
 whole run for one missing binding, or permits schedule-carried overrides. ADR-0021's
