@@ -422,7 +422,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 	/// timestamp stamped directly via SQL -- 2 hours old, well past the default
 	/// 60-minute <c>Discovery:StaleAfterMinutes</c> window -- so only the
 	/// <c>&lt; staleBefore</c> comparison, not the null check, can be responsible for
-	/// the discover job being queued. Per docs/testing.md's fixture-monoculture rule,
+	/// the discover job being queued. Per docs/how-to/testing.md's fixture-monoculture rule,
 	/// this closes the gap left by the existing fixtures, which were only ever
 	/// null-or-fresh and never exercised the timestamp comparison itself.
 	/// </summary>

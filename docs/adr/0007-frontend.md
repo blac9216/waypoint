@@ -19,7 +19,7 @@ streaming run views, code-editor panes for attestation/input YAML.
 - Live updates via **SSE** subscriptions to the job engine (ADR-0008).
 - Visual language: enterprise ops console, dark theme primary + light theme, restrained
   status colors, monospace only for logs/IDs. The detailed screen inventory lives in
-  [`../ui/design-brief.md`](../ui/design-brief.md).
+  [`../explanation/ui-design-brief.md`](../explanation/ui-design-brief.md).
 
 ## Rationale
 

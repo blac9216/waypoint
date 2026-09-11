@@ -1,6 +1,6 @@
 /**
- * Config → Users & Roles tab (issue #32, epic #14) — docs/ui/prototype
- * README "9. Configuration": "user, role pill, site scope, auth method
+ * Config → Users & Roles tab (issue #32, epic #14) — docs/how-to/
+ * ui-prototype.md "9. Configuration": "user, role pill, site scope, auth method
  * (PIV/CAC, LDAP), last seen, plus a one-line restatement of what each role
  * can do", against the #529 backend (`UsersController`).
  *

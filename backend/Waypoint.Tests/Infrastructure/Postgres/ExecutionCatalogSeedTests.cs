@@ -23,7 +23,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issue #959 Option C: migration 0064 seeds the hand-curated execution catalog from
-/// docs/compliance-parity.md's documented provenance-matrix rows so a fresh stack is
+/// docs/explanation/compliance-parity.md's documented provenance-matrix rows so a fresh stack is
 /// not permanently empty (before this migration, <c>catalog_products</c>/
 /// <c>catalog_components</c>/<c>catalog_execution_profiles</c> had zero rows on a fresh
 /// database, so no discovered component could ever link to a catalog component --
@@ -397,7 +397,7 @@ public sealed class ExecutionCatalogSeedExpansionTests
 /// <summary>
 /// Class-killing drift guard for migrations 0064+0067, mirroring
 /// <c>LayoutTableParityTests</c>'s doc-is-authority idiom (issue #959): parses
-/// docs/compliance-parity.md's "Sibling source-capability provenance matrix" and
+/// docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix" and
 /// "Priority" row directly out of the doc -- the same source a human maintainer edits --
 /// and asserts the seed migrations' SQL literals agree, so the doc and the shipped seed
 /// cannot silently diverge the way the interpreter's family table and the doc did before
@@ -434,13 +434,13 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 	[Fact]
 	public void SeededReportGroups_MatchTheDocumentedClosedPriorityVocabularyExactly()
 	{
-		string doc = ReadRepoFile("docs", "compliance-parity.md");
+		string doc = ReadRepoFile("docs", "explanation", "compliance-parity.md");
 		string migration = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0064_execution_catalog_seed.sql");
 
-		// docs/compliance-parity.md "Priority" row: "NSX STIG 1; VCSA STIG 2; vCenter STIG
+		// docs/explanation/compliance-parity.md "Priority" row: "NSX STIG 1; VCSA STIG 2; vCenter STIG
 		// 3; ESXi STIG 4; VM STIG 5; every SRG 6" -- parsed as (label, priority) pairs.
 		Match priorityRowMatch = Regex.Match(doc, @"\| Priority \| (?<row>[^|]+) \|");
-		Assert.True(priorityRowMatch.Success, "docs/compliance-parity.md is missing the 'Priority' row this guard parses.");
+		Assert.True(priorityRowMatch.Success, "docs/explanation/compliance-parity.md is missing the 'Priority' row this guard parses.");
 
 		Dictionary<string, int> documentedPriorities = new(StringComparer.OrdinalIgnoreCase);
 		foreach (Match entry in Regex.Matches(priorityRowMatch.Groups["row"].Value, @"([A-Za-z][A-Za-z ]*?)\s+(\d+)"))
@@ -550,7 +550,7 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 			string.Equals(r.ProductVersionKey, productVersionKey, StringComparison.Ordinal) &&
 			string.Equals(r.Kind, kind, StringComparison.Ordinal) &&
 			string.Equals(r.Transport, transport, StringComparison.Ordinal));
-		Assert.True(row is not null, $"docs/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- a seed migration's doc-comment claims to cover it.");
+		Assert.True(row is not null, $"docs/explanation/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- a seed migration's doc-comment claims to cover it.");
 		Assert.DoesNotContain("CKL", row!.Output, StringComparison.OrdinalIgnoreCase);
 
 		foreach (string componentKey in seededComponentKeys)
@@ -624,7 +624,7 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 			string.Equals(r.ProductVersionKey, productVersionKey, StringComparison.Ordinal) &&
 			string.Equals(r.Kind, kind, StringComparison.Ordinal) &&
 			string.Equals(r.Transport, transport, StringComparison.Ordinal));
-		Assert.True(row is not null, $"docs/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- the seed migration's doc-comment claims to cover it.");
+		Assert.True(row is not null, $"docs/explanation/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- the seed migration's doc-comment claims to cover it.");
 
 		// Every catalog_execution_profiles VALUES tuple ends with (..., component_key,
 		// release_key, report_group_key, profile_version, output_kind) -- find the tuple
@@ -639,15 +639,15 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 	}
 
 	/// <summary>
-	/// Parses docs/compliance-parity.md's "Sibling source-capability provenance matrix"
+	/// Parses docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix"
 	/// table. Row shape: <c>| product/version key | key form | kind / release | components
 	/// | transport / selector | purpose | output |</c>.
 	/// </summary>
 	private static List<ProvenanceMatrixRow> ParseProvenanceMatrixRows()
 	{
-		string doc = ReadRepoFile("docs", "compliance-parity.md");
+		string doc = ReadRepoFile("docs", "explanation", "compliance-parity.md");
 		int sectionStart = doc.IndexOf("## Sibling source-capability provenance matrix", StringComparison.Ordinal);
-		Assert.True(sectionStart >= 0, "docs/compliance-parity.md is missing the provenance matrix section this guard parses.");
+		Assert.True(sectionStart >= 0, "docs/explanation/compliance-parity.md is missing the provenance matrix section this guard parses.");
 		int sectionEnd = doc.IndexOf("\n## ", sectionStart + 1, StringComparison.Ordinal);
 		string section = sectionEnd >= 0 ? doc[sectionStart..sectionEnd] : doc[sectionStart..];
 

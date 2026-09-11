@@ -1,6 +1,6 @@
 /**
- * Config → Sites & Targets tab (issue #237, epic #13) — docs/ui/prototype
- * README "Sites & Targets" panel, against the #19 backend (`/sites`,
+ * Config → Sites & Targets tab (issue #237, epic #13) — docs/how-to/
+ * ui-prototype.md "Sites & Targets" panel, against the #19 backend (`/sites`,
  * `/sites/{id}/targets`, `/targets/{id}`, PR #238).
  *
  * #237 was originally one PR (#255), closed on review for size (~1450 net
@@ -23,7 +23,7 @@ export function SitesTargetsTab() {
 	const [credentials, setCredentials] = useState<CredentialOption[]>([]);
 	// The `/sites` resource has no target-count field (docs/reference/api-contract.md
 	// "Site: name, description, stigman_override?" — no count), so the
-	// sidebar's per-site count (docs/ui/prototype/README.md "Sidebar lists
+	// sidebar's per-site count (docs/how-to/ui-prototype.md "Sidebar lists
 	// sites with target counts") is derived client-side: one
 	// `/sites/{id}/targets` fetch per site, in parallel, keyed by site id.
 	const [targetCounts, setTargetCounts] = useState<Map<string, number>>(new Map());

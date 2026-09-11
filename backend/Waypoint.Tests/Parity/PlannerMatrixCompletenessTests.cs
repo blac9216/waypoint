@@ -19,7 +19,7 @@ namespace Waypoint.Tests.Parity;
 /// <summary>
 /// Fail-closed drift guard for the PLANNER-PARITY slice of issue #749, mirroring
 /// <see cref="ParityMatrixCompletenessTests"/>'s mechanics exactly (same doc, same
-/// row set, different question): every one of docs/compliance-parity.md's 13
+/// row set, different question): every one of docs/explanation/compliance-parity.md's 13
 /// capability-group rows must be either represented in
 /// <see cref="PlannerDerivationMatrix.Rows"/> (this slice proves the planner expands it
 /// correctly) or explicitly named in <see cref="PlannerDerivationMatrix.OwnerLiveOnlyRows"/>
@@ -39,7 +39,7 @@ namespace Waypoint.Tests.Parity;
 public sealed class PlannerMatrixCompletenessTests
 {
 	/// <summary>
-	/// The complete set of docs/compliance-parity.md family identifiers this test
+	/// The complete set of docs/explanation/compliance-parity.md family identifiers this test
 	/// tracks, expressed the same way <see cref="PlannerDerivationMatrix"/> keys its
 	/// rows -- kept as an explicit ledger (not re-parsed from prose) because the
 	/// planner-parity question ("did THIS slice seed a multi-instance planner fixture
@@ -77,7 +77,7 @@ public sealed class PlannerMatrixCompletenessTests
 			.ToList();
 
 		Assert.True(uncovered.Count == 0,
-			"docs/compliance-parity.md families not covered by PlannerDerivationMatrix.Rows nor " +
+			"docs/explanation/compliance-parity.md families not covered by PlannerDerivationMatrix.Rows nor " +
 			"explicitly allow-listed in PlannerDerivationMatrix.OwnerLiveOnlyRows: " + string.Join(", ", uncovered));
 	}
 

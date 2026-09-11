@@ -30,7 +30,7 @@ namespace Waypoint.Api.Controllers;
 /// bundle management and scoped TLS bypass authorization" as one of the explicit
 /// trust-affecting Admin-only actions.
 ///
-/// Deliberately NOT this slice (docs/testing.md/CLAUDE.md scope discipline, stated
+/// Deliberately NOT this slice (docs/how-to/testing.md/CLAUDE.md scope discipline, stated
 /// here so a reviewer does not read its absence as a gap): no runtime client
 /// (PowerCLI/NSX/SSH-adjacent/STIG Manager/content sync) consumes a
 /// <see cref="TrustPolicy"/> yet; no runner materializes trust for a session; no

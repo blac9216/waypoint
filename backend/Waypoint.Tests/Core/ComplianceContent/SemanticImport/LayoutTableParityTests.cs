@@ -24,7 +24,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 /// Class-killing guard for issue #959's defect class: "the interpreter's closed
 /// family/layout table silently drifted from the upstream layout docs/compliance-
 /// parity.md documents, and nothing caught it until 100% of real content quarantined."
-/// This test parses docs/compliance-parity.md's "Recognized on-disk import layouts"
+/// This test parses docs/explanation/compliance-parity.md's "Recognized on-disk import layouts"
 /// table directly -- the SAME authoritative source a human maintainer edits -- and
 /// proves, for every documented row, that a minimal INVENTED fixture built from that
 /// row's exact path shape actually classifies via <see cref="VendorHierarchyInterpreter"/>
@@ -84,7 +84,7 @@ public sealed class LayoutTableParityTests
 		List<DocumentedLayoutRow> rows = ParseDocumentedLayoutRows();
 		HashSet<string> documentedLiterals = new(rows.Select(r => r.DirectoryLiteral), StringComparer.OrdinalIgnoreCase);
 
-		// The full closed set of directory literals docs/compliance-parity.md documents
+		// The full closed set of directory literals docs/explanation/compliance-parity.md documents
 		// as recognized today (issue #959). This list exists ONLY to drive the reverse
 		// check below (a literal accidentally recognized by the interpreter but never
 		// documented) -- it is not itself the authority the code is checked against;
@@ -94,7 +94,7 @@ public sealed class LayoutTableParityTests
 
 		foreach (string literal in knownRecognizedLiterals)
 		{
-			Assert.True(documentedLiterals.Contains(literal), $"'{literal}' is a directory the interpreter recognizes but docs/compliance-parity.md's layout table has no row for it -- document it or the two have drifted.");
+			Assert.True(documentedLiterals.Contains(literal), $"'{literal}' is a directory the interpreter recognizes but docs/explanation/compliance-parity.md's layout table has no row for it -- document it or the two have drifted.");
 		}
 
 		// And nothing UNRECOGNIZED sneaks past as "documented" either -- e.g. aria/vcd/avi
@@ -185,7 +185,7 @@ public sealed class LayoutTableParityTests
 	}
 
 	/// <summary>
-	/// Parses docs/compliance-parity.md's "Recognized on-disk import layouts" table.
+	/// Parses docs/explanation/compliance-parity.md's "Recognized on-disk import layouts" table.
 	/// Row shape: <c>| directory literal | maps-to-family | path shape | notes |</c>.
 	/// The directory-literal column may carry a parenthetical qualifier (e.g. "vsphere
 	/// (object-kind-before-inspec)") which this parser strips into a separate flag
@@ -195,7 +195,7 @@ public sealed class LayoutTableParityTests
 	{
 		string doc = ReadDocFile();
 		int sectionStart = doc.IndexOf("## Recognized on-disk import layouts", StringComparison.Ordinal);
-		Assert.True(sectionStart >= 0, "docs/compliance-parity.md is missing the 'Recognized on-disk import layouts' section this guard parses.");
+		Assert.True(sectionStart >= 0, "docs/explanation/compliance-parity.md is missing the 'Recognized on-disk import layouts' section this guard parses.");
 		int sectionEnd = doc.IndexOf("\n## ", sectionStart + 1, StringComparison.Ordinal);
 		string section = sectionEnd >= 0 ? doc[sectionStart..sectionEnd] : doc[sectionStart..];
 
@@ -259,7 +259,7 @@ public sealed class LayoutTableParityTests
 
 	private static string ReadDocFile()
 	{
-		const string repoRelativePath = "docs/compliance-parity.md";
+		const string repoRelativePath = "docs/explanation/compliance-parity.md";
 		DirectoryInfo? dir = new(AppContext.BaseDirectory);
 		while (dir is not null)
 		{

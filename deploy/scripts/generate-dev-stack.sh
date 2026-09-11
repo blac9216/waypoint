@@ -553,6 +553,6 @@ Generated stack ready (nothing started). Lifecycle commands, run from deploy/:
 ${UP_BLOCK}
   Test: https://localhost:${PORT}/api/v1/health  (or, for agent mode inside a
         devcontainer, curl through a helper container on the '${PROJECT}_edge'
-        network -- see docs/testing.md)
+        network -- see docs/how-to/testing.md)
   Down: ${DC_PRINT} down -v
 EOF

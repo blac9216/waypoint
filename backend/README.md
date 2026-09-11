@@ -199,7 +199,7 @@ what each proves. `JobEventsSeqTests` deliberately interleaves writers so that
 assignment order and commit order diverge, because a concurrency test whose writers
 all commit before the reader queries cannot fail.
 They share one container per test run via an xUnit collection fixture
-(`PostgresFixture`), isolated per `docs/testing.md`'s recipe (a container name and
+(`PostgresFixture`), isolated per `docs/how-to/testing.md`'s recipe (a container name and
 host port unique to the run).
 
 ### The job_events write budget (issue #117)

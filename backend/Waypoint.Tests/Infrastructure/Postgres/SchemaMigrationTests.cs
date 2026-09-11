@@ -228,7 +228,7 @@ public sealed class SchemaMigrationTests
 	/// "reserved by parallel agents at branch time"; re-verified free against both the
 	/// migrations directory and open PRs at this PR's own commit time) adds no new
 	/// tables: it seeds the hand-curated execution catalog (issue #959 Option C, epic
-	/// #726) from docs/compliance-parity.md's documented provenance-matrix rows into
+	/// #726) from docs/explanation/compliance-parity.md's documented provenance-matrix rows into
 	/// 0050's existing catalog_source_revisions/catalog_products/
 	/// catalog_product_versions/catalog_content_releases/catalog_components/
 	/// catalog_report_groups/catalog_execution_profiles/
@@ -306,7 +306,7 @@ public sealed class SchemaMigrationTests
 	/// catalog_components.requires_sudo/sudo_requires_password (the catalog's declared
 	/// sudo policy) and scan_plan_items.requires_sudo/sudo_requires_password (the
 	/// plan-time freeze of that policy, nullable for pre-#743 rows), plus seed
-	/// reconciliation UPDATEs restating docs/compliance-parity.md's documented sudo
+	/// reconciliation UPDATEs restating docs/explanation/compliance-parity.md's documented sudo
 	/// shapes for the photon/vidm/vcf-sddc-manager rows earlier migrations seeded, no
 	/// new tables or grants --
 	/// 0075 (issue #784, epic #726; slot verified free against both the migrations
@@ -1322,7 +1322,7 @@ public sealed class SchemaMigrationTests
 	/// copies -- the C# <c>Catalog*</c>/<c>CredentialPurposes</c> constants and migration
 	/// 0050's CHECK constraint value lists. This repo's convention is a class-killing drift
 	/// guard (cf. <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>
-	/// mirroring <c>CredentialTypes</c>, and docs/testing.md's "read it off the detector"
+	/// mirroring <c>CredentialTypes</c>, and docs/how-to/testing.md's "read it off the detector"
 	/// derivation). This parses each closed set's value list OUT OF the authoritative 0050
 	/// migration text (embedded resource) and asserts set-equality with the C# constants, so
 	/// adding/removing a value on either side without the other fails here -- drift in either

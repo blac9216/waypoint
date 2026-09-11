@@ -4,7 +4,7 @@
 # through an OLD git ref's parser code and the current working tree's parser code, and
 # reports any shape that resolved under the old ref but no longer resolves under the
 # new one. This is a DIFFERENT property from real-content conformance (see
-# docs/compliance-content-shape-inventory.md): conformance proves the parser handles
+# docs/explanation/compliance-content-shape-inventory.md): conformance proves the parser handles
 # what vendors ship today; this proves a candidate change did not silently stop
 # handling a shape THAT IS ALREADY AN INVENTORY ROW, including rows no shipped content
 # happens to exercise yet (the PR #1084 round-2 review's finding on issue #1077).

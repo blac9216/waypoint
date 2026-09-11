@@ -13,7 +13,7 @@ function readStoredTheme(): Theme | null {
 	}
 }
 
-/** Dark is primary (docs/ui/prototype/README.md): default to dark unless the
+/** Dark is primary (docs/how-to/ui-prototype.md): default to dark unless the
  * operator's OS explicitly prefers light and nothing has been chosen yet. */
 function initialTheme(): Theme {
 	const stored = readStoredTheme();

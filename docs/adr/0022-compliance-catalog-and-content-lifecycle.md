@@ -27,7 +27,7 @@ Each baseline binds one exact product version to one exact immutable profile ver
 There are no ranges, nearest-version fallback, or cross-version test equivalence. A
 compatible component has at most one active baseline, selected deterministically by
 the catalog; scan callers do not select profiles. The normalized initial coverage is
-the [parity contract](../compliance-parity.md).
+the [parity contract](../explanation/compliance-parity.md).
 
 Sibling product-family keys and paths are retained only as source provenance. They
 are not product versions, catalog compatibility claims, baseline candidates, or
@@ -114,6 +114,11 @@ quarantined; import never overwrites history or auto-activates functional change
   can be transferred and staged, but cannot run until the appliance supplies support.
 - Candidate and retained revisions require content-addressed storage and garbage
   collection that preserves plans, evidence, active baselines, and rollback choices.
+
+- **2026-09-11 update**: Catalog, ingestion, XCCDF, and lifecycle persistence delivered
+  (#728, #729, #730, #731); the signed transfer path delivered (#748);
+  mutable-directory replacement removal delivered (#595). Still open: fixed-path
+  fallback removal (#650), #625, and #567.
 
 ## Alternatives rejected
 

@@ -1,4 +1,4 @@
-/* Layout rules from docs/ui/prototype/README.md "Layout Rules Learned the
+/* Layout rules from docs/how-to/ui-prototype.md "Layout Rules Learned the
    Hard Way": table-layout:fixed with percentage columns summing to 100%;
    nowrap cells need overflow:hidden on the td; status text must never
    truncate silently. */

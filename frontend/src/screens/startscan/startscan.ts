@@ -1,5 +1,5 @@
 /**
- * Start-a-Scan data layer (docs/ui/prototype/README.md screen 3; issue #284,
+ * Start-a-Scan data layer (docs/how-to/ui-prototype.md screen 3; issue #284,
  * third sub-issue of the #26 split; issue #733 rewired this module from the
  * legacy `inventory_items` tree onto the stable `components` model), against:
  *

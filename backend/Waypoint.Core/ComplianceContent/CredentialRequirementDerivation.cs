@@ -28,7 +28,7 @@ namespace Waypoint.Core.ComplianceContent;
 ///
 /// This is a literal C# port of 0064/0067/0069's own
 /// <c>catalog_credential_requirements</c> <c>CROSS JOIN LATERAL</c> derivation --
-/// docs/compliance-parity.md's "Sibling source-capability provenance matrix" Purpose
+/// docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix" Purpose
 /// column is the single documented authority both the seed SQL and this class must
 /// agree with; <see cref="Waypoint.Tests.Core.ComplianceContent.CredentialRequirementDerivationDriftGuardTests"/>
 /// parses the doc directly and proves this method's output for each documented
@@ -41,7 +41,7 @@ namespace Waypoint.Core.ComplianceContent;
 /// Fail-closed (issue #1012 AC): an unmapped (product family, transport, selector kind)
 /// combination derives NO purposes at all -- this class never invents a purpose for a
 /// shape the doc does not document. A caller (<see cref="ICatalogRepository.PromoteCandidateAsync"/>)
-/// that gets an empty result for a transport docs/compliance-parity.md's closed
+/// that gets an empty result for a transport docs/explanation/compliance-parity.md's closed
 /// vocabulary says SHOULD need a credential (<see cref="CatalogTransports.VMware"/>,
 /// <see cref="CatalogTransports.NsxApi"/>, or an <see cref="CatalogTransports.Ssh"/>
 /// component whose selector is not a bare unmapped shape) is a promotion-time

@@ -25,7 +25,7 @@ is in [`adr/README.md`](../adr/README.md#former-milestone-numbering).)
 ## Design & contracts ✅ (closed 2026-08-02 — planning phase, no milestone)
 
 - ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](../ui/prototype/);
-  reconciliation recorded in [`ui/design-brief.md`](../ui/design-brief.md).
+  reconciliation recorded in [`ui-design-brief.md`](ui-design-brief.md).
 - ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](../reference/api-contract.md).
 - ✅ Job/target state machines and SSE event schema: [`api-contract.md`](../reference/api-contract.md).
 
@@ -38,19 +38,19 @@ end-to-end slice (no vCenter discovery, no InSpec/SAF pipeline, one credential)
 while still forcing every foundation into existence.
 
 Delivered: Compose stack (nginx + backend + Postgres + frontend shell, local auth
-only); job engine (ADR-0008: queue, dispatcher, runspace hosting per ADR-0006, SSE
-streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
+only); job engine (ADR-0008: queue, dispatcher, runspace hosting per ADR-0013/ADR-0014,
+SSE streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
 encryption + write-only API, holding the Broadcom depot token); **depot catalog
 indexing (`catalog-index`) + catalog browser + download jobs (`download`) with live
 progress, checksum verification, and disk usage**, wired end to end against the
 vcf-docker-download modules as the execution layer. The in-UI download-tool install
-flow (local repo / depot fetch / manual upload, issue #39) **delivered** via
-epic [#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
+flow (local repo / depot fetch / manual upload, issue #39) **delivered** via epic
+[#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
 readiness* story below (PR [#610](https://github.com/blac9216/waypoint/pull/610)) —
 this section's original framing — describing the install flow as still manual in
-development — is stale and is corrected here rather than left standing. Test depot tokens/config
-still come from the private sibling repo at runtime — gitignored mounts, never
-committed.
+development — is stale and is corrected here rather than left standing. Test depot
+tokens/config still come from the private sibling repo at runtime — gitignored mounts,
+never committed.
 
 ## Sites, credentials & STIG scan slice ✅ (closed 2026-08-09 — [milestone](https://github.com/blac9216/waypoint/milestone/4), epic [#13](https://github.com/blac9216/waypoint/issues/13))
 
@@ -150,8 +150,8 @@ domain/ADRs (merged: [ADR-0022](../adr/0022-compliance-catalog-and-content-lifec
 [#785](https://github.com/blac9216/waypoint/issues/785) reconciled the API/security/
 RBAC contracts ([api-contract.md](../reference/api-contract.md), [security.md](security.md)) →
 [#786](https://github.com/blac9216/waypoint/issues/786) (this document plus
-[`ui/design-brief.md`](../ui/design-brief.md) and
-[`ui/prototype/README.md`](../ui/prototype/README.md)) reconciles roadmap sequencing and
+[`ui-design-brief.md`](ui-design-brief.md) and
+[`how-to/ui-prototype.md`](../how-to/ui-prototype.md)) reconciles roadmap sequencing and
 UI/domain vocabulary. No implementation child begins before all three merge.
 
 **Waves 1–5 — implementation, dependency-ordered.** Content foundation (catalog,

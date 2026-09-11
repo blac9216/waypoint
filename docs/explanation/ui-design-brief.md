@@ -1,5 +1,7 @@
 # Waypoint — UI Design Brief
 
+Kind: explanation
+
 Status: active — this is the working input to the design phase. Update it as the design
 iterates; when screens stabilize, extract the **data ledger** (every element → its
 source: Postgres table / SSE stream / catalog / computed) into the API contract.
@@ -7,7 +9,7 @@ source: Postgres table / SSE stream / catalog / computed) into the API contract.
 ## Prototype (2026-08-02) and reconciliation
 
 A high-fidelity interactive prototype covering all nine screens lives in
-[`prototype/`](prototype/) — open `vcf-ops-console.dc.html` in a browser; its
+[`../ui/prototype/`](../ui/prototype/) — open `vcf-ops-console.dc.html` in a browser; its
 `README.md` is the design handoff (tokens, layout rules, per-screen specs).
 **Mockups are illustrative; `../explanation/domain-model.md` and the ADRs are normative** — on
 conflict, the domain model wins and the discrepancy gets logged. `../explanation/domain-model.md`
@@ -44,7 +46,7 @@ Fixes required in the next design iteration:
 ## 🚧 Download-domain screen IA (epic #16, issue #1035) — proposal, not yet approved
 
 Analogous to the compliance-domain reconciliation immediately below, but for the
-download domain: [`download-domain-ia.md`](download-domain-ia.md) is a **PROPOSAL**
+download domain: [`../ui/download-domain-ia.md`](../ui/download-domain-ia.md) is a **PROPOSAL**
 awaiting owner approval (decision R2-11 on epic #16) covering catalog browse/ad-hoc
 download, subscriptions/presets, per-lane store views (ESX patch store, Photon,
 VMware Tools, VKS dimensioned view), content-library per-type views + virtual
@@ -65,7 +67,7 @@ per-control settings (ADRs [0022](../adr/0022-compliance-catalog-and-content-lif
 issue #785). The subsections below are the reconciled information architecture —
 **domain behavior and entity/action vocabulary, not a pixel spec.** The prototype
 remains useful reference for visual density, tokens, and layout mechanics (see
-[`prototype/README.md`](prototype/README.md)); its per-screen behavioral specifics
+[`ui-prototype.md`](../how-to/ui-prototype.md)); its per-screen behavioral specifics
 that assume the old model (a profile picker, one job per target, a single
 mutable config document) are superseded by this section and by the 🚧-marked notes
 inline in the Screens list below. Every 🚧 marker in this document follows the
@@ -147,7 +149,7 @@ credential coverage) → `CompliancePlan` (the frozen result of `POST /runs`).
 
 **Superseded from the prototype:** the "product filters + InSpec profiles that will
 apply" panel and the profile-implied scope in step 2 are removed entirely —
-scope selection is asset-only. The plan-preview step (new) sits where the
+scope selection is component-only. The plan-preview step (new) sits where the
 prototype's step-2 checkbox tree lived, but the checkbox tree itself (cached
 inventory → component selection) is still the right interaction shape; what
 changes is that confirming now shows a plan preview with per-component readiness
@@ -294,7 +296,7 @@ Roles table, never widens it)
 
 Every gated action follows the existing **visible-with-disabled-reason** treatment
 (`opacity: 0.42`, explanatory `title`) already established under Roles &
-Permissions in `prototype/README.md` — a role that cannot act still sees the
+Permissions in `../how-to/ui-prototype.md` — a role that cannot act still sees the
 control and the reason, it is never silently hidden. This is distinct from
 mode-gating (air-gapped genuinely removes the Download Catalog nav item because
 the feature does not exist): every RBAC gate above is a permission gap, not a

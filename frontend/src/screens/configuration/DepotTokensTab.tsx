@@ -3,7 +3,7 @@
  * #39's screen — backend landed in PR #570 `GET /downloads/readiness` +
  * credential last_tested_at/expires_at, and PR #602 the tool-install paths;
  * issue #690 splits the single depot-token concept into two independent,
- * non-interchangeable credentials). docs/ui/prototype README "Depot &
+ * non-interchangeable credentials). docs/how-to/ui-prototype.md "Depot &
  * Tokens", updated per #690's design: the VCF 9.1 Software Depot Activation
  * Code (authenticates `vcf-download-tool` commands) and the legacy Broadcom
  * Download Token (UMDS/older `dl.broadcom.com` URL-template flows only) are

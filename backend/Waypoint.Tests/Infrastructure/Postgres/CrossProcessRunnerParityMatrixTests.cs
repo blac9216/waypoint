@@ -52,7 +52,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <c>JobLeaseRecoveryTests</c>'s lease expiry) into the specific matrix rows #444 asks
 /// for; it does not re-prove what those files already cover in isolation.
 ///
-/// Mapped in docs/testing.md's parity-matrix section under "cross-process queue
+/// Mapped in docs/how-to/testing.md's parity-matrix section under "cross-process queue
 /// behavior", "API restart before claim", "runner restart mid-run recovery",
 /// "duplicate-replica claim safety", and "one-domain-unavailable isolation".
 /// </summary>

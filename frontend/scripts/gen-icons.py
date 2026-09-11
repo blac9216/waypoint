@@ -5,7 +5,7 @@ This is a build-prep script, not part of the Vite build (there is no Python
 runtime dependency at build time) — the generated PNGs are committed like any
 other static asset. Re-run it by hand (`python3 scripts/gen-icons.py`, needs
 `pillow`: `pip install pillow`) if the brand mark or the `--acc`/`--bg` design
-tokens (docs/ui/prototype/README.md) ever change.
+tokens (docs/how-to/ui-prototype.md) ever change.
 
 The icon reproduces the top-bar brand mark exactly: a 45deg-rotated square
 outline in `--acc` with a solid `--acc` square inset inside it. No network
@@ -42,7 +42,7 @@ def oklch_to_srgb(lightness: float, chroma: float, hue_deg: float) -> tuple[int,
     return (to_srgb_channel(r), to_srgb_channel(g), to_srgb_channel(bl))
 
 
-# Dark-theme tokens (docs/ui/prototype/README.md "Design Tokens" table).
+# Dark-theme tokens (docs/how-to/ui-prototype.md "Design Tokens" table).
 ACC = oklch_to_srgb(0.70, 0.12, 235)  # --acc
 BG = oklch_to_srgb(0.165, 0.008, 255)  # --bg
 

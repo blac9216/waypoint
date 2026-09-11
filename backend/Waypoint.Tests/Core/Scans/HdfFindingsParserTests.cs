@@ -212,7 +212,7 @@ public sealed class HdfFindingsParserTests
 	}
 
 	/// <summary>
-	/// Fixture-monoculture guard (docs/testing.md): the exactly-once rule must hold
+	/// Fixture-monoculture guard (docs/how-to/testing.md): the exactly-once rule must hold
 	/// across MULTIPLE controls in the same profile, not just a single-control fixture
 	/// -- a bug that only drops the LAST unreachable control in a list would pass a
 	/// single-control suite.

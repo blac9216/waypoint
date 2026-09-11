@@ -137,6 +137,15 @@ never `Not_Applicable` or omitted.
 - API/RBAC endpoints are #785, UI/roadmap contracts are #786, and trust, temporary SSH
   cleanup, evidence retention, and legacy retirement are #808.
 
+- **2026-09-11 update**: Snapshots, credential requirements, and queue fan-out delivered
+  (#735, #736, #737); findings/attempt artifact persistence delivered (#745); scaled
+  API/UI delivery and bounded-query pagination delivered (#757, #721); API/RBAC wire
+  contracts delivered (#785); UI/roadmap contracts delivered (#786); trust, temporary-SSH
+  cleanup, evidence retention, and legacy retirement delivered (#808). Still open:
+  real-wrapper qualification (#607), runner-wide prompt prevention (#608),
+  outcome-semantics hardening (#612), component-purpose halt/swap/query broadening
+  (#664), and transitional legacy-wire/test/UI cleanup (#665, #678).
+
 ## Alternatives rejected
 
 - One job per run with hidden component tasks: it duplicates leases, retry, controls,

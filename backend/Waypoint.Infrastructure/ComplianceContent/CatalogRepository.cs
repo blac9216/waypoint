@@ -509,7 +509,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		// equality predicate on pv.version_key can therefore never express the closed
 		// two-form scope test (Waypoint.Core.Components.VersionScopeMatcher); this reads
 		// every top-level component sharing the component key (component_key is a small,
-		// closed vocabulary -- see docs/compliance-parity.md's Selector row -- so this is
+		// closed vocabulary -- see docs/explanation/compliance-parity.md's Selector row -- so this is
 		// not an unbounded scan) and filters in code, exactly like
 		// ComponentCapabilityMatcher does one layer up for an already-linked component.
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -959,7 +959,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		// derived an empty RequiredPurposes, and every fanned-out scan job failed at
 		// execution with no preview-time gap. CredentialRequirementDerivation is a
 		// literal C# port of those same seed migrations' own derivation rule (doc-
-		// authority: docs/compliance-parity.md's provenance-matrix Purpose column),
+		// authority: docs/explanation/compliance-parity.md's provenance-matrix Purpose column),
 		// so an imported profile of the same (product family, transport, selector kind)
 		// shape as a seeded one carries IDENTICAL requirements. Fail-closed: an
 		// unmapped shape derives an empty set here -- never an invented purpose -- and

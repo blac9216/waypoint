@@ -60,3 +60,15 @@ view. The original scan-oriented live run is therefore one detail presentation, 
 the container for download, discovery, content, transfer, or update work. Durable
 outputs remain in their owning domains as decided in
 [ADR-0019](0019-global-job-observability.md).
+
+### Consequence recorded during the citation sweep (2026-09-11, #1580)
+
+The Decision's "Workers" bullet cites [ADR-0006](0006-backend-language.md) for
+in-process runspace hosting. ADR-0006 is Superseded (by ADR-0013), so that citation is
+superseded and no longer describes where runspaces run. Runspace hosting is now
+governed by [ADR-0013](0013-control-plane-and-runners.md), which moves execution out of
+the control plane onto dedicated runners, and [ADR-0014](0014-runner-job-ownership.md),
+which gives those runners ownership of job leases, execution events, and resource
+admission — the relationship this ADR's `Amended-by: 0013, 0014` header already
+records. The Decision text is unchanged: it is Accepted and therefore immutable, and
+this entry, not an edit, is the mechanism for recording the change.

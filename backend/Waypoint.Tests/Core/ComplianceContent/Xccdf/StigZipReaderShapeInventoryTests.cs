@@ -22,7 +22,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.Xccdf;
 
 /// <summary>
 /// Issue #1077 class-killing guard for <see cref="StigZipReader"/>: every row of the
-/// "StigZipReader" section of <c>docs/compliance-content-shape-inventory.md</c> gets
+/// "StigZipReader" section of <c>docs/explanation/compliance-content-shape-inventory.md</c> gets
 /// an invented fixture here (<see cref="BuildZipForShape"/>) and an asserted expected
 /// result, and <see cref="InventoryIsComplete"/> ties this class's implemented shape
 /// IDs to that doc. <see cref="BuildZipForShape"/> is also reused by

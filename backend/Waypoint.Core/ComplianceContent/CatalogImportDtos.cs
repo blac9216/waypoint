@@ -76,7 +76,7 @@ public sealed record CatalogDeclaredInput(Guid Id, Guid ExecutionProfileId, stri
 /// the candidate alone (source revision key, product vendor/display names, content
 /// release display name, report group priority, output kind) are supplied by the
 /// caller (<c>ContentPullJobHandler</c>) because they come from catalog-authored
-/// classification tables (docs/compliance-parity.md), not from vendor content itself --
+/// classification tables (docs/explanation/compliance-parity.md), not from vendor content itself --
 /// promotion never invents catalog authority the importer's evidence does not carry
 /// (see <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>'s
 /// own "catalog-shaped EVIDENCE, not catalog authority" doc comment).

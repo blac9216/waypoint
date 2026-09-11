@@ -2,7 +2,7 @@
  * Config → STIG Manager tab (issue #312, third slice of the #25 split —
  * #310/PR #314 merged the connection model + test endpoint this tab
  * consumes; #311, the CKL upload backend, is a parallel lane this tab does
- * not depend on). docs/ui/prototype/README.md "STIG Manager — global default
+ * not depend on). docs/how-to/ui-prototype.md "STIG Manager — global default
  * endpoint, OIDC client, default collection, reachability with API version";
  * prototype panel pairs a GLOBAL DEFAULT form with a PER-SITE OVERRIDES list
  * (docs/ui/prototype/vcf-ops-console.dc.html `cfgStigman`).

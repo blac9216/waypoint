@@ -33,7 +33,7 @@ erDiagram
 
 ### Site
 The top-level grouping — roughly "an enclave's VMware estate." A site contains
-**targets of several kinds, with multiples allowed per kind** (e.g. two vCenters).
+targets of several kinds, with multiples allowed per kind (e.g. two vCenters).
 STIG configuration resolves through three layers — **Global → Site → Target**, most
 specific wins (see STIG configuration documents below). Maps closely to today's
 `site.json` schema 2.0 rows.
@@ -224,8 +224,8 @@ never silently widened or narrowed. Endpoint, RBAC, and transition wire shapes:
 `docs/reference/api-contract.md`'s "Legacy scan migration"; no permanent adapter or dual
 representation remains.
 
-**Credential purposes and bindings (end state planned —
-[ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+#### Credential purposes and bindings (end state planned — [ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md))
+
 A single `credentialRef` per target is not enough: `vsphere` targets need a distinct
 vSphere API credential and VCSA SSH credential, satisfiable independently. ADR-0021
 defines named purposes (never generic numbered slots) and the compatibility matrix;
@@ -398,7 +398,9 @@ directly once terminal).
 | `update` | run/job rows, `job_events` | System administration: staged/applied update state (invented example: a recorded appliance version bump) | System screen | None — deletes directly once terminal |
 | `purge` | run/job rows, `job_events` (the purge-wrapper run migration 0042 creates, `initiated_by = "purge:<actor>"`) | None — this run type has no domain output of its own; it is the mechanism that deletes another run's | N/A (never independently purged/deleted; it is retained exactly like any other terminal run's history) | None — deletes directly once terminal, same as any non-compliance type |
 
-**The compliance gate, precisely.** `RunHistoryDeletionService.DeleteHistoryAsync`
+##### The compliance gate, precisely
+
+`RunHistoryDeletionService.DeleteHistoryAsync`
 checks `run_type IN ('scan', 'remediate')`; if true, it additionally requires
 `runs.purged_at IS NOT NULL` (i.e., `POST /runs/{id}/purge` already completed for that
 run) before it will set `runs.history_deleted_at`. This is the concrete form of epic
@@ -412,7 +414,9 @@ operation to defer to — their durable outputs are mutated/replaced in place by
 runs of the same job type (a target's `discovery_status` is overwritten, not versioned
 per run) rather than being a la carte deletable per run.
 
-**What generic deletion actually deletes**, for every type: nothing at the row level
+##### What generic deletion actually deletes
+
+For every type, nothing at the row level
 beyond marking `runs.history_deleted_at` and severing `schedules.last_run_id` if this
 run was a schedule's most-recent-run pointer (the same "FK is a backstop, not the
 enforcement point" idiom `purged_at`'s schedule-nulling already established). The run,

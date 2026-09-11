@@ -9,8 +9,8 @@
 -- Two independent additions:
 --
 --   1. credentials.last_tested_at / credentials.expires_at -- the "last tested"
---      and "expiry" facts the Depot & Tokens screen needs (docs/ui/prototype/
---      README.md's "Broadcom Support Portal token ... expiry warning") that
+--      and "expiry" facts the Depot & Tokens screen needs (docs/how-to/
+--      ui-prototype.md's "Broadcom Support Portal token ... expiry warning") that
 --      today's schema has no column for. last_tested_at is stamped by every
 --      CredentialTestJobHandler outcome (success or failure), for every
 --      credential type -- it generalizes past depot-token because "when was

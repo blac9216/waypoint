@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Issue #1099's Pester counterpart to the C# *ShapeInventoryTests classes
-# (docs/compliance-content-shape-inventory.md), for the one parser in #1077's scope
+# (docs/explanation/compliance-content-shape-inventory.md), for the one parser in #1077's scope
 # that is PowerShell rather than C#: Get-WaypointProfileDeclaredInputNameSet
 # (WaypointScan.psm1), the shared manifest scanner PR #1135 extracted for both the
 # NSX and vSphere scan paths. Its history is the worst in the guard's scope -- issue
@@ -37,7 +37,7 @@ Import-Module (Join-Path $PSScriptRoot 'WaypointScanShapeCorpus.psm1') -Force
 BeforeAll {
 	$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../../../..')).Path
 	$ScanModulePath = Join-Path $RepoRoot 'backend/Waypoint.Infrastructure.Execution/PowerShell/Modules/WaypointScan/WaypointScan.psm1'
-	$DocPath = Join-Path $RepoRoot 'docs/compliance-content-shape-inventory.md'
+	$DocPath = Join-Path $RepoRoot 'docs/explanation/compliance-content-shape-inventory.md'
 
 	$script:ScanModule = Import-Module $ScanModulePath -Force -PassThru
 
@@ -87,7 +87,7 @@ BeforeAll {
 		$doc = Get-Content -Raw -Path $DocPath
 		$headingIndex = $doc.IndexOf('## `Get-WaypointProfileDeclaredInputNameSet`')
 		if ($headingIndex -lt 0) {
-			throw "docs/compliance-content-shape-inventory.md is missing the Get-WaypointProfileDeclaredInputNameSet section this Pester guard parses."
+			throw "docs/explanation/compliance-content-shape-inventory.md is missing the Get-WaypointProfileDeclaredInputNameSet section this Pester guard parses."
 		}
 		$rest = $doc.Substring($headingIndex + 1)
 		$nextHeadingIndex = $rest.IndexOf("`n## ")

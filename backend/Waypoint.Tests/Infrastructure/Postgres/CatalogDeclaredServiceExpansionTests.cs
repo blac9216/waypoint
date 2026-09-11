@@ -105,7 +105,7 @@ public sealed class CatalogDeclaredServiceExpansionTests : IAsyncLifetime
 
 	/// <summary>
 	/// One invented vSphere catalog product version (declared scope "8.0") shaped like
-	/// docs/compliance-parity.md's vSphere 8.0 rows: the vmware object-kind components
+	/// docs/explanation/compliance-parity.md's vSphere 8.0 rows: the vmware object-kind components
 	/// (vcenter, esxi) AND the ssh/service VCSA named services (eam, postgresql), plus
 	/// one nsx-api/service and one ssh/target row that must NEVER be selected as VCSA
 	/// service children. The two services get active SRG baselines and the doc-derived

@@ -20,7 +20,7 @@ namespace Waypoint.Tests.Parity;
 /// <summary>
 /// Fail-closed drift guard (issue #749 AC "every parity-matrix row is covered or
 /// explicitly marked owner-live-only with rationale"): parses
-/// docs/compliance-parity.md's "Sibling source-capability provenance matrix" table
+/// docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix" table
 /// directly off disk and asserts every body row is represented either by a
 /// <see cref="CatalogDerivationMatrix.Rows"/> entry or by a
 /// <see cref="CatalogDerivationMatrix.OwnerLiveOnlyRows"/> allow-list entry. If a future
@@ -64,7 +64,7 @@ public sealed class ParityMatrixCompletenessTests
 		List<string> uncovered = [];
 		foreach (DocRow docRow in docRows)
 		{
-			// Issue #1064: docs/compliance-parity.md's "vSphere" product rows all map to
+			// Issue #1064: docs/explanation/compliance-parity.md's "vSphere" product rows all map to
 			// the single "vsphere" family regardless of transport (the vcsa/ directory
 			// literal now promotes into the vsphere product per the owner decision on
 			// #1064) -- the doc's four vSphere rows stay distinct in the coverage key
@@ -84,7 +84,7 @@ public sealed class ParityMatrixCompletenessTests
 		}
 
 		Assert.True(uncovered.Count == 0,
-			"docs/compliance-parity.md rows not covered by CatalogDerivationMatrix.Rows nor " +
+			"docs/explanation/compliance-parity.md rows not covered by CatalogDerivationMatrix.Rows nor " +
 			"explicitly allow-listed in CatalogDerivationMatrix.OwnerLiveOnlyRows: " + string.Join("; ", uncovered));
 	}
 
@@ -136,7 +136,7 @@ public sealed class ParityMatrixCompletenessTests
 	}
 
 	/// <summary>
-	/// Parses the body rows of docs/compliance-parity.md's "Sibling source-capability
+	/// Parses the body rows of docs/explanation/compliance-parity.md's "Sibling source-capability
 	/// provenance matrix" table. Deliberately narrow (column-position based, not a
 	/// general markdown parser) -- this table's shape is a stable, reviewed contract
 	/// (ADR-0022), not arbitrary prose.
@@ -149,7 +149,7 @@ public sealed class ParityMatrixCompletenessTests
 		int headerIndex = Array.FindIndex(lines, l => l.StartsWith("| Sibling product/version key", StringComparison.Ordinal));
 		if (headerIndex < 0)
 		{
-			throw new InvalidOperationException("docs/compliance-parity.md: provenance-matrix header row not found -- has the table been renamed/moved?");
+			throw new InvalidOperationException("docs/explanation/compliance-parity.md: provenance-matrix header row not found -- has the table been renamed/moved?");
 		}
 
 		List<DocRow> rows = [];
@@ -188,7 +188,7 @@ public sealed class ParityMatrixCompletenessTests
 		DirectoryInfo? directory = new(AppContext.BaseDirectory);
 		while (directory is not null)
 		{
-			string candidate = Path.Combine(directory.FullName, "docs", "compliance-parity.md");
+			string candidate = Path.Combine(directory.FullName, "docs", "explanation", "compliance-parity.md");
 			if (File.Exists(candidate))
 			{
 				return candidate;
@@ -197,6 +197,6 @@ public sealed class ParityMatrixCompletenessTests
 			directory = directory.Parent;
 		}
 
-		throw new FileNotFoundException("Could not locate docs/compliance-parity.md by walking up from AppContext.BaseDirectory");
+		throw new FileNotFoundException("Could not locate docs/explanation/compliance-parity.md by walking up from AppContext.BaseDirectory");
 	}
 }

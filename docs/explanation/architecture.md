@@ -12,7 +12,7 @@ which; the full list of stories and their epics is in [`roadmap.md`](roadmap.md)
 📋 **Planned** (later stories) so a reader can tell what exists from what is still design intent.
 Do not read a 📋 marker as license to change the described design without an ADR.
 
-## What Waypoint is
+## Context
 
 A self-hosted web appliance that unifies VMware STIG compliance
 ([vmware-stig-docker](https://github.com/blac9216/vmware-stig-docker)) and VCF artifact
@@ -22,6 +22,133 @@ environments. Project-owned Dockerfiles, orchestration, and PowerShell from the 
 predecessor repositories migrate into dedicated execution runners. Waypoint's
 **control plane** is the UI/API, credential store, RBAC, job control, history/SSE, and
 cross-enclave transfer; it does not execute domain tools (ADR-0013).
+
+Users — Admin, Cyber, Operator, Viewer ([domain-model.md](domain-model.md)) — reach the
+appliance over HTTPS through a browser; there is no other client. Waypoint in turn reaches
+the compliance targets it scans/remediates, the STIG Manager instance it uploads evidence
+to, the Broadcom depot and operator repositories it pulls VCF artifacts from, and,
+optionally, a site LDAP directory Keycloak federates identity from
+([ADR-0004](../adr/0004-identity-keycloak.md)).
+
+```mermaid
+flowchart TB
+    admin["Admin · Cyber · Operator · Viewer\n(browser)"]
+    waypoint(["Waypoint\nSTIG compliance + VCF artifact appliance"])
+    stigman["STIG Manager"]
+    infra["vCenters · ESXi · VMs · NSX ·\nSRG appliances"]
+    depot["Broadcom depot ·\noperator repositories"]
+    ldap["Site LDAP directory\n(optional)"]
+
+    admin -->|HTTPS| waypoint
+    waypoint -->|PowerCLI · InSpec · SSH · REST| infra
+    waypoint -->|CKL/HDF upload| stigman
+    waypoint -->|authorized downloads| depot
+    waypoint -->|LDAP federation, optional| ldap
+```
+
+## Container
+
+✅ **Built**: nginx, Postgres, the STIG Manager connection (foundation and scan-slice
+stories), the split of the once-combined backend into a control-plane API plus dedicated
+`compliance-runner` and `download-runner` services (ADRs 0013/0014, issue #443) — the
+API process references neither the PowerShell SDK nor any job handler at build time
+(`backend/Waypoint.Infrastructure.Execution` is a separate project only the two runners
+reference) — and Keycloak as the IdP (*Identity, RBAC & scheduling*, epic #14): its own
+Postgres database, scripted realm bootstrap, and OIDC bearer-token validation/PKCE login
+wired through nginx and the backend. `keycloak-realm-reconcile` is a one-shot container
+that runs on every `up` to force-update the OIDC clients' redirect/origin settings to the
+current public URL, independent of whether Keycloak's own `--import-realm` ran this boot.
+📋 **Planned**: updater/exporter and transfer automation (*Transfer & enclave modes* /
+*Self-update & appliance packaging*) — not yet a compose service.
+
+There is no standalone `frontend` container: nginx's image build copies the React/TS PWA's
+static bundle in at build time and serves it directly, alongside terminating TLS and
+proxying `/api` to the backend and `/auth` to Keycloak.
+
+Every container name below is a `deploy/compose.yaml` service name.
+
+```mermaid
+flowchart TB
+    browser["Browser (PWA)"]
+    subgraph compose["Docker Compose stack (later: inside a Packer-built OVA)"]
+        nginx["nginx\nTLS termination · static frontend build ·\n/api and /auth proxy"]
+        backend["backend\nASP.NET Core · REST/RBAC ·\nenqueue/control · queries · SSE"]
+        compliance_runner["compliance-runner\n.NET worker · filtered claims · leases ·\nevents · PowerShell · PowerCLI · InSpec · SAF"]
+        download_runner["download-runner\n.NET worker · filtered claims · leases ·\nevents · PowerShell · depot/content tooling"]
+        keycloak["keycloak\nOIDC · CAC/PIV x.509 · LDAP"]
+        krr["keycloak-realm-reconcile\none-shot OIDC client reconcile"]
+        postgres[("postgres\napp schema · job queue ·\nencrypted secrets · Keycloak DB")]
+    end
+    browser -->|HTTPS| nginx
+    nginx -->|/api proxy| backend
+    nginx -->|/auth proxy| keycloak
+    backend --> postgres
+    compliance_runner --> postgres
+    download_runner --> postgres
+    keycloak --> postgres
+    krr -->|admin API| keycloak
+    compliance_runner -->|PowerCLI · InSpec · SSH · REST| infra["vCenters · ESXi · VMs · NSX ·\nSRG appliances"]
+    download_runner -->|authorized downloads| depot["Broadcom depot ·\noperator repositories"]
+    backend -->|CKL/HDF upload| stigman["STIG Manager"]
+```
+
+## Component
+
+Inside the backend, the runners, and the frontend build — the level below "which
+container" is "which component owns this responsibility."
+
+**backend (ASP.NET Core API).** A plain OIDC relying party performing JWT bearer
+validation with canonical-issuer pinning ([ADR-0004](../adr/0004-identity-keycloak.md),
+issue #842) and fail-closed role-claim mapping, enforced on every `[Http*]`-decorated
+action across all 34 controllers, closed out by a reflection-driven endpoint × role
+matrix test. It owns the durable job queue/state/event contracts — enqueue, control,
+query, migrations, and the SSE feed the UI reads from persisted events — but hosts no
+dispatcher, no PowerShell, and no domain handler: execution ownership belongs entirely to
+the two runners (ADRs 0013/0014). `Waypoint.Infrastructure.Execution` is a separate
+project only `compliance-runner` and `download-runner` reference, so the API cannot
+accidentally pull in PowerShell or a handler at build time.
+
+**compliance-runner and download-runner (.NET workers).** A shared C# runner library is
+the generic orchestrator — job claiming (`SELECT … FOR UPDATE SKIP LOCKED`), leases,
+cooperative cancellation, and structured event writes direct to Postgres — common to
+both; domain handlers and PowerShell modules are the adaptable workers underneath it
+([ADR-0008](../adr/0008-job-engine.md)). Each runner hosts its own PowerShell runspace
+pools in-process through `System.Management.Automation`, with handler-specific options in
+`IOptions<PowerShellOptions>` (`Waypoint.Core.PowerShell.PowerShellOptions`). Remediation
+may keep child-`pwsh` isolation for code that calls `Exit`. `compliance-runner` claims
+only compliance job types (discovery/scan/NSX/SRG) and drives PowerCLI/InSpec/SAF against
+target infrastructure; `download-runner` claims only download job types and drives the
+depot/content-library tooling against the Broadcom depot and operator repositories.
+
+**frontend (static PWA build).** A React + TypeScript single-page app, built once into
+nginx's image and served as a static bundle — not its own runtime container. It runs a
+hand-rolled authorization-code + PKCE login flow (no external OIDC libraries) against
+Keycloak through nginx's `/auth` proxy, and re-runs that flow with
+`prompt=login`/`max_age=0` for step-up re-authentication on sensitive actions such as
+overwriting a stored credential's secret.
+
+```mermaid
+flowchart TB
+    subgraph backend_c["backend"]
+        oidc_rp["OIDC relying party\nJWT validation · role-claim mapping"]
+        controllers["34 [Http*] controllers\nRBAC-enforced"]
+        queue_api["queue/state/event contracts\nenqueue · control · query · SSE"]
+    end
+    subgraph runner_c["compliance-runner / download-runner"]
+        orchestrator["shared runner library\nclaim · lease · cancel · events"]
+        pshost["PowerShell runspace pools\nSystem.Management.Automation"]
+        handlers["domain handlers\n(compliance | download job types)"]
+    end
+    subgraph frontend_c["frontend (static build, served by nginx)"]
+        spa["React + TS SPA"]
+        pkce["PKCE login / step-up flow"]
+    end
+    controllers --> queue_api
+    oidc_rp --> controllers
+    orchestrator --> pshost
+    orchestrator --> handlers
+    spa --> pkce
+```
 
 ## Deployment topology: one appliance, two modes
 
@@ -43,48 +170,6 @@ The same operator-built Compose topology deploys on both sides of the air gap
 
 The mode is instance configuration, surfaced as a persistent badge in the UI. Feature
 availability derives from the mode — there is one codebase and one image, never a fork.
-
-## Component view
-
-✅ **Built**: nginx, frontend, Postgres, the STIG Manager connection (foundation and scan-slice stories), the
-split of the once-combined backend into a control-plane API plus dedicated
-`compliance-runner` and `download-runner` services (ADRs 0013/0014, issue #443) — the
-API process references neither the PowerShell SDK nor any job handler at build time
-(`backend/Waypoint.Infrastructure.Execution` is a separate project only the two
-runners reference) — and Keycloak as the IdP (*Identity, RBAC & scheduling*, epic #14): its own Postgres
-database, scripted realm bootstrap, and OIDC bearer-token validation/PKCE login
-wired through nginx and the backend. 📋 **Planned**: updater/exporter and transfer
-automation (*Transfer & enclave modes* / *Self-update & appliance packaging*).
-
-```mermaid
-flowchart TB
-    subgraph Compose["Docker Compose stack (later: inside a Packer-built OVA)"]
-        nginx["nginx\nTLS termination, static frontend, /api proxy"]
-        fe["frontend\nReact + TS PWA (static bundle)"]
-        be["backend (ASP.NET Core)\nREST/RBAC · enqueue/control ·\nqueries · SSE"]
-        cr["compliance-runner (.NET worker)\nfiltered claims · leases · events ·\nPowerShell · PowerCLI · InSpec · SAF"]
-        dr["download-runner (.NET worker)\nfiltered claims · leases · events ·\nPowerShell · depot/content tooling"]
-        kc["Keycloak\nOIDC · CAC/PIV x.509 · LDAP"]
-        pg[("PostgreSQL\napp schema · job queue ·\nencrypted secrets · Keycloak DB")]
-        upd["updater (sidecar)\nonly holder of docker socket\n(via socket proxy)"]
-        cstate[("compliance state\nprofiles · installed content ·\nscan artifacts")]
-        dstate[("download state\ninstalled entitled tools · depot ·\nmanaged artifacts")]
-    end
-    browser["Browser (PWA)"] --> nginx
-    nginx --> fe
-    nginx --> be
-    nginx --> kc
-    be --> pg
-    cr --> pg
-    dr --> pg
-    kc --> pg
-    be -->|internal API| upd
-    cr --> cstate
-    dr --> dstate
-    cr -->|PowerCLI · InSpec · SSH · REST| infra["vCenters · ESXi · VMs · NSX ·\nSRG appliances · STIG Manager"]
-    dr -->|authorized downloads| depot["Broadcom depot · operator repositories"]
-    be --> stigman["STIG Manager"]
-```
 
 ## The job engine (the heart of the product)
 

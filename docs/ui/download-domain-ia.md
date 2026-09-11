@@ -12,7 +12,7 @@ satisfied by this document landing — this PR delivers the roadmap reconciliati
 this proposal only. Wave-2+ download UI issues are scoped in detail only after
 approval.
 
-This document follows [`design-brief.md`](design-brief.md)'s entity/action-map
+This document follows [`../explanation/ui-design-brief.md`](../explanation/ui-design-brief.md)'s entity/action-map
 convention for each screen (**Entities**, **Actions** with an RBAC tier, then
 **Placement**/**Open questions**) rather than restating it. Domain facts here are
 normative from [`../explanation/domain-model.md`](../explanation/domain-model.md)'s "Depot, catalog identity,
@@ -23,7 +23,7 @@ facts (endpoints, shipped-vs-planned, RBAC-as-implemented) are cited from
 issue #1034 via PR [#1747](https://github.com/blac9216/waypoint/pull/1747) (merged
 2026-09-06). Where
 this document and the existing [`prototype/`](prototype/) disagree, this document
-wins for the download domain specifically, exactly as `design-brief.md` already
+wins for the download domain specifically, exactly as `../explanation/ui-design-brief.md` already
 established for the compliance domain.
 
 ## RBAC — download domain (decision R2-10, reconciled by PR #1747)
@@ -51,15 +51,15 @@ again in Open Question 1 — do not read the current Admin-only implementation a
 document's intended end state.
 
 Every RBAC gate below follows the existing repo-wide convention
-(`design-brief.md`'s "RBAC — UI role gates"): visible-with-disabled-reason for a
+(`../explanation/ui-design-brief.md`'s "RBAC — UI role gates"): visible-with-disabled-reason for a
 permission gap, never silently hidden. Mode-gating (air-gapped hides the whole
-Download Catalog nav item, per `prototype/README.md`) is the only case that removes a
+Download Catalog nav item, per `../how-to/ui-prototype.md`) is the only case that removes a
 screen entirely, and it is orthogonal to the RBAC table above.
 
 ## 1. Download Catalog — catalog browse + ad-hoc download
 
-**Placement:** existing nav item, unchanged (`prototype/README.md` screen 6,
-`design-brief.md` screen 5 "Download catalog browser"). Shipped incrementally: #796
+**Placement:** existing nav item, unchanged (`../how-to/ui-prototype.md` screen 6,
+`../explanation/ui-design-brief.md` screen 5 "Download catalog browser"). Shipped incrementally: #796
 (product grouping, PR #1586) and #1479/#1482/#1486 (binaries-download selection →
 enqueue → handler → verification) already landed against this screen's data source.
 
@@ -83,7 +83,7 @@ per selected artifact or resolved release member, `POST /downloads/binaries`) �
 
 **Superseded from the prototype:** the legacy `POST /downloads` flat-artifact queue
 flow is retired (ADR-0030); the retired-status column value described in
-`prototype/README.md`'s STATUS enum (`not downloaded`/`queued`/`downloading N%`/
+`../how-to/ui-prototype.md`'s STATUS enum (`not downloaded`/`queued`/`downloading N%`/
 `verified`/`failed`) stays visually correct but now reflects `binaries-download`
 job/attempt state, not the legacy `download` job type.
 
@@ -188,7 +188,7 @@ duplicated here, since it shares that screen's registry/item model.
 ## 4. Serving & auth dials
 
 **Placement:** new tab or panel, most naturally under Configuration
-(`prototype/README.md` screen 9) alongside the existing depot-token panel, since it
+(`../how-to/ui-prototype.md` screen 9) alongside the existing depot-token panel, since it
 is Admin-only persistent configuration, not a content-browsing surface. Open
 Question 2 covers exact placement across all the new screens in this document.
 
@@ -215,8 +215,8 @@ anonymous-only per research).
 
 ## 5. Content Library — registry, per-type views, virtual folders
 
-**Placement:** existing "Library" nav item (`prototype/README.md` screen 7,
-`design-brief.md` screen 5 group), Content Library tab specifically. The existing
+**Placement:** existing "Library" nav item (`../how-to/ui-prototype.md` screen 7,
+`../explanation/ui-design-brief.md` screen 5 group), Content Library tab specifically. The existing
 Repository tab (presence per mode) is unaffected by this proposal.
 
 **Entities:** content-library **registry** row (shipped: issue #1391, `POST`/`GET`/
@@ -243,7 +243,7 @@ against a real contract today).
 - Automated add-to-library from another store (VMTools export, VCSA ISO, etc.)
   (Operator+ intended; planned).
 
-**Superseded from the prototype:** `prototype/README.md` screen 7's "Copy to vCenter
+**Superseded from the prototype:** `../how-to/ui-prototype.md` screen 7's "Copy to vCenter
 library…" footer action and its "Only OVF, ISO, and other files — no VM templates
 and no publish/subscribe" framing are superseded by decision 16's multiple
 operator-picked regular libraries and the per-type virtual-folder view above; the
@@ -275,7 +275,7 @@ the sweep, surfaced here for explicit deletion only.
 ## 7. Alert surfacing
 
 **Placement:** no new screen — extends the existing ATTENTION sidebar / Alerts
-surface (`design-brief.md`'s "Alerts" section, adopted wholesale per R2-9) with new
+surface (`../explanation/ui-design-brief.md`'s "Alerts" section, adopted wholesale per R2-9) with new
 `kind` values. Acknowledge stays Admin-only and never hides the underlying condition,
 per the existing convention.
 
@@ -291,7 +291,7 @@ compliance-specific).
 
 ## 8. Enrollment / tool-install state
 
-**Placement:** existing "Configuration" screen (`prototype/README.md` screen 9), the
+**Placement:** existing "Configuration" screen (`../how-to/ui-prototype.md` screen 9), the
 existing depot-token panel — this proposal extends it, it does not add a new screen.
 
 **Entities:** enrollment state machine (`tool_unavailable` → `depot_id_unavailable` →
@@ -328,10 +328,10 @@ download-runner has heartbeated at least once).
 - API/security reconciliation: [PR #1747](https://github.com/blac9216/waypoint/pull/1747)
   (issue #1034, merged) — the wire-facing source for every ✅/🚧/⏳ marker above, now
   folded into [`../reference/api-contract.md`](../reference/api-contract.md).
-- Prototype: [`prototype/README.md`](prototype/README.md) screens 6 (Download
+- Prototype: [`ui-prototype.md`](../how-to/ui-prototype.md) screens 6 (Download
   Catalog), 7 (Library), 9 (Configuration) — visual/interaction reference only; this
   document is normative for the download domain per the same rule
-  [`design-brief.md`](design-brief.md) already established for the compliance domain.
+  [`../explanation/ui-design-brief.md`](../explanation/ui-design-brief.md) already established for the compliance domain.
 
 ## Open questions for the owner
 

@@ -498,7 +498,7 @@ export function formatEta(seconds: number | null): string {
 export const ASSUMED_BANDWIDTH_BYTES_PER_SEC = 1_250_000; // 10 Mbps
 
 /**
- * Selection-footer transfer estimate (docs/ui/prototype/README.md screen 6:
+ * Selection-footer transfer estimate (docs/how-to/ui-prototype.md screen 6:
  * "selection count, total size, transfer estimate, Clear, and Queue N
  * downloads"; the prototype HTML renders "est. 24m at 13 MB/s"). Prefers
  * the queue's live aggregate rate (sum of `rate_bytes_per_sec` across

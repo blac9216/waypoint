@@ -1,5 +1,7 @@
 # Testing & running the stack
 
+Kind: how-to
+
 Read this before running `docker compose` in this repository — especially if you are
 an agent working alongside others.
 
@@ -244,7 +246,7 @@ service.** Without it, Compose derives container names from the project
 override-file workaround below is no longer needed and should not be reintroduced.
 Service-to-service traffic (nginx → `backend`, backend → `postgres`) was never
 affected either way: nginx resolves the Compose **service** name via Docker's
-embedded DNS (`resolver 127.0.0.11`, see [ADR-0003](adr/0003-reverse-proxy-nginx.md)
+embedded DNS (`resolver 127.0.0.11`, see [ADR-0003](../adr/0003-reverse-proxy-nginx.md)
 and `docs/rationale/deploy.md#nginx-dynamic-backend-resolution`), which has
 always been per-project, never per-`container_name`.
 
@@ -536,7 +538,7 @@ timed-out connectivity is a **network** failure, never `auth_failing`.
 
 Download-lane parity coverage against the sibling `vcf-docker-download`'s own
 integration runbook is tracked separately as a living matrix:
-[`docs/testing/download-parity-matrix.md`](testing/download-parity-matrix.md).
+[`docs/testing/download-parity-matrix.md`](../testing/download-parity-matrix.md).
 
 ## Live integration testing: the `*.local.md` convention
 
@@ -641,14 +643,14 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## What CI covers — and does not
 
-GitHub Actions runs seven workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
-[`backend.yml`](../.github/workflows/backend.yml),
-[`frontend.yml`](../.github/workflows/frontend.yml),
-[`deploy.yml`](../.github/workflows/deploy.yml) (all four added in issue
+GitHub Actions runs seven workflows — [`sanitize.yml`](../../.github/workflows/sanitize.yml),
+[`backend.yml`](../../.github/workflows/backend.yml),
+[`frontend.yml`](../../.github/workflows/frontend.yml),
+[`deploy.yml`](../../.github/workflows/deploy.yml) (all four added in issue
 [#79](https://github.com/blac9216/waypoint/issues/79)),
-[`skills-shellcheck.yml`](../.github/workflows/skills-shellcheck.yml) (issue #1231),
-[`download-runner.yml`](../.github/workflows/download-runner.yml) (PR #1716) and
-[`compliance-runner.yml`](../.github/workflows/compliance-runner.yml) (PR #1717):
+[`skills-shellcheck.yml`](../../.github/workflows/skills-shellcheck.yml) (issue #1231),
+[`download-runner.yml`](../../.github/workflows/download-runner.yml) (PR #1716) and
+[`compliance-runner.yml`](../../.github/workflows/compliance-runner.yml) (PR #1717):
 
 | Workflow | Real work gated on | What it runs | Check-run context(s) |
 | --- | --- | --- | --- |
@@ -683,12 +685,12 @@ workflow sets its own `concurrency` group with `cancel-in-progress`, so a supers
 push doesn't keep burning runner time. No workflow references a repository secret; PR
 triggers are plain `pull_request`, never `pull_request_target`; every third-party
 action is pinned by full commit SHA. Full gating rationale and required-check list:
-[`docs/process/testing.md` § Required checks](process/testing.md#required-checks).
+[`docs/process/testing.md` § Required checks](../process/testing.md#required-checks).
 
 ### Coverage gate: a committed floor, not a stored baseline (issue #102)
 
 `backend.yml` and `frontend.yml` both run a coverage **floor** gate as their last
-test-adjacent step, via [`scripts/check-coverage-floor.py`](../scripts/check-coverage-floor.py)
+test-adjacent step, via [`scripts/check-coverage-floor.py`](../../scripts/check-coverage-floor.py)
 (stdlib-only Python, no network calls, no marketplace action). It parses the coverage
 report each job already produces — backend's Cobertura XML from
 `--collect:"XPlat Code Coverage"`, frontend's `coverage-summary.json` from vitest's
@@ -1083,7 +1085,7 @@ have repeatedly caught real defects no CI run could have seen:
   - `runners/compliance-runner/powershell/module.transport.vmware.ps1` — `fqdn` check
     only. Waives the single `.local` FQDN hit on VMware's factory-default SSO domain
     (the `administrator@` account on the `vsphere` `.local` domain — spelled split
-    here because `docs/testing.md` is a scanned file and the literal would itself trip
+    here because `docs/how-to/testing.md` is a scanned file and the literal would itself trip
     the FQDN detector). That domain is baked into every vCenter and present verbatim in
     the unmodified project-owned source imported from `vmware-stig-docker`
     ([#438](https://github.com/blac9216/waypoint/issues/438)); it is a product
@@ -1297,9 +1299,9 @@ in its own README as it lands:
 - **`backend/`** — `dotnet build` / `dotnet test`, plus the image's self-answering
   health probe. See `backend/README.md`.
 - **`frontend/`** — `npm run build` (which **must** fail on any external asset, per
-  [ADR-0007](adr/0007-frontend.md)) and `npm test`. See `frontend/README.md`.
+  [ADR-0007](../adr/0007-frontend.md)) and `npm test`. See `frontend/README.md`.
 - **`deploy/`** — bring-up and the SSE `proxy_buffering off` requirement from
-  [ADR-0003](adr/0003-reverse-proxy-nginx.md). See `deploy/README.md`.
+  [ADR-0003](../adr/0003-reverse-proxy-nginx.md). See `deploy/README.md`.
 
 ## Fresh-stack foundation/scan-slice parity matrix (issue #444, epic #433)
 

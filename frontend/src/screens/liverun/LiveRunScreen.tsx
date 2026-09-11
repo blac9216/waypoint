@@ -1,5 +1,5 @@
 /**
- * Live Run — docs/ui/prototype/README.md screen 1, the hero screen (issue
+ * Live Run — docs/how-to/ui-prototype.md screen 1, the hero screen (issue
  * #283 read side + #285 write side). Renders a run's per-target board driven
  * entirely by SSE (useLiveRun.ts) — header counters, the layout switcher, all
  * three of the prototype's layout modes (priority queues default, state

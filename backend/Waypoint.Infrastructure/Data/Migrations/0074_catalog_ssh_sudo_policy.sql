@@ -21,7 +21,7 @@
 --     migration" and execution falls back to the pre-#743 credential-driven
 --     behavior; new rows always carry the frozen catalog values.
 --
--- Seed reconciliation below re-states docs/compliance-parity.md's documented sudo
+-- Seed reconciliation below re-states docs/explanation/compliance-parity.md's documented sudo
 -- shapes for the rows migrations 0064/0067 seeded (immutable -- never edited in
 -- place). Values are the sibling catalog's own, restated as data:
 --   photon/photon               sudo, passwordless

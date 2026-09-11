@@ -18,7 +18,7 @@ name: backend
 # path filter can make "never runs" would otherwise deadlock every PR that
 # doesn't touch the path — see #232).
 #
-# docs/compliance-content-shape-inventory.md is listed too, even though it is a
+# docs/explanation/compliance-content-shape-inventory.md is listed too, even though it is a
 # doc: the `pester` job below treats that document as the shape inventory's
 # source of truth and fails when a row is deleted, added without a fixture, or
 # has its Expected verdict edited to disagree with the corpus (issue #1099).
@@ -73,7 +73,7 @@ jobs:
           filters: |
             backend:
               - "backend/**"
-              - "docs/compliance-content-shape-inventory.md"
+              - "docs/explanation/compliance-content-shape-inventory.md"
               - "Directory.Build.props"
               - ".editorconfig"
               - "scripts/check-coverage-floor.py"
@@ -212,7 +212,7 @@ jobs:
           $result = Invoke-Pester -Configuration $config
           "Pester: $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped"
           if ($result.FailedCount -gt 0) {
-            throw "Pester shape-inventory guard failed: $($result.FailedCount) failed test(s). A broken shape in WaypointScan.psm1, a missing corpus fixture, or a deleted/edited row of docs/compliance-content-shape-inventory.md all surface here."
+            throw "Pester shape-inventory guard failed: $($result.FailedCount) failed test(s). A broken shape in WaypointScan.psm1, a missing corpus fixture, or a deleted/edited row of docs/explanation/compliance-content-shape-inventory.md all surface here."
           }
           if ($result.PassedCount -eq 0) {
             throw "Pester discovered no tests -- the guard is not actually running."

@@ -1037,7 +1037,7 @@ class SurroundingContextTests(unittest.TestCase):
 		the pre-fix detectors reported as `clean` with exit 0.
 		"""
 		text = f"Lab vCenter {LAB_FQDN.upper()} answers at {LAB_IP}."
-		findings = scanner.scan_text("docs/testing.md", text)
+		findings = scanner.scan_text("docs/how-to/testing.md", text)
 		self.assertEqual(len(findings), 2, findings)
 		self.assertTrue(any("IP address literal" in f for f in findings), findings)
 		self.assertTrue(any("lab-style FQDN" in f for f in findings), findings)
@@ -1487,7 +1487,7 @@ class GuardCharacterDelimiterTests(unittest.TestCase):
 	def test_the_disclosed_extraction_limit_is_what_the_doc_says(self) -> None:
 		"""The limit that REMAINS, executed rather than asserted in prose.
 
-		`docs/testing.md` states exactly two things the derivation cannot do
+		`docs/how-to/testing.md` states exactly two things the derivation cannot do
 		with the characters a guard names, and both are pinned here so the
 		published sentence cannot drift from the code:
 
@@ -1522,7 +1522,7 @@ class GuardCharacterDelimiterTests(unittest.TestCase):
 					(leading, trailing),
 					(frozenset(), frozenset()),
 					f"{label} now contributes characters — update the disclosed "
-					f"limit in docs/testing.md",
+					f"limit in docs/how-to/testing.md",
 				)
 
 	# One regex spelling per container node kind, used to prove — by
@@ -1621,7 +1621,7 @@ class GuardCharacterDelimiterTests(unittest.TestCase):
 	def test_ipv6_range_both_endpoints_are_caught(self) -> None:
 		"""The regression #132 exists to catch, pinned directly.
 
-		IPv6 has no dash-adjacency guard at all (docs/testing.md states this
+		IPv6 has no dash-adjacency guard at all (docs/how-to/testing.md states this
 		as a property, not an aspiration), so a dash-separated pair of IPv6
 		addresses is caught in full — mirroring
 		RangeDetectionTests.test_the_exact_range_from_the_issue for IPv4.
@@ -2364,7 +2364,7 @@ class IPv6DetectorTests(unittest.TestCase):
 		`clean`, exit 0.
 		"""
 		text = f"The NSX manager answers at {LAB_IPV6}."
-		findings = scanner.scan_text("docs/testing.md", text)
+		findings = scanner.scan_text("docs/how-to/testing.md", text)
 		self.assertEqual(len(findings), 1, findings)
 		self.assertIn(LAB_IPV6, findings[0])
 
@@ -2572,7 +2572,7 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 	The cap arrived in PR #138 round 1, and the REASON is disclosability, not
 	false positives: shipping the loop UNBOUNDED made the disclosed #118
 	false-positive class unbounded in record length, which is a class no test
-	can enumerate and no sentence in docs/testing.md can state truthfully.
+	can enumerate and no sentence in docs/how-to/testing.md can state truthfully.
 	A pin named `..._are_still_only_these` cannot bound an infinite set.
 
 	Three rather than two is a priced trade, not a free win — an earlier
@@ -2612,7 +2612,7 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 
 		PR #138 round 1, finding 1: an UNCAPPED loop makes the disclosed #118
 		false-positive class unbounded in record length, which is not a class
-		any test can enumerate and not a sentence docs/testing.md can state
+		any test can enumerate and not a sentence docs/how-to/testing.md can state
 		truthfully. The cap is what makes both possible, so the number itself
 		is pinned here — a future change to it has to come through this test
 		and through `_MAX_SWALLOWED_GROUPS`'s own justification comment,
@@ -3101,7 +3101,7 @@ class FalsePositiveCorpusTests(unittest.TestCase):
 		the set is BOUNDED, which is what this test's name claims and what
 		PR #138 round 1, finding 1 found it no longer doing.
 
-		All are disclosed in docs/testing.md. They are here so a future
+		All are disclosed in docs/how-to/testing.md. They are here so a future
 		change either keeps them exactly as they are or has to come and edit
 		this test — which is the point at which someone has to think about
 		them again.
@@ -3196,7 +3196,7 @@ class AllowlistTests(unittest.TestCase):
 		"""Pins the allowlist to its known, reviewed entries. Any new or
 		removed entry — or a widened check set on an existing one — fails
 		here, forcing the change through review and disclosure in
-		docs/testing.md. The one live entry waives only the FQDN detector on
+		docs/how-to/testing.md. The one live entry waives only the FQDN detector on
 		the imported compliance-runner VMware transport module (VMware's
 		factory-default SSO domain, a product constant; see #438)."""
 		self.assertEqual(
@@ -3258,7 +3258,7 @@ class AllowlistTests(unittest.TestCase):
 	def test_naming_every_check_is_a_whole_file_exemption(self) -> None:
 		"""The honest limit of this mechanism, asserted rather than claimed.
 
-		PR #83 round 2 found the code comment, docs/testing.md and the PR body
+		PR #83 round 2 found the code comment, docs/how-to/testing.md and the PR body
 		all asserting that a whole-file exemption was "inexpressible by
 		construction". It is not: CHECK_NAMES has four members (issue #112
 		added ipv6 as the fourth), so an entry naming all four silences every
@@ -3808,7 +3808,7 @@ class HexLetteredIdentifierTests(unittest.TestCase):
 	def test_eui64_shaped_residual_is_unaffected(self) -> None:
 		"""The disclosed, deliberately-deferred #118 residual (an 8-group hex
 		run with digits present) is a DIFFERENT shape from this fix's target
-		and must keep firing exactly as documented in docs/testing.md and
+		and must keep firing exactly as documented in docs/how-to/testing.md and
 		FalsePositiveCorpusTests — this fix narrows the false-positive class,
 		it does not eliminate the whole issue.
 		"""

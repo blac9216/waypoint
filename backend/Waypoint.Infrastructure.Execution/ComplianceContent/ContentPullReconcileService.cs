@@ -57,7 +57,7 @@ public sealed partial class ContentPullReconcileService
 {
 	/// <summary>
 	/// Classification facts issue #729's interpreter needs but the raw import evidence
-	/// cannot supply on its own (docs/compliance-parity.md's catalog-authored
+	/// cannot supply on its own (docs/explanation/compliance-parity.md's catalog-authored
 	/// vendor/kind naming) -- kept as one small closed table here (not the importer,
 	/// which only proves shape/vocabulary) exactly like <see cref="CatalogPromotionRequest"/>'s
 	/// doc comment describes.
