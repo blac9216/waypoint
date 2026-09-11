@@ -32,14 +32,14 @@ invented:
 
 _Backfilled under ADR-0027 from #2._ As with Decision Drivers above, no issue or PR
 beyond this ADR's own original Rationale text records the comparison; #2 is the
-earliest tracked issue naming ADR-0003.
+earliest tracked issue naming ADR-0003. nginx was chosen; Traefik and Caddy were
+rejected. The bullets below are that original Rationale text, moved verbatim:
 
-- **nginx (chosen)** — ubiquitous in the target audience's world, and DISA publishes
-  hardening guidance for it.
-- **Traefik (rejected)** — container label discovery adds indirection a fixed-topology
-  appliance doesn't need.
-- **Caddy (rejected)** — its headline feature (automatic ACME/Let's Encrypt) is useless
-  air-gapped.
+- Caddy's headline feature (automatic ACME/Let's Encrypt) is useless air-gapped;
+  Traefik's (container label discovery) adds indirection a fixed-topology appliance
+  doesn't need.
+- nginx is ubiquitous in the target audience's world, and DISA publishes hardening
+  guidance for it.
 
 ## Decision
 
