@@ -1,6 +1,8 @@
 # ADR-0001: Docker Compose first; optional OVA wrapper later
 
-Status: Accepted; prebuilt-image delivery superseded by [ADR-0015](0015-source-build-and-operator-export.md)
+Status: Accepted
+Amended-by: 0015
+Date: 2026-08-02
 
 ## Context
 

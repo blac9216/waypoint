@@ -1,6 +1,8 @@
 # ADR-0006: ASP.NET Core (C#) backend hosting PowerShell in-process
 
-Status: Superseded by [ADR-0013](0013-control-plane-and-runners.md)
+Status: Superseded
+Superseded-by: 0013
+Date: 2026-08-02
 
 ## Context
 

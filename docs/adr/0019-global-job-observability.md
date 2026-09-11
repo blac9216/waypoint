@@ -1,6 +1,7 @@
 # ADR-0019: Global job observability with domain-owned results
 
 Status: Accepted
+Date: 2026-08-23
 
 ## Context
 

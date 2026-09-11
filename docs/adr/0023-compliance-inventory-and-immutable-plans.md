@@ -1,7 +1,7 @@
 # ADR-0023: Stable compliance inventory and immutable component plans
 
-Status: Accepted (planned; implementation tracked by epic
-[#726](https://github.com/blac9216/waypoint/issues/726))
+Status: Accepted
+Date: 2026-08-26
 
 ## Context
 

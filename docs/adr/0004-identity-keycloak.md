@@ -1,6 +1,7 @@
 # ADR-0004: Keycloak as identity provider; app is a plain OIDC client
 
 Status: Accepted
+Date: 2026-08-02
 
 ## Context
 

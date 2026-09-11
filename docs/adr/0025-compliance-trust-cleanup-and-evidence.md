@@ -1,7 +1,7 @@
 # ADR-0025: Compliance trust, temporary access cleanup, and evidence lifecycle
 
-Status: Accepted (planned; implementation tracked by epic
-[#726](https://github.com/blac9216/waypoint/issues/726))
+Status: Accepted
+Date: 2026-08-26
 
 Supersedes the permanent top-level target/profile scan model and the implication that
 compliance operational history and results may have independent retention lifecycles.

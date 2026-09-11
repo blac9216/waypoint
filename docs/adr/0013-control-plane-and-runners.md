@@ -1,6 +1,10 @@
 # ADR-0013: Separate the control plane from dedicated execution runners
 
 Status: Accepted
+Supersedes: 0006
+Amends: 0008
+Amended-by: 0017
+Date: 2026-08-11
 
 Supersedes [ADR-0006](0006-backend-language.md) and the backend-hosted worker portion
 of [ADR-0008](0008-job-engine.md).

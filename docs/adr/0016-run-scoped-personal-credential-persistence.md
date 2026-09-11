@@ -1,6 +1,8 @@
 # ADR-0016: Personal credentials persist encrypted, run-scoped, terminal/expiry bounded
 
 Status: Accepted
+Amends: 0011
+Date: 2026-08-11
 
 Supersedes the storage model (not the tier split or the "no personal rows in the
 reusable credential store" rule) of

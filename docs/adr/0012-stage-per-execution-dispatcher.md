@@ -1,6 +1,7 @@
 # ADR-0012: Stage-per-execution dispatcher and resume-from-stage
 
 Status: Accepted
+Date: 2026-08-08
 
 ## Context
 

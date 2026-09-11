@@ -1,6 +1,9 @@
 # ADR-0014: Runners own job leases, execution events, and resource admission
 
 Status: Accepted
+Amends: 0008
+Amended-by: 0018
+Date: 2026-08-11
 
 Supersedes the backend-worker ownership portion of
 [ADR-0008](0008-job-engine.md). Preserves the stage-per-execution and resume semantics

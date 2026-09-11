@@ -1,6 +1,7 @@
 # ADR-0005: Envelope-encrypted secrets in Postgres (AWX pattern)
 
 Status: Accepted
+Date: 2026-08-02
 
 ## Context
 

@@ -1,6 +1,8 @@
 # ADR-0015: Distribute source; operators build, provision, and export appliances
 
 Status: Accepted
+Amends: 0001, 0009, 0010
+Date: 2026-08-11
 
 Supersedes the prebuilt-image delivery portion of
 [ADR-0001](0001-packaging.md) and clarifies

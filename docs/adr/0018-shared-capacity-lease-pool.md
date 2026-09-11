@@ -1,7 +1,9 @@
 # ADR-0018: Host-derived capacity discovery, a startup admission invariant, and a shared capacity lease pool
 
 Status: Accepted
+Amends: 0014
 Amended-by: 0033
+Date: 2026-08-23
 
 Supersedes ADR-0014 §5's per-runner admission model (the "discovered cgroup limit,
 intersected with an operator cap, enforced independently by each replica's own

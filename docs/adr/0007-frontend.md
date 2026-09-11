@@ -1,6 +1,7 @@
 # ADR-0007: React + TypeScript PWA with zero external assets
 
 Status: Accepted
+Date: 2026-08-02
 
 ## Context
 
