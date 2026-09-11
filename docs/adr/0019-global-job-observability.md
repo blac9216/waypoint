@@ -90,7 +90,7 @@ silently destroying appliance content or compliance evidence.
 - Roll-off (issue #708): an operator-configurable, disabled-by-default periodic sweep
   applies decision 5's existing lifecycle-deletion operation (`RunHistoryDeletionService`,
   issue #592) unattended to terminal runs whose generic-deletion gate is already
-  `None` (docs/domain-model.md's classification table). It does not create a new
+  `None` (docs/explanation/domain-model.md's classification table). It does not create a new
   deletion mechanism or loosen decision 5's compliance-purge gate — `scan`/`remediate`
   runs are excluded from the sweep's candidate query outright, never auto-deleted; the
   History mode's default view instead windows them out by time/type filter, which is

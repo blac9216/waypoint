@@ -35,7 +35,7 @@ public sealed class CatalogOptions
 	/// authenticate <c>vcf-download-tool</c> commands. Local catalog re-index
 	/// (<c>CatalogIndexJobHandler</c>) no longer resolves or decrypts any credential
 	/// at all (issue #690 AC) -- the offline indexing walk is a pure filesystem read
-	/// (docs/domain-model.md open question 4) that never needed one.
+	/// (docs/explanation/domain-model.md open question 4) that never needed one.
 	/// </summary>
 	public string DepotActivationCodeCredentialType { get; set; } = CredentialTypes.DepotActivationCode;
 }

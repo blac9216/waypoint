@@ -32,7 +32,7 @@ namespace Waypoint.Api.Controllers;
 /// discovery_status, last_refreshed, bindings. Reads are Viewer+, every mutation is
 /// Admin-only (same "Admin writes" gate the contract states for `/sites`). Kind is
 /// validated against the closed <see cref="TargetKinds"/> set, and `connection` is
-/// rejected with 400 if it names a secret-shaped key (docs/domain-model.md:
+/// rejected with 400 if it names a secret-shaped key (docs/explanation/domain-model.md:
 /// "connection secrets are NEVER embedded in the target, only referenced by ID").
 ///
 /// Issue #584 (epic #582, ADR-0021) adds the purpose-specific credential binding

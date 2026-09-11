@@ -708,7 +708,7 @@ public sealed class ScanJobHandler : IJobHandler
 	/// <see cref="ConfigDocResolution.AttestationExpired"/> already encodes that per
 	/// <see cref="ConfigDocResolver"/>'s fall-through -- so it is reported as a WARN
 	/// <c>job.log</c> event and folded into this stage's <see cref="JobExecutionOutcome.Note"/>
-	/// (docs/domain-model.md: "the control reports Open, the run logs a WARN, and
+	/// (docs/explanation/domain-model.md: "the control reports Open, the run logs a WARN, and
 	/// Results lists expired attestations explicitly"). No resolved doc at all (a
 	/// target with no attestation config-doc anywhere in the three layers) is an
 	/// equally valid path: the HDF passes through unattested.
@@ -1010,7 +1010,7 @@ public sealed class ScanJobHandler : IJobHandler
 		// Issue #1068: thread the plan item's own target facts into the CKL's
 		// --hostname/--fqdn/--ip/--mac asset-identity flags (sibling parity; see
 		// Invoke-WaypointConvert's doc comment). target.Name is the operator-assigned
-		// identity (docs/domain-model.md "Target"), always present, and is what
+		// identity (docs/explanation/domain-model.md "Target"), always present, and is what
 		// disambiguates two same-profile targets. connection.host is either an FQDN or
 		// an IP literal -- classified here, never both, so nothing is invented. Waypoint
 		// has no MAC source yet (unlike the sibling's live PowerCLI/network discovery),
@@ -1408,7 +1408,7 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// The expired-attestation WARN (#275 AC, docs/domain-model.md: "the run logs a
+	/// The expired-attestation WARN (#275 AC, docs/explanation/domain-model.md: "the run logs a
 	/// WARN, and Results lists expired attestations explicitly") -- same job.log
 	/// event/severity shape as <see cref="EmitLogTailAsync"/>'s Error line, at Warning
 	/// severity instead, so #27's Results sidebar can distinguish the two.

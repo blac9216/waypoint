@@ -37,7 +37,7 @@ public sealed record EphemeralCredentialRequest(
 	[property: JsonPropertyName("username")]
 	string Username,
 
-	/// <summary>The caller's own password/secret. Encrypted at rest for the run's lifetime only -- see docs/security.md "in-play redaction".</summary>
+	/// <summary>The caller's own password/secret. Encrypted at rest for the run's lifetime only -- see docs/explanation/security.md "in-play redaction".</summary>
 	[property: JsonPropertyName("secret")]
 	string Secret);
 
@@ -67,7 +67,7 @@ public sealed record RunCreateRequest(
 	/// <summary>
 	/// Ad hoc "my credentials" alternative to <see cref="CredentialId"/> for scan runs
 	/// (ADR-0011, issue #276). Mutually exclusive with <c>credential_id</c> and requires
-	/// Operator+ (docs/domain-model.md: "Cyber = initiate scans with service
+	/// Operator+ (docs/explanation/domain-model.md: "Cyber = initiate scans with service
 	/// credentials, Operator = Cyber + ad hoc scans with personal credentials").
 	/// </summary>
 	[property: JsonPropertyName("credential")]
@@ -602,7 +602,7 @@ public sealed record UploadAttemptResponse(
 
 /// <summary>
 /// One waiver row of <c>GET /api/v1/runs/{id}/attestations-applied</c> (issue #299,
-/// docs/domain-model.md: "Results lists expired attestations explicitly"). There is no
+/// docs/explanation/domain-model.md: "Results lists expired attestations explicitly"). There is no
 /// per-control waiver ledger persisted anywhere -- config-docs resolve as whole YAML
 /// bodies per (kind, profile, layer), never parsed per-control (issue #266's
 /// <c>ConfigDocsController.Resolve</c> doc comment), and the attest stage (#275) records

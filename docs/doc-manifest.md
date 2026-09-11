@@ -6,10 +6,10 @@ Only the values below are repository-specific — the rules themselves are not r
 
 ## Design set
 <!-- paths this standard governs; the audit checks exactly these -->
-- docs/architecture.md
-- docs/domain-model.md
-- docs/security.md
-- docs/roadmap.md
+- docs/explanation/architecture.md
+- docs/explanation/domain-model.md
+- docs/explanation/security.md
+- docs/explanation/roadmap.md
 - docs/api-contract.md
 - docs/adr/
 - docs/rationale/
@@ -31,7 +31,7 @@ Index markers: `<!-- adr-index:start -->` / `<!-- adr-index:end -->` in docs/adr
 - deploy → docs/rationale/deploy.md
 
 ## Glossary
-CONTEXT.md at repo root · domain model: docs/domain-model.md
+CONTEXT.md at repo root · domain model: docs/explanation/domain-model.md
 
 ## CI
 `check-pointers.sh` and `adr-index.sh --check` run in: docs-checks.yml — tracked under

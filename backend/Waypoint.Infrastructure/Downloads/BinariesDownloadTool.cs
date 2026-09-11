@@ -135,7 +135,7 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 		// seeded with this job's own machine_id/asset_id and pointed at by --depot-
 		// download-activation-code-file's Activation Code) can hold the download token
 		// in its own log lines -- redacted here through the SAME ISecretRedactor the
-		// rest of the pipeline uses (docs/security.md control 1: "the logging pipeline
+		// rest of the pipeline uses (docs/explanation/security.md control 1: "the logging pipeline
 		// ... redacts every occurrence before any line reaches a sink"), mirroring
 		// DepotEnrollmentJobHandler.ValidateCodeAsync's identical "jobs.note is a sink
 		// too" redaction -- BEFORE the tail enters either the classifier input or the

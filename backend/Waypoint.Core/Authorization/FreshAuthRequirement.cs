@@ -18,7 +18,7 @@ namespace Waypoint.Core.Authorization;
 
 /// <summary>
 /// Authorization requirement satisfied when the current principal's authentication is
-/// "fresh enough" for a step-up-gated action (issue #521) — see <c>docs/security.md</c>
+/// "fresh enough" for a step-up-gated action (issue #521) — see <c>docs/explanation/security.md</c>
 /// "Step-up re-authentication" for the full design and <see cref="FreshAuthAuthorizationHandler"/>
 /// for the freshness check itself. Unlike <see cref="MinimumRoleRequirement"/> this
 /// carries no data of its own — the freshness window is read live from

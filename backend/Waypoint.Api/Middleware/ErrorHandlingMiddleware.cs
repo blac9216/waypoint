@@ -36,7 +36,7 @@ public sealed partial class ErrorHandlingMiddleware
 	/// <summary>
 	/// Operator-actionable wire text for a missing/unreadable master key. Deliberately
 	/// generic about *where* the key lives -- the mounted file path is server
-	/// filesystem layout (docs/security.md control 1) and stays in the log-only
+	/// filesystem layout (docs/explanation/security.md control 1) and stays in the log-only
 	/// exception message (<see cref="LogMasterKeyUnavailable"/>), never the response
 	/// body. Points at deploy/README.md's "Production only: secrets master key" section
 	/// instead of repeating its instructions here, so the two don't drift.

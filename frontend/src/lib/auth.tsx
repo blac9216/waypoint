@@ -638,7 +638,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		await startLogin(discovery, config.oidcClientId);
 	}, []);
 
-	/** Step-up re-auth (issue #521/#534): same redirect mechanism as `startOidcLogin`, `prompt=login` so Keycloak re-issues a fresh `auth_time` even with an active SSO session (docs/security.md "Step-up re-authentication"). */
+	/** Step-up re-auth (issue #521/#534): same redirect mechanism as `startOidcLogin`, `prompt=login` so Keycloak re-issues a fresh `auth_time` even with an active SSO session (docs/explanation/security.md "Step-up re-authentication"). */
 	const stepUpOidcLogin = useCallback(async (returnTo?: string) => {
 		const config = await fetchAuthConfig();
 		const discovery = await discoverOidc(config.oidcAuthority);

@@ -1,6 +1,6 @@
 -- Issue #265 (epic #13/#22, first slice of the #22 split): the storage half of the
 -- three-layer STIG config document store -- inputs / attestations / remediation-inputs
--- at Global -> Site -> Target scope. docs/domain-model.md "STIG configuration
+-- at Global -> Site -> Target scope. docs/explanation/domain-model.md "STIG configuration
 -- documents": "SAF attestation YAML, InSpec input YAML, remediation input files --
 -- stored as documents in Postgres ... Every save creates a version with author +
 -- timestamp." docs/api-contract.md "Config documents (three-layer)" and the Postgres
@@ -77,7 +77,7 @@ CREATE OR REPLACE TRIGGER trg_config_docs_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- config_versions --------------------------------------------------------------
--- Append-only version history (docs/domain-model.md: "Every save creates a version
+-- Append-only version history (docs/explanation/domain-model.md: "Every save creates a version
 -- with author + timestamp -- 'who changed the attestation that waived this finding' is
 -- an auditor question the tool must answer"). A save INSERTs the next version, never
 -- UPDATEs an existing one -- there is deliberately no UPDATE/DELETE path exposed above

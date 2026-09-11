@@ -111,7 +111,7 @@ public sealed record ConfigDocSaveBody(
 /// <c>doc_id</c>/<c>version</c>/<c>author</c>/<c>updated_at</c> are all null when no layer
 /// has a doc for this (kind, profile) at all (prototype: input layer "not defined ...
 /// inherits site value" collapses further to nothing defined anywhere). <c>attestation_expired</c>
-/// is only ever true for <c>kind == "attestation"</c> -- docs/domain-model.md: "the control
+/// is only ever true for <c>kind == "attestation"</c> -- docs/explanation/domain-model.md: "the control
 /// reports Open, the run logs a WARN, and Results lists expired attestations explicitly."
 /// </summary>
 public sealed record ConfigDocResolutionResponse(

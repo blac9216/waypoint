@@ -35,7 +35,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #521 (AC3 of #29): step-up re-authentication end to end against real Postgres
 /// and the real <c>AddJwtBearer</c>/<c>OidcClaimsMappingOptionsSetup</c> pipeline
-/// (via <see cref="OidcApiFactory"/>), covering the three cases <c>docs/security.md</c>
+/// (via <see cref="OidcApiFactory"/>), covering the three cases <c>docs/explanation/security.md</c>
 /// "Step-up re-authentication" commits to: a fresh <c>auth_time</c> is allowed, a
 /// stale-but-otherwise-valid token is rejected with the distinct <c>step_up_required</c>
 /// code, and a token missing <c>auth_time</c> entirely fails closed the same way.

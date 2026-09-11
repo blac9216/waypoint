@@ -21,7 +21,7 @@ namespace Waypoint.Api.Logging;
 /// <summary>
 /// Wraps another <see cref="ITextFormatter"/> and routes its fully-rendered output
 /// through <see cref="ISecretRedactor"/> before it reaches the sink — the log-scrubbing
-/// hook point <c>docs/security.md</c> control 1 requires from the start. Formatting
+/// hook point <c>docs/explanation/security.md</c> control 1 requires from the start. Formatting
 /// happens first so redaction sees the same text a human or a downstream log shipper
 /// would, structured fields included.
 /// </summary>

@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Sites;
 
 /// <summary>
-/// The closed set of target kinds (docs/domain-model.md "Target"). Multiple targets of
+/// The closed set of target kinds (docs/explanation/domain-model.md "Target"). Multiple targets of
 /// the same kind are allowed under one site (e.g. two vCenters) -- there is no
 /// uniqueness constraint on (site_id, kind), only on (site_id, name).
 /// </summary>
@@ -32,7 +32,7 @@ public static class TargetKinds
 
 /// <summary>
 /// The closed set of discovery_status values. Not enumerated anywhere in
-/// docs/domain-model.md or docs/api-contract.md (both name the field only) -- this set
+/// docs/explanation/domain-model.md or docs/api-contract.md (both name the field only) -- this set
 /// is invented here to match the `/targets/{id}/discover` job lifecycle the contract
 /// does describe (queued discover job -> running -> terminal), and is intentionally
 /// small pending the real #13 discovery-job slice.
@@ -48,7 +48,7 @@ public static class TargetDiscoveryStatuses
 }
 
 /// <summary>
-/// A target as stored (docs/domain-model.md "Target"): a scannable/manageable endpoint
+/// A target as stored (docs/explanation/domain-model.md "Target"): a scannable/manageable endpoint
 /// within a site. <see cref="ConnectionJson"/> carries kind-specific connection details
 /// (hostname/address, etc.) as raw JSON text -- same convention as
 /// <c>Site.StigmanOverrideJson</c> -- and is guaranteed by the API layer to never embed

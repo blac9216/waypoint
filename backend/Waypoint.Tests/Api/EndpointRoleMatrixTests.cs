@@ -24,7 +24,7 @@ namespace Waypoint.Tests.Api;
 /// <summary>
 /// Issue #30's core deliverable: a reflection-discovered endpoint x role matrix,
 /// asserted against a hand-authored expected table. The table is the contract --
-/// derived from docs/domain-model.md's Roles (Viewer/Cyber/Operator/Admin), NOT
+/// derived from docs/explanation/domain-model.md's Roles (Viewer/Cyber/Operator/Admin), NOT
 /// from the code. Every controller action reachable via an <c>[Http*]</c> attribute
 /// (the same discovery precedent as <see cref="AllControllersResponseShapeTests"/>)
 /// must have an entry here or the test fails closed -- an endpoint added later
@@ -378,7 +378,7 @@ public sealed class EndpointRoleMatrixTests
 
 		// TrustController (issue #753, ADR-0025) -- reads Viewer+; every write Admin
 		// (trust bundle management and scoped TLS bypass authorization are explicitly
-		// named Admin-only trust-affecting actions, docs/security.md RBAC
+		// named Admin-only trust-affecting actions, docs/explanation/security.md RBAC
 		// reconciliation).
 		["TrustController.ListBundles"] = WaypointRole.Viewer,
 		["TrustController.GetBundle"] = WaypointRole.Viewer,

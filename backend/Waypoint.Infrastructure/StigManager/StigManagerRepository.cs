@@ -101,7 +101,7 @@ public sealed class StigManagerRepository
 
 	/// <summary>
 	/// Resolves the effective connection for a site: <c>sites.stigman_override</c> wins
-	/// over the global row when present (docs/domain-model.md three-layer "most
+	/// over the global row when present (docs/explanation/domain-model.md three-layer "most
 	/// specific wins" convention, applied here to two layers since there is no
 	/// target-level STIG Manager override). Returns null when neither the site's
 	/// override nor a global connection is configured.

@@ -42,7 +42,7 @@ request is answered by proposing adoption first.
 - **architecture.md** — C4 levels: Context → Container → Component, each with an inline
   mermaid diagram. No level 4 (code) — that is what the code is for.
 - **CONTEXT.md** at the repo root — the glossary, terms only, no implementation.
-  `docs/domain-model.md` (or the repo's equivalent) holds relationships and rules and
+  `docs/explanation/domain-model.md` (or the repo's equivalent) holds relationships and rules and
   must use the glossary's words.
 - **Diátaxis** — every doc lives in one of `docs/{tutorials,how-to,reference,explanation}/`
   and declares its kind. ADRs and rationale are explanation; the API contract is reference.

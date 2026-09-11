@@ -22,7 +22,7 @@ namespace Waypoint.Core.ConfigDocs;
 /// standard error envelope; valid YAML round-trips byte-stable"). Deliberately a
 /// well-formedness check only -- SAF attestation YAML, InSpec input YAML, and
 /// remediation input files each carry their own schema owned by Broadcom/MITRE
-/// (docs/domain-model.md: "the schemas belong to Broadcom/MITRE and change under us"),
+/// (docs/explanation/domain-model.md: "the schemas belong to Broadcom/MITRE and change under us"),
 /// so this parses-as-YAML gate is the whole of what this store is allowed to enforce.
 /// The submitted text is stored byte-for-byte on success (see
 /// <c>ConfigDocRepository.SaveVersionAsync</c>) -- this type never rewrites or

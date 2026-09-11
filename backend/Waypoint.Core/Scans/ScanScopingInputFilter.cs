@@ -30,7 +30,7 @@ namespace Waypoint.Core.Scans;
 ///
 /// This is a FILTER, not a hard reject: an Input config doc is validated only for YAML
 /// well-formedness at save time (no schema/key allowlist -- by design, per
-/// docs/domain-model.md), so a reserved key colliding here is far more likely an
+/// docs/explanation/domain-model.md), so a reserved key colliding here is far more likely an
 /// operator accident (copy-pasted a scoping example into a general inputs doc) than
 /// deliberate widening. Silently dropping the key and logging a WARN keeps the scan
 /// running at its correctly narrowed scope (fail-closed on SCOPE, per epic #726 Wave 3's

@@ -771,7 +771,7 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>Issue #20: credential_type is validated against the closed
-	/// <c>CredentialTypes</c> set at the API layer (docs/domain-model.md's four types).</summary>
+	/// <c>CredentialTypes</c> set at the API layer (docs/explanation/domain-model.md's four types).</summary>
 	[Fact]
 	public async Task InvalidCredentialType_Is400()
 	{

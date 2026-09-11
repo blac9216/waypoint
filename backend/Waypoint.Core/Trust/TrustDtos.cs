@@ -55,7 +55,7 @@ public static class TrustScopeTypes
 
 /// <summary>
 /// One immutable, Admin-uploaded CA certificate/chain (migration 0059's
-/// <c>trust_bundles</c>). Public material, not a secret (docs/security.md) -- stored
+/// <c>trust_bundles</c>). Public material, not a secret (docs/explanation/security.md) -- stored
 /// and returned as plain PEM text, never envelope-encrypted.
 /// </summary>
 public sealed record TrustBundle(

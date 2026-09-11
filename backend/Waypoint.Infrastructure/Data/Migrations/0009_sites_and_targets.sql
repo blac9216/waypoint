@@ -2,7 +2,7 @@
 -- M1 schema forward-referenced but did not create (see 0001's comments on
 -- `runs.site_id` and `jobs.target_id` — both stayed plain UUID columns with
 -- no FK specifically so this migration could add the referenced tables
--- without an ALTER on either of them). docs/domain-model.md "Site" /
+-- without an ALTER on either of them). docs/explanation/domain-model.md "Site" /
 -- "Target"; docs/api-contract.md "Sites, targets, inventory" and its
 -- Postgres schema sketch: `sites` · `targets` (site_id, kind, connection
 -- jsonb, credential_id, discovery_status).

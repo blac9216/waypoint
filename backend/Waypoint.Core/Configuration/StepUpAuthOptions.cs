@@ -16,7 +16,7 @@ namespace Waypoint.Core.Configuration;
 
 /// <summary>
 /// Configuration for step-up re-authentication (issue #521, AC3 of #29) — see
-/// <c>docs/security.md</c> "Step-up re-authentication" for the full design. Bound from
+/// <c>docs/explanation/security.md</c> "Step-up re-authentication" for the full design. Bound from
 /// the <c>StepUpAuth</c> section.
 /// </summary>
 public sealed class StepUpAuthOptions

@@ -18,7 +18,7 @@
 # scripts and adapts their output to the presence-sweep contract
 # CatalogIndexJobHandler (issue #1512) needs.
 #
-# Domain-model open question 4 (docs/domain-model.md) is answered by what this module
+# Domain-model open question 4 (docs/explanation/domain-model.md) is answered by what this module
 # calls: Get-FileManifest is a pure filesystem walk of the depot share (no vendor
 # binary, no depot token) -- the sweep does NOT require the download tool. The depot
 # token parameter below is accepted and threaded through for forward compatibility

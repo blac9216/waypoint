@@ -1,5 +1,7 @@
 # Waypoint — Secrets Threat Model & Leakage Controls
 
+Kind: explanation
+
 Status: living security requirements. This document states plainly what the secrets
 design
 ([ADR-0005](adr/0005-secrets.md), [ADR-0011](adr/0011-credential-tiers.md),
@@ -179,7 +181,7 @@ overwrites secret material (a non-empty `secret` field) — renaming a credentia
 flipping `sudo_enabled` is not gated, since neither touches key material. `POST
 /credentials` (initial creation) is unaffected: there is no existing secret being
 displaced, so nothing is being "overwritten." Remediation and update-apply call sites
-get the same `[RequireFreshAuth]` treatment when those endpoints land (`docs/roadmap.md`);
+get the same `[RequireFreshAuth]` treatment when those endpoints land (`docs/explanation/roadmap.md`);
 this issue (#521) covers only the credential-overwrite case since it is the only one
 that exists today.
 
@@ -325,7 +327,7 @@ carries an explicit, narrowly scoped bypass, and both states are visible.
   connection in the same runner process. This is a fail-closed isolation
   requirement, not an optimization.
 - **Certificate failure is isolated.** A verification failure on a managed-trust
-  connection is a component/connection-scoped readiness failure (`docs/domain-model.md`
+  connection is a component/connection-scoped readiness failure (`docs/explanation/domain-model.md`
   coverage-omission model), never a whole-run halt.
 
 ## Temporary SSH enablement cleanup obligations (planned, epic #726, ADR-0025)
@@ -401,7 +403,7 @@ surface even though neither carries traditional infrastructure credentials:
   audit-trail shape ADR-0014/ADR-0016 already require for every decrypt.
 - **Readiness diagnostics for a missing/incompatible credential or input name the
   component and purpose, never the secret.** This extends the existing "no secret
-  value enters errors, events, logs, or results" rule (`docs/architecture.md`) to
+  value enters errors, events, logs, or results" rule (`docs/explanation/architecture.md`) to
   the new per-component readiness-failure surface — a `readiness_failed` job's
   safe reason is always shaped like "vcsa-ssh binding missing for component X," never
   an echo of a submitted (and rejected) credential value.
@@ -523,7 +525,7 @@ until that PR merges; ADR-0029 records the decision as accepted and binding rega
 
 ## RBAC reconciliation (epic #726)
 
-`docs/domain-model.md`'s Roles table and `docs/api-contract.md`'s RBAC summary are
+`docs/explanation/domain-model.md`'s Roles table and `docs/api-contract.md`'s RBAC summary are
 the wire-facing source of truth; this section states the security rationale for
 where epic #726 narrows or clarifies existing role boundaries. It widens nothing
 beyond what those two documents already specify.

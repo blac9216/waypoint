@@ -44,7 +44,7 @@ The `download` job type and `POST /downloads` are retired: removed from the
 `jobs_job_type_check` constraint and `JobCapabilities.Download`'s allowlist, the
 enqueue path, `ToolGatedDownloadJobHandler`'s decorative gate, and any queue-UI wiring
 that depends on them (tracked as issue #1040, not yet landed at the time of this ADR —
-see `docs/architecture.md` and `docs/domain-model.md` for current build status).
+see `docs/explanation/architecture.md` and `docs/explanation/domain-model.md` for current build status).
 `Save-WebFile` survives as the mirror-lane primitive, its behavioral contract pinned by
 tests (issue #1036's parity fixtures). Issue #968 closes as superseded by this ADR, not
 fixed forward. The M1 `artifacts` volume's role, tied to the retired job type, is

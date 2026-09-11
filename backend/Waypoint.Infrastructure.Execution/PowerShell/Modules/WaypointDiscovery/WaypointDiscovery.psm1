@@ -452,7 +452,7 @@ function Invoke-WaypointDiscovery {
 	    vcenter session identity (see Resolve-WaypointPrimarySession). Defaults to
 	    $script:WaypointDnsTimeoutMillisecondsDefault (3000ms); DiscoverJobHandler
 	    overrides it from PowerShellOptions.DiscoveryDnsTimeoutMilliseconds
-	    (docs/architecture.md) so an operator on a genuinely slow resolver can raise
+	    (docs/explanation/architecture.md) so an operator on a genuinely slow resolver can raise
 	    it without editing the shipped module. A lookup that exceeds the ceiling
 	    emits a Write-Warning naming the lookup kind and host (never credentials)
 	    before degrading to the same fail-closed "no match" outcome a genuine

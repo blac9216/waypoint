@@ -1,5 +1,7 @@
 # Waypoint — System Architecture
 
+Kind: explanation
+
 Status: **living document, approved architecture ahead of implementation** (the seven closed
 delivery stories — milestones 3–9 — are built; the open stories are design intent until
 their domain epics land — see [`roadmap.md`](roadmap.md)). This describes the

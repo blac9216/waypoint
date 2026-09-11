@@ -54,7 +54,7 @@ public sealed class CatalogController : ControllerBase
 {
 	/// <summary>
 	/// <c>catalog-index</c>/<c>catalog-pull</c> carry no per-target work
-	/// (docs/domain-model.md's six scan priorities do not apply here), so both always
+	/// (docs/explanation/domain-model.md's six scan priorities do not apply here), so both always
 	/// run at the highest priority so a manually triggered re-sync/pull isn't starved
 	/// behind a large scan run.
 	/// </summary>
@@ -131,7 +131,7 @@ public sealed class CatalogController : ControllerBase
 
 	/// <summary>
 	/// List the indexed depot catalog. Viewer+ -- browsable without the download tool
-	/// installed (docs/domain-model.md open question 4).
+	/// installed (docs/explanation/domain-model.md open question 4).
 	/// </summary>
 	[HttpGet("artifacts")]
 	[RequireViewerRole]

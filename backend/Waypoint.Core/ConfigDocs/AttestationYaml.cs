@@ -19,7 +19,7 @@ namespace Waypoint.Core.ConfigDocs;
 
 /// <summary>
 /// Reads just enough of a SAF attestation YAML body to answer "has this waiver expired"
-/// (docs/domain-model.md: "Expired attestations are not applied"; prototype attestation
+/// (docs/explanation/domain-model.md: "Expired attestations are not applied"; prototype attestation
 /// EFFECTIVE card: <c>status: Not_A_Finding / justification: ... / expires: 2027-03-01</c>).
 /// Deliberately narrow -- like <see cref="YamlDocumentValidator"/>, this does not adopt or
 /// validate the rest of the SAF schema (that belongs to Broadcom/MITRE), it only looks for

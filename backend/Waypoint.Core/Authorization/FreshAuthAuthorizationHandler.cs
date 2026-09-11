@@ -21,7 +21,7 @@ namespace Waypoint.Core.Authorization;
 /// <summary>
 /// Succeeds a <see cref="FreshAuthRequirement"/> when the current principal's
 /// authentication counts as "fresh enough" for a step-up-gated action (issue #521) —
-/// see <c>docs/security.md</c> "Step-up re-authentication" for the full design this
+/// see <c>docs/explanation/security.md</c> "Step-up re-authentication" for the full design this
 /// implements.
 ///
 /// Two paths to success, mirroring that design exactly:

@@ -1,5 +1,7 @@
 # Waypoint — Build Sequencing
 
+Kind: explanation
+
 Status: living document. Work is organised as **delivery-story milestones** — each
 one a multi-epic story with a rolled-up description on GitHub — per
 [`process/work-tracking.md`](process/work-tracking.md). This page is the narrative

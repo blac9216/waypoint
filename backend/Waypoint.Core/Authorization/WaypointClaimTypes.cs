@@ -42,7 +42,7 @@ public static class WaypointClaimTypes
 	/// (when this particular token was issued). <c>FreshAuthAuthorizationHandler</c>
 	/// (issue #521) reads this verbatim off the validated token — Keycloak must be
 	/// configured with an "Authentication Time" protocol mapper to populate it on the
-	/// access token this backend sees; see <c>docs/security.md</c> "Step-up
+	/// access token this backend sees; see <c>docs/explanation/security.md</c> "Step-up
 	/// re-authentication". Unlike <see cref="Role"/>/<see cref="Subject"/> this is not
 	/// remapped by <c>OidcClaimsMappingOptionsSetup</c> — it is read directly off the
 	/// validated principal under its own wire name, since no downstream code needs a
@@ -58,7 +58,7 @@ public static class WaypointClaimTypes
 	/// same literal — duplicated here rather than referenced, since <c>Waypoint.Core</c>
 	/// cannot depend on <c>Waypoint.Api</c>). <c>FreshAuthAuthorizationHandler</c> (issue
 	/// #521) checks this to apply the documented dev-only step-up carve-out (see
-	/// <c>docs/security.md</c> "Step-up re-authentication") without adding a project
+	/// <c>docs/explanation/security.md</c> "Step-up re-authentication") without adding a project
 	/// reference just for one string.
 	/// </summary>
 	public const string LocalSessionAuthenticationType = "LocalSession";

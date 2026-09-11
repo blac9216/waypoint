@@ -16,7 +16,7 @@ namespace Waypoint.Core.ConfigDocs;
 
 /// <summary>
 /// The closed <c>kind</c> set (docs/api-contract.md `/config-docs`: "Filter by kind
-/// (input|attestation|remediation-input)"; docs/domain-model.md "STIG configuration
+/// (input|attestation|remediation-input)"; docs/explanation/domain-model.md "STIG configuration
 /// documents").
 /// </summary>
 public static class ConfigDocKinds
@@ -30,7 +30,7 @@ public static class ConfigDocKinds
 
 /// <summary>
 /// The closed <c>layer_type</c> set -- Global -> Site -> Target
-/// (docs/domain-model.md: "All three resolve through three layers").
+/// (docs/explanation/domain-model.md: "All three resolve through three layers").
 /// </summary>
 public static class ConfigDocLayers
 {
@@ -44,7 +44,7 @@ public static class ConfigDocLayers
 /// <summary>
 /// A config-doc's identity row -- the (kind, profile, layer) slot -- plus its
 /// current-version pointer. The actual YAML bodies live in <see cref="ConfigDocVersion"/>
-/// rows, one per save, never mutated (docs/domain-model.md: "Every save creates a
+/// rows, one per save, never mutated (docs/explanation/domain-model.md: "Every save creates a
 /// version with author + timestamp").
 /// </summary>
 /// <summary>

@@ -33,7 +33,7 @@ namespace Waypoint.Api.Controllers;
 /// split): "Filter by kind/profile/layer", "PUT creates a new immutable version",
 /// "Full history -- the auditor answer". Reads are Viewer+, matching every other
 /// read-mostly resource; writes are Admin, matching "Configuration" screen's role
-/// (docs/domain-model.md Roles: Admin has "STIG config", no other role does).
+/// (docs/explanation/domain-model.md Roles: Admin has "STIG config", no other role does).
 ///
 /// There is no documented POST -- the contract's PUT is the sole write path, and the
 /// first PUT against a not-yet-existing id both creates the (kind, profile, layer) slot
@@ -98,10 +98,10 @@ public sealed partial class ConfigDocsController : ControllerBase
 	/// <see cref="ConfigDocResolver.Resolve"/>. <paramref name="control"/> matches the
 	/// documented query shape (docs/api-contract.md: `resolve?profile&amp;control&amp;target`)
 	/// but does not change resolution -- config-docs resolve as whole YAML bodies per
-	/// (kind, profile, layer), never parsed per-control (docs/domain-model.md: "the schemas
+	/// (kind, profile, layer), never parsed per-control (docs/explanation/domain-model.md: "the schemas
 	/// belong to Broadcom/MITRE"); it is accepted for parity with the documented signature
 	/// and echoed nowhere else. An expired attestation resolves as "not applied" (falls
-	/// through to a less-specific layer or to nothing) and logs a WARN -- docs/domain-model.md:
+	/// through to a less-specific layer or to nothing) and logs a WARN -- docs/explanation/domain-model.md:
 	/// "the control reports Open, the run logs a WARN, and Results lists expired
 	/// attestations explicitly."
 	/// </summary>

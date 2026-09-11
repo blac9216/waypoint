@@ -3,7 +3,7 @@
 -- schedules didn't exist until #31's migration 0030. Now that it does, add the real
 -- FK. ON DELETE SET NULL rather than CASCADE/RESTRICT mirrors 0006's
 -- audit_log_credential_id_fkey precedent: a run is a completed historical record
--- (docs/domain-model.md) that must outlive the schedule that produced it -- deleting
+-- (docs/explanation/domain-model.md) that must outlive the schedule that produced it -- deleting
 -- a schedule (SchedulesController.Delete) must not delete or be blocked by the runs
 -- it already dispatched.
 --

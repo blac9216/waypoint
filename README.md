@@ -35,7 +35,7 @@ their own accounts, and move the resulting capabilities into disconnected enclav
 > **Prototype placeholders:** The screenshots below come from Waypoint's high-fidelity
 > design prototype and use fictional data. They illustrate the intended product
 > experience, not the exact state of the production UI, and will be replaced with
-> production captures as those screens are finalized. See the [roadmap](docs/roadmap.md)
+> production captures as those screens are finalized. See the [roadmap](docs/explanation/roadmap.md)
 > for the authoritative built-versus-planned status of each capability.
 
 ### Global
@@ -122,11 +122,11 @@ credentials, and step-up authentication keep sensitive actions explicit and trac
 The documentation records what is implemented, what is planned, and why the system is
 designed this way:
 
-- [Architecture](docs/architecture.md) — components, job engine, modes, and update flow
-- [Domain model](docs/domain-model.md) — sites, targets, credentials, roles
-- [Security](docs/security.md) — secrets threat model and leakage controls
+- [Architecture](docs/explanation/architecture.md) — components, job engine, modes, and update flow
+- [Domain model](docs/explanation/domain-model.md) — sites, targets, credentials, roles
+- [Security](docs/explanation/security.md) — secrets threat model and leakage controls
 - [ADRs](docs/adr/) — the decisions and why
-- [Roadmap](docs/roadmap.md) — build sequencing
+- [Roadmap](docs/explanation/roadmap.md) — build sequencing
 - [UI design brief](docs/ui/design-brief.md) — screen inventory and prototype reconciliation
 - [API contract](docs/api-contract.md) — REST/SSE contract, state machines, and data ledger
 - [Testing](docs/testing.md) — required reading before running the Compose stack

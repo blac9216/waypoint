@@ -30,7 +30,7 @@ namespace Waypoint.Infrastructure.Scheduling;
 /// <c>DiscoveryController</c> and <c>CatalogController</c> already use for their own
 /// job creation, so a scheduled run is indistinguishable in the queue from an
 /// operator-initiated one except for its recorded initiator ("scheduled",
-/// docs/domain-model.md's Scheduling section) and the schedule's own
+/// docs/explanation/domain-model.md's Scheduling section) and the schedule's own
 /// <see cref="Schedule.CreatedBy"/> attribution, which the API layer (<c>SchedulesController.MapSchedule</c>)
 /// carries separately on the wire.
 ///
@@ -42,7 +42,7 @@ namespace Waypoint.Infrastructure.Scheduling;
 /// </summary>
 public sealed partial class ScheduleDispatchService
 {
-	/// <summary>Initiator recorded on every scheduled run (docs/domain-model.md Scheduling: "record 'scheduled' as the initiator alongside the schedule's creator").</summary>
+	/// <summary>Initiator recorded on every scheduled run (docs/explanation/domain-model.md Scheduling: "record 'scheduled' as the initiator alongside the schedule's creator").</summary>
 	public const string ScheduledInitiator = "scheduled";
 
 	private const short DiscoverPriority = 4;

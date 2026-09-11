@@ -1,7 +1,7 @@
 -- Issue #106: job_events and audit_log are documented "append-only" (0001's header
 -- comment, docs/api-contract.md's schema sketch) but nothing enforced it -- UPDATE and
 -- DELETE both silently succeeded against a real Postgres 16 container. For audit_log
--- that's not a nicety: docs/security.md control 4 ("Decrypt audit trail") is the
+-- that's not a nicety: docs/explanation/security.md control 4 ("Decrypt audit trail") is the
 -- compensating control that makes the service/shared credential tier acceptable, and a
 -- trail the compromised component can edit compensates for nothing.
 --

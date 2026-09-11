@@ -20,7 +20,7 @@ namespace Waypoint.Tests.Core;
 /// <summary>
 /// Issue #266 (second slice of #22): the pure Global -> Site -> Target
 /// most-specific-wins merge, and expired-attestation-falls-through semantics
-/// (docs/domain-model.md "STIG configuration documents").
+/// (docs/explanation/domain-model.md "STIG configuration documents").
 /// </summary>
 public sealed class ConfigDocResolverTests
 {
@@ -77,7 +77,7 @@ public sealed class ConfigDocResolverTests
 	[Fact]
 	public void Resolve_NotTightenOnly_SiteValueDiffersFromGlobal_SiteStillWinsOutright()
 	{
-		// docs/domain-model.md: "A lower layer may set a genuinely *different* value; it is
+		// docs/explanation/domain-model.md: "A lower layer may set a genuinely *different* value; it is
 		// not a tighten-only relationship." The site doc here does not restate/narrow the
 		// global value -- it is a wholly different body -- and still wins because it is more
 		// specific, confirming resolution never merges field-by-field.

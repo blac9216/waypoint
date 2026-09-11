@@ -1,5 +1,7 @@
 # Waypoint — Domain Model
 
+Kind: explanation
+
 Status: **living domain model**. All example names are fictional placeholders
 (`*.example.internal`, RFC 5737 addresses) — this is a public repository.
 
@@ -164,7 +166,7 @@ into sibling obligations. Only an originally disabled service is restored to dis
 an originally enabled service is never disabled. This obligation is the audited
 access-state exception to otherwise read-only scan effects, not remediation execution.
 Wire shape: `docs/api-contract.md`'s "Trust and temporary SSH cleanup"; security
-posture and residual-risk framing: `docs/security.md`'s corresponding sections.
+posture and residual-risk framing: `docs/explanation/security.md`'s corresponding sections.
 
 ### Compliance evidence graph (planned)
 
@@ -616,7 +618,7 @@ catalog/content/inventory/execution surfaces ADRs 0022–0025 introduce. The
 authoritative per-action-family table is `docs/api-contract.md`'s "RBAC summary,"
 and the security rationale for where it narrows or clarifies this table (scan-scoped
 Cyber+/Operator+ control-of-own-work, Admin-only schedules/activation/rollback/
-trust/bypass/purge/alert-acknowledgement) is `docs/security.md`'s "RBAC
+trust/bypass/purge/alert-acknowledgement) is `docs/explanation/security.md`'s "RBAC
 reconciliation" section. Neither document widens a capability this table does not
 already grant.
 

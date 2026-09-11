@@ -226,7 +226,7 @@ public sealed class SchedulesEndpointTests : IClassFixture<SchedulesTestApiFacto
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
 
-	/// <summary>docs/domain-model.md Scheduling: "record ... the schedule's creator" -- the authenticated caller, never a body field.</summary>
+	/// <summary>docs/explanation/domain-model.md Scheduling: "record ... the schedule's creator" -- the authenticated caller, never a body field.</summary>
 	[Fact]
 	public async Task Create_RecordsCreatedByFromTheAuthenticatedCaller()
 	{

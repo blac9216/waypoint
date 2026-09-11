@@ -22,11 +22,11 @@ using Waypoint.Core.Trust;
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
-/// The first slice of docs/security.md's planned managed-trust surface (issue #753,
+/// The first slice of docs/explanation/security.md's planned managed-trust surface (issue #753,
 /// epic #726, ADR-0025): Admin-only CA trust bundle upload/inventory/replace/delete and
 /// scoped trust-policy CRUD. Reads are Viewer+ (matching every other Configuration
 /// surface's RBAC shape -- Sites, StigManager, Credentials); every write is Admin-only,
-/// since ADR-0025 and docs/security.md's RBAC reconciliation section both name "trust
+/// since ADR-0025 and docs/explanation/security.md's RBAC reconciliation section both name "trust
 /// bundle management and scoped TLS bypass authorization" as one of the explicit
 /// trust-affecting Admin-only actions.
 ///
@@ -220,7 +220,7 @@ public sealed class TrustController : ControllerBase
 	}
 
 	/// <summary>
-	/// Sets (or replaces) the current trust policy for one scope (docs/security.md
+	/// Sets (or replaces) the current trust policy for one scope (docs/explanation/security.md
 	/// `PUT /connections/{id}/trust-policy`, generalized to (scope_type, scope_id)).
 	/// <c>mode: "bypass"</c> with no <c>bypass_reason</c> is rejected here before ever
 	/// reaching the database's own CHECK constraint (ADR-0025 "The API rejects a bypass

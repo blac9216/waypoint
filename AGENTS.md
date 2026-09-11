@@ -61,9 +61,9 @@ realignment* (the runner topology of ADRs 0013–0015), *Identity, RBAC & schedu
 *Scan & download readiness*, *Download-tool verification*, and *Compose & deploy
 overhaul*. Open: *Compliance parity* and *Download & depot parity*, then
 *Remediation*, *Transfer & enclave modes*, and *Self-update & appliance packaging* —
-see `docs/roadmap.md` for what's built vs. still planned. The design phase is complete:
+see `docs/explanation/roadmap.md` for what's built vs. still planned. The design phase is complete:
 architecture, decisions, security model, UI prototype, and the API contract live in
-`docs/` — read `docs/architecture.md`, `docs/api-contract.md`, and the ADRs in
+`docs/` — read `docs/explanation/architecture.md`, `docs/api-contract.md`, and the ADRs in
 `docs/adr/` before building anything, and keep them updated as decisions evolve. Read
 `docs/adr/README.md`'s index table first and open only active ADRs. Do
 not contradict an accepted ADR without recording a superseding one. All work is
@@ -104,11 +104,12 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 ├── CLAUDE.md            # Claude Code compatibility pointer to AGENTS.md
 ├── LICENSE              # Apache-2.0 (see License & Borrowing Policy below)
 ├── docs/
-│   ├── architecture.md  # System architecture: components, job engine, modes, update flow
 │   ├── api-contract.md  # design-phase output: REST resources, SSE events, state machines, schema, data ledger
-│   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
-│   ├── security.md      # Secrets threat model + mandatory leakage controls
-│   ├── roadmap.md       # Build sequencing (what gets built first and why)
+│   ├── explanation/
+│   │   ├── architecture.md  # System architecture: components, job engine, modes, update flow
+│   │   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
+│   │   ├── security.md      # Secrets threat model + mandatory leakage controls
+│   │   └── roadmap.md       # Build sequencing (what gets built first and why)
 │   ├── ui/
 │   │   ├── design-brief.md  # Screen inventory, reconciliation notes, data ledger
 │   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff

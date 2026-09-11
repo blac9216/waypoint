@@ -27,7 +27,7 @@ namespace Waypoint.Api.Controllers;
 /// and <c>GET /library/request-manifest</c> (air-gapped want-list export). Both are
 /// Viewer+ read endpoints, matching <see cref="CatalogController"/>'s gating -- the
 /// Library tab is browsable by anyone who can see the appliance, same reasoning
-/// (docs/domain-model.md open question 4). Deliberately reuses
+/// (docs/explanation/domain-model.md open question 4). Deliberately reuses
 /// <see cref="IDepotArtifactRepository"/> and <see cref="IApplianceStateRepository"/>
 /// rather than a new store; <see cref="LibraryPresenceEvaluator"/> owns the mode-aware
 /// projection logic so it stays unit-testable without Postgres.

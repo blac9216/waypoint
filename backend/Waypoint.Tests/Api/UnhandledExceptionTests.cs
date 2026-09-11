@@ -23,7 +23,7 @@ namespace Waypoint.Tests.Api;
 /// had no integration test. Two things matter about that arm and both are asserted
 /// here: it still answers with the documented envelope, and it never lets the
 /// underlying exception's message, type name, or stack trace reach the client
-/// (<c>docs/security.md</c> control 1 — a raw exception <c>.ToString()</c> is one of
+/// (<c>docs/explanation/security.md</c> control 1 — a raw exception <c>.ToString()</c> is one of
 /// the most common ways a connection string or file path ends up in an HTTP response).
 /// </summary>
 public sealed class UnhandledExceptionTests : IClassFixture<ThrowingApiFactory>

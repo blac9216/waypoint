@@ -257,7 +257,7 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 		Assert.Equal(credentialId, document.RootElement.GetProperty("credential_ref").GetGuid());
 
 		// No secret-shaped field appears anywhere in the response -- credential_ref is
-		// the only path to the credential, per docs/domain-model.md.
+		// the only path to the credential, per docs/explanation/domain-model.md.
 		string[] forbidden = ["password", "secret", "token", "private_key", "api_key"];
 		string bodyText = document.RootElement.ToString();
 		foreach (string key in forbidden)

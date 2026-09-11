@@ -152,7 +152,7 @@ public sealed class DownloadsController : ControllerBase
 	/// <summary>
 	/// Queue downloads for one or more indexed depot artifacts as a single run of N jobs.
 	/// Operator+, matching api-contract.md ("POST: artifact ids -> queued `download` jobs
-	/// (Operator+)") and docs/domain-model.md's Roles table ("Operator: Cyber + ...
+	/// (Operator+)") and docs/explanation/domain-model.md's Roles table ("Operator: Cyber + ...
 	/// download/catalog/content-library management"). Issue #30: this was Admin-gated as
 	/// an M1 stopgap before the Operator role existed (pre-RBAC); RBAC has now landed, so
 	/// it widens to the contract's documented floor. An unknown artifact id fails the
@@ -438,7 +438,7 @@ public sealed class DownloadsController : ControllerBase
 		// there is no separate "download URL" concept yet, so the handler receives a
 		// file:// URI under the configured depot path rather than an HTTP(S) endpoint.
 		// A future connected-mode "fetch from Broadcom depot" path would populate this
-		// differently; that is out of scope here (see docs/roadmap.md M1 vs later slices).
+		// differently; that is out of scope here (see docs/explanation/roadmap.md M1 vs later slices).
 		return artifact.ExternalId;
 	}
 }
