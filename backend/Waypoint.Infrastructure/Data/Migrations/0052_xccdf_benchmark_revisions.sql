@@ -1,7 +1,7 @@
 -- Issue #730 (epic #726 Wave 1): first-class ingestion, versioning, querying, and
 -- mapping of DISA XCCDF/STIG benchmarks to executable catalog components. ADR-0022
 -- ("Closed compliance catalog and atomic content lifecycle") is the governing
--- decision; docs/compliance-parity.md's closed capability vocabulary table is the
+-- decision; docs/explanation/compliance-parity.md's closed capability vocabulary table is the
 -- shape this schema represents.
 --
 -- Scope discipline (issue #730's own "will not fit one PR" split): this migration

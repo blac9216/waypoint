@@ -1,10 +1,12 @@
 # Compliance execution parity contract
 
+Kind: explanation
+
 Status: **planned architecture** for epic
 [#726](https://github.com/blac9216/waypoint/issues/726). The shipped scan-slice story (*Sites, credentials & STIG scan slice*) does
 not yet implement this contract. This document normalizes the project-owned sibling's
 supported scan behavior into Waypoint concepts; it neither copies sibling code/content
-nor makes that repository a dependency. [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md)
+nor makes that repository a dependency. [ADR-0022](../adr/0022-compliance-catalog-and-content-lifecycle.md)
 is the governing decision.
 
 ## Closed capability vocabulary

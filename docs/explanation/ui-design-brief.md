@@ -1,5 +1,7 @@
 # Waypoint — UI Design Brief
 
+Kind: explanation
+
 Status: active — this is the working input to the design phase. Update it as the design
 iterates; when screens stabilize, extract the **data ledger** (every element → its
 source: Postgres table / SSE stream / catalog / computed) into the API contract.
@@ -7,7 +9,7 @@ source: Postgres table / SSE stream / catalog / computed) into the API contract.
 ## Prototype (2026-08-02) and reconciliation
 
 A high-fidelity interactive prototype covering all nine screens lives in
-[`prototype/`](prototype/) — open `vcf-ops-console.dc.html` in a browser; its
+[`../ui/prototype/`](../ui/prototype/) — open `vcf-ops-console.dc.html` in a browser; its
 `README.md` is the design handoff (tokens, layout rules, per-screen specs).
 **Mockups are illustrative; `../explanation/domain-model.md` and the ADRs are normative** — on
 conflict, the domain model wins and the discrepancy gets logged. `../explanation/domain-model.md`
@@ -44,7 +46,7 @@ Fixes required in the next design iteration:
 ## 🚧 Download-domain screen IA (epic #16, issue #1035) — proposal, not yet approved
 
 Analogous to the compliance-domain reconciliation immediately below, but for the
-download domain: [`download-domain-ia.md`](download-domain-ia.md) is a **PROPOSAL**
+download domain: [`../ui/download-domain-ia.md`](../ui/download-domain-ia.md) is a **PROPOSAL**
 awaiting owner approval (decision R2-11 on epic #16) covering catalog browse/ad-hoc
 download, subscriptions/presets, per-lane store views (ESX patch store, Photon,
 VMware Tools, VKS dimensioned view), content-library per-type views + virtual

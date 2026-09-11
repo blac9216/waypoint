@@ -233,7 +233,7 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "nsx-01");
 
 		// Two un-narrowable vcf-api/service components on the same target. vcf-api
-		// carries no credential purpose yet (docs/compliance-parity.md: "authentication
+		// carries no credential purpose yet (docs/explanation/compliance-parity.md: "authentication
 		// is a catalog requirement whose final purpose is planned under #807"), so no
 		// requirement/binding is seeded for it -- this fixture exercises only the
 		// narrowing/fan-out boundary, not credential resolution.

@@ -17,7 +17,7 @@ namespace Waypoint.Tests.Parity;
 /// <summary>
 /// One documented component that a <see cref="CatalogParityRow"/> covers -- one
 /// vendor-content leaf profile with its expected derived catalog identity. A "capability
-/// group" row in docs/compliance-parity.md's provenance matrix (e.g. "vSphere 8-0 STIG,
+/// group" row in docs/explanation/compliance-parity.md's provenance matrix (e.g. "vSphere 8-0 STIG,
 /// vmware transport") often groups several distinct components (vCenter, ESXi, VM); each
 /// becomes its own <see cref="CatalogParityComponent"/> so the contract test asserts the
 /// full tuple for every one, not just a representative sample.
@@ -42,7 +42,7 @@ public sealed record CatalogParityComponent(
 }
 
 /// <summary>
-/// One row of docs/compliance-parity.md's "Sibling source-capability provenance matrix"
+/// One row of docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix"
 /// table, made machine-readable for <see cref="CatalogParityContractTests"/>. Field names
 /// mirror the matrix's own columns. <see cref="MatrixRowId"/> is a stable identifier used
 /// only by this test suite (never persisted, never catalog authority) so

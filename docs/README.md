@@ -24,9 +24,9 @@ remediation from the baseline audit, not done here.
 - [explanation/domain-model.md](explanation/domain-model.md) — sites, targets, credentials, runs, roles, open questions
 - [explanation/security.md](explanation/security.md) — secrets threat model and mandatory leakage controls
 - [explanation/roadmap.md](explanation/roadmap.md) — build sequencing: what gets built first and why
-- [compliance-parity.md](compliance-parity.md) — planned compliance execution parity contract (epic #726)
-- [compliance-content-shape-inventory.md](compliance-content-shape-inventory.md) — vendor-content parser shape inventory (issue #1077 guard)
-- [ui/design-brief.md](ui/design-brief.md) — screen inventory, reconciliation notes, data ledger
+- [explanation/compliance-parity.md](explanation/compliance-parity.md) — planned compliance execution parity contract (epic #726)
+- [explanation/compliance-content-shape-inventory.md](explanation/compliance-content-shape-inventory.md) — vendor-content parser shape inventory (issue #1077 guard)
+- [explanation/ui-design-brief.md](explanation/ui-design-brief.md) — screen inventory, reconciliation notes, data ledger
 
 ## Decisions and rationale
 - [Architecture Decision Records](adr/README.md) — read the index table first

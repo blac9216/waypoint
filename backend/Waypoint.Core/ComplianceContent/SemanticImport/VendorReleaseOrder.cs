@@ -19,7 +19,7 @@ namespace Waypoint.Core.ComplianceContent.SemanticImport;
 
 /// <summary>
 /// Parses and orders the two closed vendor release-directory forms observed across the
-/// documented family table (docs/compliance-parity.md): <c>V#R#[-stig|-srg]</c> (e.g.
+/// documented family table (docs/explanation/compliance-parity.md): <c>V#R#[-stig|-srg]</c> (e.g.
 /// <c>v2r3-stig</c>) and <c>Y##M##-srg</c> (e.g. <c>Y26M05-srg</c>). This is a pure,
 /// data-free parser/comparator -- no filesystem access, no catalog lookups -- consumed
 /// by <see cref="SemanticImportReconciler"/>'s newest-release-wins collision resolution
@@ -27,7 +27,7 @@ namespace Waypoint.Core.ComplianceContent.SemanticImport;
 ///
 /// Each vendor family in the provenance matrix uses exactly ONE of these two forms
 /// consistently (vSphere/VCSA/NSX/Photon/Aria/vIDM STIG releases are all <c>V#R#</c>;
-/// the 9.x/SRG generation is all <c>Y##M##-srg</c>) -- docs/compliance-parity.md never
+/// the 9.x/SRG generation is all <c>Y##M##-srg</c>) -- docs/explanation/compliance-parity.md never
 /// documents a family mixing both forms within one declared version scope. Whether a
 /// single scope could genuinely contain BOTH forms at once (e.g. a STIG-form and an
 /// SRG-form release side by side) is therefore a design hole rather than an answered
@@ -44,7 +44,7 @@ public static class VendorReleaseOrder
 	private static readonly Regex VFormPattern = new(@"^[vV](?<major>\d+)[rR](?<release>\d+)(?:-(?:stig|srg))?$", RegexOptions.Compiled);
 
 	// Y##M## followed by a mandatory -srg suffix (the only vendor generation observed
-	// using this form is SRG content; docs/compliance-parity.md never documents a
+	// using this form is SRG content; docs/explanation/compliance-parity.md never documents a
 	// Y##M##-stig release).
 	private static readonly Regex YFormPattern = new(@"^[yY](?<year>\d{2})[mM](?<month>\d{2})-srg$", RegexOptions.Compiled);
 

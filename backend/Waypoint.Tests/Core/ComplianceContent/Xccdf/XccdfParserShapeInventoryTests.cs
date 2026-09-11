@@ -21,7 +21,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.Xccdf;
 /// <summary>
 /// Issue #1099 (extending #1077's fixture-shape-blindness guard, PR #1098's first
 /// slice): every row of the "XccdfParser" section of
-/// <c>docs/compliance-content-shape-inventory.md</c> gets an invented fixture here and
+/// <c>docs/explanation/compliance-content-shape-inventory.md</c> gets an invented fixture here and
 /// an asserted expected result, and <see cref="InventoryIsComplete"/> ties this class's
 /// implemented shape IDs to that doc -- namespace/prefix variants and encoding-
 /// declaration handling, the dimension <see cref="XccdfParserTests"/> (issue #730) did

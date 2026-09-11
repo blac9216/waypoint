@@ -1,6 +1,6 @@
 -- Issue #977 (epic #726): widens migration 0050's
 -- catalog_credential_requirements_purpose_check CHECK constraint to admit the
--- 'vcf-api' credential purpose, and seeds the 13th (final) docs/compliance-parity.md
+-- 'vcf-api' credential purpose, and seeds the 13th (final) docs/explanation/compliance-parity.md
 -- provenance-matrix row -- VCF `9-x` SRG's `vcf-api` named-service row (SDDC Manager
 -- application, Automation application) -- which PR #973 (migration 0067) deliberately
 -- left unseeded because the CHECK constraint excluded 'vcf-api' pending issue #807.
@@ -80,7 +80,7 @@ JOIN catalog_content_releases cr ON cr.release_key = ep.release_key
 JOIN catalog_report_groups rg ON rg.group_key = 'srg'
 ON CONFLICT (component_id, content_release_id) DO NOTHING;
 
--- catalog_credential_requirements: docs/compliance-parity.md "Purpose" column for this
+-- catalog_credential_requirements: docs/explanation/compliance-parity.md "Purpose" column for this
 -- row reads "catalog-declared API purpose (#807)" -- ADR-0024 resolves that to the
 -- 'vcf-api' purpose this migration's CHECK widening just admitted. Every vcf-api
 -- transport component requires it, and only it (unlike the vSphere VCSA ssh row, VCF's

@@ -32,7 +32,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 /// rows and fixture class (PR #1208 round-1 review).
 /// <c>scripts/parser-shape-diff.sh</c> runs this once per ref (old and new) and diffs
 /// the two JSON files -- see that script and the "Real-content conformance and
-/// differential checks" section of <c>docs/compliance-content-shape-inventory.md</c>
+/// differential checks" section of <c>docs/explanation/compliance-content-shape-inventory.md</c>
 /// for why a differential over a synthetic corpus is a DIFFERENT property from
 /// real-content conformance, why a silent-miss fix needs both, and why neither can
 /// see a shape that is not already an inventory row.

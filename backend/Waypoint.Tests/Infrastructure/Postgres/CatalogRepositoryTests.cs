@@ -27,7 +27,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// Issue #728 (epic #726, Wave 1): the normalized compliance catalog schema and
 /// closed capability vocabulary, against a real PostgreSQL 16 container (migration
 /// 0050). Fixtures below are INVENTED and only shaped like the sibling
-/// <c>settings/catalog.json</c> rows documented in docs/compliance-parity.md's
+/// <c>settings/catalog.json</c> rows documented in docs/explanation/compliance-parity.md's
 /// "Sibling source-capability provenance matrix" -- they are not exported from any
 /// real system (CLAUDE.md sanitization policy).
 ///
@@ -85,7 +85,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 	[Fact]
 	public async Task FaithfullyRepresents_VSphere80Stig_WithNamedVcsaServiceComponents()
 	{
-		// Invented fixture shaped like docs/compliance-parity.md's "vSphere 8-0 / STIG /
+		// Invented fixture shaped like docs/explanation/compliance-parity.md's "vSphere 8-0 / STIG /
 		// v2r3-stig" rows: vmware-transport object-kind components (vCenter/ESXi/VM) plus
 		// ssh-transport named-VCSA-service components (EAM, PostgreSQL), all under one
 		// exact product version, each with its own execution profile, credential
@@ -364,7 +364,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 	[Fact]
 	public async Task WholeApplianceTargetSelector_RoundTripsWithNullSelectorName()
 	{
-		// Invented fixture shaped like docs/compliance-parity.md's "Aria Operations 8-x /
+		// Invented fixture shaped like docs/explanation/compliance-parity.md's "Aria Operations 8-x /
 		// SRG / v1r4-srg" whole-appliance row (`ssh / target`): the component IS the
 		// appliance reached over SSH, with NO fabricated sub-service identity -- exactly
 		// the "no lossy target-kind inference" the migration header and issue #728 AC

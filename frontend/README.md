@@ -2,7 +2,7 @@
 
 React + TypeScript PWA, static Vite build, zero external assets at build or
 runtime. See [ADR-0007](../docs/adr/0007-frontend.md), the
-[design brief](../docs/ui/design-brief.md), and the
+[design brief](../docs/explanation/ui-design-brief.md), and the
 [prototype handoff](../docs/how-to/ui-prototype.md) (design tokens, global
 chrome spec, layout rules) — this app implements that spec against React
 primitives, it does not port the prototype's markup.

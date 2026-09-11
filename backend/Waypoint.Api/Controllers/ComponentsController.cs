@@ -131,7 +131,7 @@ public sealed class ComponentsController : ControllerBase
 		}
 
 		// Fail-closed catalog validation: the declared key must exist as a top-level
-		// catalog component in the closed ssh/target shape (docs/compliance-parity.md's
+		// catalog component in the closed ssh/target shape (docs/explanation/compliance-parity.md's
 		// "ssh / target" rows). Selection is by the closed transport/selector vocabulary,
 		// never a product-name list, so a future catalog-added ssh/target product needs
 		// no code change here.

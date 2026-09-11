@@ -46,7 +46,7 @@ namespace Waypoint.Tests.Parity;
 /// does not replace either.
 ///
 /// All product-version keys, component keys, and vendor/host identifiers below are
-/// INVENTED for this test suite -- shaped like docs/compliance-parity.md's rows, never
+/// INVENTED for this test suite -- shaped like docs/explanation/compliance-parity.md's rows, never
 /// exported from any real system or the sibling repository (CLAUDE.md sanitization
 /// policy).
 /// </summary>
@@ -188,7 +188,7 @@ public static class ExecutionDerivationMatrix
 
 			// NSX 4-x STIG / nsx-api transport / named function selector: NSX-shaped
 			// command (Invoke-WaypointNsxScan), SelectorName carried for
-			// logging/diagnostics only (docs/compliance-parity.md "NSX ... named
+			// logging/diagnostics only (docs/explanation/compliance-parity.md "NSX ... named
 			// function"), credential purpose nsx-api.
 			new ExecutionParityRow(
 				MatrixRowId: "nsx-4-x-stig-service",

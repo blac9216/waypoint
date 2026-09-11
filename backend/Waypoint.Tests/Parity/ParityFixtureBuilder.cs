@@ -37,7 +37,7 @@ public static class ParityFixtureBuilder
 	/// Builds one <see cref="VendorContentEntry"/> per documented leaf component for one
 	/// matrix row. Deliberately does NOT also synthesize the split-family aggregate
 	/// profile at the bare baseline directory: this suite's contract is leaf-component
-	/// derivation (docs/compliance-parity.md's per-component columns), and
+	/// derivation (docs/explanation/compliance-parity.md's per-component columns), and
 	/// <c>VendorHierarchyInterpreter.BuildNamedSplit</c>'s aggregate candidate for
 	/// named-service-split families (VCSA/NSX) carries <c>selector_kind = service</c>
 	/// with a null <c>selector_name</c> -- vocabulary-invalid per

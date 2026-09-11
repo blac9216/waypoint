@@ -39,21 +39,21 @@ namespace Waypoint.Core.Scans;
 ///   (InSpec vmware train scoped to that vCenter / ESXi host / VM via input file).</description></item>
 /// <item><description><c>ssh</c> / <c>service</c> -- NARROWED (issue #741): a named VCSA
 ///   OS-level service (Envoy, PostgreSQL, VAMI, STS, UI, EAM, Photon, ...), per
-///   docs/compliance-parity.md's "ssh / named VCSA service" rows. Each named service is
+///   docs/explanation/compliance-parity.md's "ssh / named VCSA service" rows. Each named service is
 ///   its own leaf profile/benchmark with its own job, executed over the owning
 ///   appliance's ssh transport with its own attribution -- there is no vmware-train
 ///   object selector for these; "narrowed" means one job per named service rather than
 ///   one whole-appliance scan covering every service at once.</description></item>
 /// <item><description><c>ssh</c> / <c>target</c> -- NARROWED (issue #743): a whole-
 ///   appliance SSH product (Photon OS, Aria Operations/Automation/Suite Lifecycle,
-///   Workspace ONE Access, ...), per docs/compliance-parity.md's "ssh / target" rows. The
+///   Workspace ONE Access, ...), per docs/explanation/compliance-parity.md's "ssh / target" rows. The
 ///   component IS the appliance, so narrowing here means one job per catalog component
 ///   on that transport (never collapsing two independent appliance products behind one
 ///   representative job).</description></item>
 /// <item><description><c>nsx-api</c> / <c>service</c> -- NARROWED (issue #742, the
 ///   epic's final Wave 3 transport): a named NSX functional component (Manager,
 ///   distributed firewall, tier-0/tier-1 firewall/router, and any newer set the
-///   activated catalog/release adds), per docs/compliance-parity.md's "NSX ... named
+///   activated catalog/release adds), per docs/explanation/compliance-parity.md's "NSX ... named
 ///   function" rows. Each component is its own leaf profile/benchmark (or SRG closure
 ///   for the VCF 9.x NSX baselines) with its own job, executed over the manager's
 ///   nsx-api transport with its own attribution -- there is no whole-Manager object

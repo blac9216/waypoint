@@ -23,7 +23,7 @@ namespace Waypoint.Tests.Core.ComplianceContent;
 /// Class-killing guard for issue #1012's own defect class (the same idiom
 /// <c>LayoutTableParityTests</c>/<c>ExecutionCatalogSeedDriftGuardTests</c> already
 /// establish for the importer/seed shape tables): this test parses
-/// docs/compliance-parity.md's "Sibling source-capability provenance matrix" Purpose
+/// docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix" Purpose
 /// column directly and proves, for every documented (product family, transport,
 /// selector kind) row, that <see cref="CredentialRequirementDerivation.DeriveRequiredPurposes"/>
 /// -- the ingest-time rule <see cref="CatalogRepository.PromoteCandidateAsync"/> now
@@ -41,7 +41,7 @@ public sealed class CredentialRequirementDerivationDriftGuardTests
 	/// <summary>
 	/// Maps the doc's "Sibling product/version key" leading product name to the
 	/// <c>VendorFamily</c>/<c>catalog_products.product_key</c> literal the importer and
-	/// seed migrations both use for that family (docs/compliance-parity.md's own
+	/// seed migrations both use for that family (docs/explanation/compliance-parity.md's own
 	/// "Recognized on-disk import layouts" table + migrations 0064/0067/0069's
 	/// product_key literals are the source for this mapping).
 	/// </summary>
@@ -176,9 +176,9 @@ public sealed class CredentialRequirementDerivationDriftGuardTests
 
 	private static List<ProvenanceRow> ParseProvenanceRows()
 	{
-		string doc = ReadRepoFile("docs", "compliance-parity.md");
+		string doc = ReadRepoFile("docs", "explanation", "compliance-parity.md");
 		int sectionStart = doc.IndexOf("## Sibling source-capability provenance matrix", StringComparison.Ordinal);
-		Assert.True(sectionStart >= 0, "docs/compliance-parity.md is missing the provenance matrix section this guard parses.");
+		Assert.True(sectionStart >= 0, "docs/explanation/compliance-parity.md is missing the provenance matrix section this guard parses.");
 		int sectionEnd = doc.IndexOf("\n## ", sectionStart + 1, StringComparison.Ordinal);
 		string section = sectionEnd >= 0 ? doc[sectionStart..sectionEnd] : doc[sectionStart..];
 

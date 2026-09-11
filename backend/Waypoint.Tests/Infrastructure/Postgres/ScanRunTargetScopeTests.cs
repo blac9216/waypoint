@@ -333,7 +333,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 	/// <c>no_plannable_component</c>). SRG (no benchmark reference) keeps this fixture
 	/// minimal; the STIG/benchmark-mapping paths are covered by
 	/// <c>ScanPlannerServiceTests</c>. Issue #1012: carries the real <c>vsphere-api</c>
-	/// requirement a vmware-transport component always has per docs/compliance-parity.md
+	/// requirement a vmware-transport component always has per docs/explanation/compliance-parity.md
 	/// (see <c>RunPlanPreviewTests.SeedCompatibleCatalogComponentAsync</c>'s identical
 	/// remark) -- without it, ScanPlannerService's own defense-in-depth would skip this
 	/// fixture's plan item instead of exercising this file's actual target-scope-shape

@@ -66,7 +66,7 @@ namespace Waypoint.Tests.Parity;
 /// directly rather than through a log-line substring.
 ///
 /// All product-version keys, component keys, and vendor/host identifiers below are
-/// INVENTED for this test suite -- shaped like docs/compliance-parity.md's rows, never
+/// INVENTED for this test suite -- shaped like docs/explanation/compliance-parity.md's rows, never
 /// exported from any real system or the sibling repository (CLAUDE.md sanitization
 /// policy).
 /// </summary>
@@ -421,7 +421,7 @@ public sealed class ExecutionParityContractTests : IAsyncLifetime, IDisposable
 			Assert.Contains(profileKey, profilePath, StringComparison.Ordinal);
 			Assert.DoesNotContain("/invented/profile/path", profilePath, StringComparison.Ordinal);
 
-			// Output kind determines the terminal state (docs/compliance-parity.md's own
+			// Output kind determines the terminal state (docs/explanation/compliance-parity.md's own
 			// Output column / ADR-0022): hdf_ckl (STIG) completes the FULL pipeline
 			// through STIG Manager upload attribution ('uploaded'); hdf (SRG) terminates
 			// at 'done' right after attest, never reaching convert/CKL/upload (issue
@@ -620,7 +620,7 @@ public sealed class ExecutionParityContractTests : IAsyncLifetime, IDisposable
 
 	/// <summary>
 	/// Independent MutationGuard (output kind): proves the matrix's own OutputKind
-	/// claims match docs/compliance-parity.md's Output column verbatim for the STIG vs.
+	/// claims match docs/explanation/compliance-parity.md's Output column verbatim for the STIG vs.
 	/// SRG rows this slice covers -- an accidental swap (e.g. giving the vidm SRG row
 	/// <c>hdf_ckl</c>) would be caught here without running the Postgres-backed theory.
 	/// </summary>
@@ -726,7 +726,7 @@ public sealed class ExecutionParityContractTests : IAsyncLifetime, IDisposable
 		if (row.Transport == CatalogTransports.Ssh && row.SelectorKind == CatalogSelectorKinds.Service)
 		{
 			// VCSA service: owning target is vsphere-kind (vsphere-api), plus a
-			// separately-bound vcsa-ssh credential -- matching docs/compliance-parity.md's
+			// separately-bound vcsa-ssh credential -- matching docs/explanation/compliance-parity.md's
 			// "ssh / named VCSA service" row's dual-purpose shape.
 			Guid vsphereCredentialId = (await _credentials.CreateAsync(
 				$"svc-scan-{Guid.NewGuid():N}@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None, "administrator@example.internal"))!.Value;

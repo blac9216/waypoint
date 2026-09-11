@@ -23,12 +23,12 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 /// Issue #1099 (extending #1077 to the leaf-manifest dimension of
 /// <see cref="VendorHierarchyInterpreter"/>): <c>LayoutTableParityTests</c> (issue
 /// #959) already guards this interpreter's PATH/layout dimension against
-/// docs/compliance-parity.md's provenance matrix; this class guards the orthogonal
+/// docs/explanation/compliance-parity.md's provenance matrix; this class guards the orthogonal
 /// "how a classified path's PARSED manifest becomes a
 /// <see cref="SemanticCandidate"/>'s fields" dimension -- display-name fallback,
 /// aggregate/leaf disposition, and pass-through/derived fields -- against the
 /// "VendorHierarchyInterpreter leaf-manifest dimension" section of
-/// docs/compliance-content-shape-inventory.md. No real vendor content, path, or
+/// docs/explanation/compliance-content-shape-inventory.md. No real vendor content, path, or
 /// manifest appears anywhere in this file -- every fixture is invented.
 /// </summary>
 public sealed class VendorHierarchyInterpreterLeafManifestShapeInventoryTests

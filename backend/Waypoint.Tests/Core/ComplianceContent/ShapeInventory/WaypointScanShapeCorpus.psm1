@@ -15,7 +15,7 @@
 # Issue #1099's PowerShell-side shape inventory corpus for
 # Get-WaypointProfileDeclaredInputNameSet (WaypointScan.psm1) -- the single source of
 # truth this module exports, mirroring the C# *ShapeInventoryTests classes'
-# ShapeExpectations table pattern (docs/compliance-content-shape-inventory.md).
+# ShapeExpectations table pattern (docs/explanation/compliance-content-shape-inventory.md).
 # Both WaypointScan.ShapeInventory.Tests.ps1 (Pester) and
 # scripts/dump-waypoint-scan-shape-verdicts.ps1 (the differential harness's PS side)
 # import THIS module rather than duplicating the fixture/expectation list, so the two
@@ -36,7 +36,7 @@ $script:DependsOnlyName = 'some_other_profile'
 $script:HashInQuotedName = 'nsx#manager_address'
 
 # One row per documented shape ID, in the order
-# docs/compliance-content-shape-inventory.md documents them under the
+# docs/explanation/compliance-content-shape-inventory.md documents them under the
 # "Get-WaypointProfileDeclaredInputNameSet" heading. `Kind` selects which assertion
 # applies:
 #   'declared'        -- $script:TargetName must be a member of the returned set.

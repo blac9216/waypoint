@@ -570,7 +570,7 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	/// <summary>
 	/// Mirrors <see cref="ScanRunTargetScopeTests.SeedCompatibleCatalogComponentAsync"/>
 	/// -- SRG chain. Issue #1012: a vmware-transport component always requires
-	/// <c>vsphere-api</c> per docs/compliance-parity.md's provenance matrix (the exact
+	/// <c>vsphere-api</c> per docs/explanation/compliance-parity.md's provenance matrix (the exact
 	/// purpose <see cref="Waypoint.Core.ComplianceContent.CredentialRequirementDerivation"/>
 	/// now derives for this shape at real promotion time) -- ScanPlannerService's own
 	/// issue #1012 defense-in-depth would otherwise skip this fixture's plan item as

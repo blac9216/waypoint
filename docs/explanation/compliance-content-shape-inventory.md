@@ -1,5 +1,7 @@
 # Vendor-content parser shape inventory
 
+Kind: explanation
+
 Status: **guard for issue [#1077](https://github.com/blac9216/waypoint/issues/1077)**'s
 fixture-shape-blindness defect class -- three instances landed in one session (issues
 #1073, #1071, and #1071's own fix) because a parser was validated only against the
@@ -17,7 +19,7 @@ which:
    documented row here. A row added here with no fixture, or a fixture added with no
    row here, fails the build -- the two cannot silently drift apart the way the
    layout table and `VendorHierarchyInterpreter` did before issue #959 (see
-   `docs/compliance-parity.md`'s "Recognized on-disk import layouts", the pattern this
+   `docs/explanation/compliance-parity.md`'s "Recognized on-disk import layouts", the pattern this
    document generalizes).
 
 The `Get-WaypointProfileDeclaredInputNameSet` section is a different mechanism, because
@@ -310,7 +312,7 @@ vendor/DISA content appears anywhere in this file.
 
 `LayoutTableParityTests` (issue #959) already guards this interpreter's PATH/layout
 dimension -- which family/component a directory shape resolves to -- against
-`docs/compliance-parity.md`'s provenance matrix. This section (issue #1099) guards the
+`docs/explanation/compliance-parity.md`'s provenance matrix. This section (issue #1099) guards the
 orthogonal dimension: how the interpreter turns an already-classified path's PARSED
 `inspec.yml` manifest and entry metadata into a `SemanticCandidate`'s fields --
 display-name fallback, aggregate-vs-leaf disposition, and pass-through/derived fields.

@@ -1,6 +1,6 @@
 -- Issue #1080 (epic #726), live validation round 11 finding: migration 0070 reconciled
 -- the vSphere 9.x product-version seed to key '9.0' with key form 'exact' -- but that
--- was itself wrong. docs/compliance-parity.md's provenance matrix said "vSphere 9.0 /
+-- was itself wrong. docs/explanation/compliance-parity.md's provenance matrix said "vSphere 9.0 /
 -- exact" because it modeled a top-level `vsphere/9.0/` vendor directory that does not
 -- exist: issue #1079 (this same round) proved upstream `master` has NO top-level
 -- `vsphere/9.0` tree at all -- the 9.x vSphere/vCenter/ESXi/VM/VCSA content lives under

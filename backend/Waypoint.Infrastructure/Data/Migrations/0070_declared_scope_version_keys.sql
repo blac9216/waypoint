@@ -15,7 +15,7 @@
 -- with keys that predate this decision -- some patch-level ("8.0.3"), some already an
 -- invented-but-still-wrong exact triple ("9.0.0", "4.1.2", "8.0.0", "3.3.0"). This
 -- migration reconciles every one of them to the declared-scope verbatim form the
--- docs/compliance-parity.md provenance matrix documents for that row (this same PR
+-- docs/explanation/compliance-parity.md provenance matrix documents for that row (this same PR
 -- updates the doc's provenance-matrix key-form column to match -- see that file's own
 -- diff for the authoritative mapping). Shipped migrations are IMMUTABLE (0064/0067/0069
 -- are never edited in place); this is a NEW, idempotent, FK-preserving migration.

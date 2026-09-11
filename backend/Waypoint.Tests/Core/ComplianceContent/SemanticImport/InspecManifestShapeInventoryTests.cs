@@ -21,7 +21,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 /// <summary>
 /// Issue #1077 class-killing guard for <see cref="InspecManifestParser"/>: every row
 /// of the "InspecManifestParser" section of
-/// <c>docs/compliance-content-shape-inventory.md</c> gets an invented fixture here
+/// <c>docs/explanation/compliance-content-shape-inventory.md</c> gets an invented fixture here
 /// (<see cref="BuildYaml"/>) and an asserted expected result, and
 /// <see cref="InventoryIsComplete"/> ties this class's implemented shape IDs to that
 /// doc so the two cannot silently drift apart (the same failure mode issue #959 fixed

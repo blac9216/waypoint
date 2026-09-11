@@ -109,9 +109,9 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 │   │   ├── architecture.md  # System architecture: components, job engine, modes, update flow
 │   │   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
 │   │   ├── security.md      # Secrets threat model + mandatory leakage controls
-│   │   └── roadmap.md       # Build sequencing (what gets built first and why)
+│   │   ├── roadmap.md       # Build sequencing (what gets built first and why)
+│   │   └── ui-design-brief.md  # Screen inventory, reconciliation notes, data ledger
 │   ├── ui/
-│   │   ├── design-brief.md  # Screen inventory, reconciliation notes, data ledger
 │   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff
 │   └── adr/             # Architecture Decision Records (numbered, immutable once accepted)
 ├── backend/             # today: combined API/worker; target: API + shared runner + two runner hosts (ADRs 0013/0014)

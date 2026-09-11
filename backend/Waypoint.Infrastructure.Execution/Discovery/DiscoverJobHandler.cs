@@ -627,7 +627,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// Issue #1081: the ESXi component fact previously kept only ExactVersion
 				// and silently dropped the Build discovery DID observe (retained on the
 				// inventory_items row but never carried onto the component fact) --
-				// docs/compliance-parity.md's "hosts store exactly two facts" now holds on
+				// docs/explanation/compliance-parity.md's "hosts store exactly two facts" now holds on
 				// both sides. Issue #1063: a VM's Build is derived alongside ExactVersion
 				// from the same parent fact, never from the VM's own (never-populated)
 				// Build field.
