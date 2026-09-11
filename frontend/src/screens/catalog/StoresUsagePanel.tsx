@@ -1,5 +1,5 @@
 /**
- * LOCAL STORES usage widget — docs/ui/prototype/README.md screen 6 right
+ * LOCAL STORES usage widget — docs/how-to/ui-prototype.md screen 6 right
  * rail: "LOCAL STORES (depot mirror / content library / photon repo with
  * usage bars)". Bound to `GET /system`'s disk-usage-by-store fields
  * (api-contract.md "System, users, audit"). Issue #226 is landing those

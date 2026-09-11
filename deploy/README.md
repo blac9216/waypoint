@@ -108,7 +108,7 @@ Secrets, TLS, and a self-contained override are written entirely under
 `deploy/.generated/<slug>/` — never `deploy/config/` or
 `compose.override.yaml` — after checking for port/subnet/project collisions
 against what's already running, and the command prints the exact `up`/`down`
-lines to paste next. See [`docs/testing.md`](../docs/testing.md) for the full
+lines to paste next. See [`docs/how-to/testing.md`](../docs/how-to/testing.md) for the full
 isolation recipe concurrent agents/humans need on one host.
 
 ## Var reference
@@ -175,7 +175,7 @@ docker compose -p waypoint -f compose.yaml -f compose.override.yaml --env-file .
 Find the host-side path with `docker inspect "$(hostname)" --format
 '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'` and match
 the entry whose destination is your workspace mount — see
-[`docs/testing.md`](../docs/testing.md) "Devcontainer bind mounts" for the
+[`docs/how-to/testing.md`](../docs/how-to/testing.md) "Devcontainer bind mounts" for the
 full explanation. `-f`/`--env-file` stay relative to the shell you're in;
 give `--project-directory` only to `up` — passing the host path to `build`
 makes the client resolve build contexts it cannot read.

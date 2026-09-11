@@ -1,6 +1,6 @@
 /**
- * Config → Credentials tab (issue #247, epic #13) — docs/ui/prototype
- * README "Credentials" panel (name, owner, type, used-by count, rotation
+ * Config → Credentials tab (issue #247, epic #13) — docs/how-to/
+ * ui-prototype.md "Credentials" panel (name, owner, type, used-by count, rotation
  * date, status pill), against the #20 backend (`CredentialsController`,
  * PR #267 added `username`). ADR-0011: shared/service credentials only —
  * there is no personal-credential row, form field, or filter anywhere in

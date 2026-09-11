@@ -1,5 +1,5 @@
 /**
- * Compliance Scan Results — docs/ui/prototype/README.md screen 4, the last
+ * Compliance Scan Results — docs/how-to/ui-prototype.md screen 4, the last
  * screen of milestone M2 (issue #27, part of epic #13). Renamed from
  * "Results & History" and filtered to compliance-owned run types only
  * (issue #591, ADR-0019: non-compliance run types route to their own domain

@@ -451,7 +451,7 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
 		{
 			// POSIX-permission-shaped trick, same skip PurgeJobHandlerTests uses --
-			// this repo's CI targets Linux containers (deploy/*, docs/testing.md).
+			// this repo's CI targets Linux containers (deploy/*, docs/how-to/testing.md).
 			return;
 		}
 

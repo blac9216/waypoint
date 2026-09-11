@@ -13,7 +13,8 @@ remediation from the baseline audit, not done here.
 (none yet)
 
 ## How-to — task recipes
-- [testing.md](testing.md) — bring-up, isolation, and the test commands this repo runs
+- [how-to/testing.md](how-to/testing.md) — bring-up, isolation, and the test commands this repo runs
+- [how-to/ui-prototype.md](how-to/ui-prototype.md) — UI prototype handoff and per-screen visual/interaction reference
 
 ## Reference — facts and contracts
 - [api-contract.md](api-contract.md) — REST resources, SSE events, state machines, schema, data ledger

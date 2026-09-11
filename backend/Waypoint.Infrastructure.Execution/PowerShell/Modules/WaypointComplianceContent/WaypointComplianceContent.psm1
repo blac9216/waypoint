@@ -42,7 +42,7 @@
 # Test-WaypointInspecCheck below). CI/unit tests instead drive an invented stub script
 # that mirrors `inspec check`'s publicly documented CLI contract (exit 0 on a
 # structurally valid profile, non-zero + JSON diagnostics otherwise), the same
-# "faithful argument contract, invented content" discipline docs/testing.md's VCFDT
+# "faithful argument contract, invented content" discipline docs/how-to/testing.md's VCFDT
 # section establishes for a different (licensed) tool. Execution is bounded: a wall-
 # clock timeout and a captured-output size cap (issue #729 AC "bounded runner work") so
 # one hung or pathological profile cannot stall or memory-balloon the whole content-pull
@@ -300,7 +300,7 @@ function Test-WaypointInspecCheck {
 	    --format json` against one executable-leaf-candidate profile directory and
 	    returns whether the real (or CI-stubbed) tool considers the profile
 	    structurally valid. This is a thin CLI wrapper, not a parser of InSpec's own
-	    internals -- mirrors this repo's VCFDT stub convention (docs/testing.md "CI
+	    internals -- mirrors this repo's VCFDT stub convention (docs/how-to/testing.md "CI
 	    stubs vs live-lab validation") for the argument-contract-fidelity discipline,
 	    though InSpec/cinc-auditor itself is not a licensed/account-gated tool, so the
 	    REAL binary is used directly wherever the image provides one

@@ -602,7 +602,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
 		{
 			// Same POSIX-permission-shaped skip as PurgeJobHandlerTests -- this repo's
-			// CI targets Linux containers (deploy/*, docs/testing.md).
+			// CI targets Linux containers (deploy/*, docs/how-to/testing.md).
 			return;
 		}
 

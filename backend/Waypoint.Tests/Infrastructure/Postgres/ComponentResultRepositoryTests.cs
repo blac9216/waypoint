@@ -239,7 +239,7 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 		Assert.Equal(1, row.ComponentCount);
 	}
 
-	/// <summary>Aggregation truthfulness against a seeded MULTI-component run: reconciles exactly to what was recorded, across every status bucket -- not just a single-component happy path (docs/testing.md fixture-monoculture guard).</summary>
+	/// <summary>Aggregation truthfulness against a seeded MULTI-component run: reconciles exactly to what was recorded, across every status bucket -- not just a single-component happy path (docs/how-to/testing.md fixture-monoculture guard).</summary>
 	[Fact]
 	public async Task GetRunRollupAsync_ReconcilesExactlyAcrossMultipleComponentsAndStatuses()
 	{

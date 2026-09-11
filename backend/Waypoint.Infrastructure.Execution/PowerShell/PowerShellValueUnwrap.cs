@@ -40,7 +40,7 @@ namespace Waypoint.Infrastructure.PowerShell;
 /// pre-#972 tests (constructing <see cref="PSNoteProperty"/> values directly in C#,
 /// or a PowerShell literal string) never caught it: they never round-tripped a real
 /// cmdlet's own wrapped output through a nested property (fixture-monoculture,
-/// docs/testing.md).
+/// docs/how-to/testing.md).
 /// </summary>
 public static class PowerShellValueUnwrap
 {

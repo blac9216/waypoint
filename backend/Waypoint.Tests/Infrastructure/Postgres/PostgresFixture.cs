@@ -22,9 +22,9 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Starts a real, disposable PostgreSQL 16 container for the schema/queue-concurrency
-/// tests (issue #4) — no in-memory or fake provider, per docs/testing.md's "don't
+/// tests (issue #4) — no in-memory or fake provider, per docs/how-to/testing.md's "don't
 /// substitute away a tool that is actually available" rule (docker is available in
-/// this sandbox). Isolated per docs/testing.md's recipe: a container name unique per
+/// this sandbox). Isolated per docs/how-to/testing.md's recipe: a container name unique per
 /// test run and a dynamically reserved host port, so this never collides with the
 /// shared <c>deploy/compose.yaml</c> stack (fixed container names,
 /// <c>waypoint-postgres</c>) or another agent's ad hoc container. Removed with
@@ -62,7 +62,7 @@ public sealed class PostgresFixture : IAsyncLifetime
 			// can be unreachable in both directions (inter-bridge isolation + host DNAT),
 			// so join the given network and dial the container's own address on 5432 —
 			// a unique IP per container, so concurrent test runs on one host cannot
-			// collide. See docs/testing.md.
+			// collide. See docs/how-to/testing.md.
 			await RunDockerAsync(
 				"run", "-d", "--name", _containerName,
 				"-e", "POSTGRES_USER=waypoint_test",

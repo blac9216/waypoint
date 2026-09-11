@@ -1,5 +1,5 @@
 /**
- * SITES sidebar — docs/ui/prototype/README.md "Sidebar lists sites with
+ * SITES sidebar — docs/how-to/ui-prototype.md "Sidebar lists sites with
  * target counts and their STIG Manager binding (inherit or override)." Also
  * carries the site-level create/edit/delete forms (not in the static
  * prototype, which only mocks reads) since #237's acceptance criteria

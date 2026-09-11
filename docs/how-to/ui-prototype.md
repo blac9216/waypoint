@@ -1,10 +1,12 @@
 # Handoff: Waypoint — DoD VCF Toolkit (on-prem compliance & depot appliance)
 
+Kind: how-to
+
 > **Reference status (epic #726).** This prototype and its per-screen specs below
 > remain valuable **visual and interaction reference** — tokens, density, layout
 > mechanics, and general screen shape are still good defaults. For the compliance
 > screens (Live Jobs scan detail, Start a Scan, Compliance Results, Benchmarks),
-> **domain semantics are authoritative in [`../design-brief.md`](../design-brief.md)
+> **domain semantics are authoritative in [`../design-brief.md`](../ui/design-brief.md)
 > and the ADRs it links (0022–0025), not here.** Where a compliance-screen spec below
 > describes profile selection, one job per target, or a whole-profile config
 > document, that description is superseded by `../design-brief.md`'s reconciled

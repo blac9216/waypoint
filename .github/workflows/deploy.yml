@@ -13,7 +13,7 @@ name: deploy
 # This validates the shipped compose/nginx configuration statically — it
 # does NOT bring the stack up (no depot token, no dev/local/ material is
 # available in CI, and the full compose bring-up is out of scope for this
-# PR per the issue's "stack" job — see docs/testing.md).
+# PR per the issue's "stack" job — see docs/how-to/testing.md).
 on:
   pull_request:
   push:

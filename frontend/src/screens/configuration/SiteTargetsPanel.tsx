@@ -1,6 +1,6 @@
 /**
  * One site's target table + the create/edit forms for its targets — the
- * "TARGETS" panel from docs/ui/prototype/README.md's Sites & Targets tab
+ * "TARGETS" panel from docs/how-to/ui-prototype.md's Sites & Targets tab
  * (target 32% / kind 16% / credential 18% / discovery 17% / last refreshed
  * 17%, `table-layout:fixed`). Mutations are Admin-only; a lower role still
  * sees every button, just disabled with a reason (roles.ts `roleGateProps`

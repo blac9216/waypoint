@@ -42,7 +42,7 @@ namespace Waypoint.Tests.Parity;
 /// needing a real InSpec binary or a real vCenter/NSX Manager/ssh host. Live wrapper
 /// execution against the real shipped PowerShell modules remains
 /// <c>ScanJobHandlerEndToEndTests</c>' own scope (stub-module Write-Information echoing)
-/// plus the owner-run live-lab acceptance pass documented in docs/testing.md; this suite
+/// plus the owner-run live-lab acceptance pass documented in docs/how-to/testing.md; this suite
 /// does not replace either.
 ///
 /// All product-version keys, component keys, and vendor/host identifiers below are
@@ -81,7 +81,7 @@ public static class ExecutionDerivationMatrix
 			"ssh/target fixture would duplicate the SAME command-construction assertions this " +
 			"suite already runs for vidm-3-3-x-srg without proving anything new about invocation " +
 			"shape. Live acceptance against the real Aria Operations wrapper remains an " +
-			"owner-run docs/testing.md step, same as every product this repo cannot install.",
+			"owner-run docs/how-to/testing.md step, same as every product this repo cannot install.",
 		["aria-automation-8-x-srg"] =
 			"Same rationale as 'aria-operations-8-x-srg' above -- ssh/target command " +
 			"construction is transport/selector-driven, not vendor-driven, and is already " +
@@ -122,7 +122,7 @@ public static class ExecutionDerivationMatrix
 			"proven by this matrix's 'nsx-4-x-stig-service' row; the SRG sibling changes only " +
 			"OutputKind. (Also note NSX 9.x additionally carries the #917-gated auth leg for " +
 			"real live-lab validation, which is owner-live-only for a DIFFERENT, deeper reason " +
-			"than this row's command-construction shape -- see docs/testing.md's VCFDT/live-lab " +
+			"than this row's command-construction shape -- see docs/how-to/testing.md's VCFDT/live-lab " +
 			"discipline; this allow-list entry is about command-construction duplication only.)",
 	};
 

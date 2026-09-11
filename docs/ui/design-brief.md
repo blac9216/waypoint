@@ -65,7 +65,7 @@ per-control settings (ADRs [0022](../adr/0022-compliance-catalog-and-content-lif
 issue #785). The subsections below are the reconciled information architecture —
 **domain behavior and entity/action vocabulary, not a pixel spec.** The prototype
 remains useful reference for visual density, tokens, and layout mechanics (see
-[`prototype/README.md`](prototype/README.md)); its per-screen behavioral specifics
+[`ui-prototype.md`](../how-to/ui-prototype.md)); its per-screen behavioral specifics
 that assume the old model (a profile picker, one job per target, a single
 mutable config document) are superseded by this section and by the 🚧-marked notes
 inline in the Screens list below. Every 🚧 marker in this document follows the
@@ -294,7 +294,7 @@ Roles table, never widens it)
 
 Every gated action follows the existing **visible-with-disabled-reason** treatment
 (`opacity: 0.42`, explanatory `title`) already established under Roles &
-Permissions in `prototype/README.md` — a role that cannot act still sees the
+Permissions in `../how-to/ui-prototype.md` — a role that cannot act still sees the
 control and the reason, it is never silently hidden. This is distinct from
 mode-gating (air-gapped genuinely removes the Download Catalog nav item because
 the feature does not exist): every RBAC gate above is a permission gap, not a

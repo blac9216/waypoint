@@ -14,7 +14,7 @@
  *      catches.
  *
  * Both need two guards side by side over one corpus, which is awkward to paste
- * into a PR body and easy for GitHub to mangle on the way in (docs/testing.md,
+ * into a PR body and easy for GitHub to mangle on the way in (docs/how-to/testing.md,
  * "Honest verification" rule 3). So it lives here and a reviewer runs it.
  *
  * Usage:

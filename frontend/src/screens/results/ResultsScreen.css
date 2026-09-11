@@ -310,7 +310,7 @@
 }
 
 /* --- Artifacts table ---
-   Layout rules 1-4 (docs/ui/prototype/README.md "Layout Rules Learned the
+   Layout rules 1-4 (docs/how-to/ui-prototype.md "Layout Rules Learned the
    Hard Way"): table-layout:fixed with percentage columns summing to 100%;
    no column narrower than its own padding; nowrap cells get overflow:hidden
    on the td so content doesn't paint over the next column; the severity

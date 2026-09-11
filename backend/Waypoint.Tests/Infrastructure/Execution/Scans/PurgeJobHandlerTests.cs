@@ -279,7 +279,7 @@ public sealed class PurgeJobHandlerTests : IDisposable
 			// File permission semantics differ enough on Windows CI that this
 			// scenario is skipped there -- the read-only-attribute trick below is
 			// POSIX-file-permission-shaped and this repo's CI targets Linux
-			// containers (deploy/*, docs/testing.md).
+			// containers (deploy/*, docs/how-to/testing.md).
 			return;
 		}
 

@@ -1,5 +1,5 @@
 /**
- * Configuration screen shell — docs/ui/prototype/README.md "9. Configuration
+ * Configuration screen shell — docs/how-to/ui-prototype.md "9. Configuration
  * — Six tabs." Issue #237 (split into #256/#257/#258 after PR #255 was too
  * large to review) implemented the first tab (Sites & Targets); issue #247
  * added the second (Credentials); issue #40 adds the fourth (Compliance

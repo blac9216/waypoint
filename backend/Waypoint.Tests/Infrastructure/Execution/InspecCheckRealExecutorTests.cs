@@ -37,7 +37,7 @@ namespace Waypoint.Tests.Infrastructure.Execution;
 /// in-process SMA host that broke on main -- PR #975's real-executor pattern), against an
 /// invented stub "inspec" executable (a throwaway shell script, faithful only to the
 /// `inspec check &lt;path&gt; --format json` argument contract and exit-code convention,
-/// never real InSpec/cinc-auditor bytes, matching docs/testing.md's CI-stub discipline).
+/// never real InSpec/cinc-auditor bytes, matching docs/how-to/testing.md's CI-stub discipline).
 ///
 /// Pre-fix (Start-Job/Wait-Job), <see cref="FastCheck_CompletesBeforeTimeout_ReportsRanAndPassed"/>
 /// fails: the fast stub still gets fail-closed "did not complete within Ns" because
@@ -201,7 +201,7 @@ public sealed class InspecCheckRealExecutorTests : IDisposable
 	/// Writes a throwaway shell script named "inspec" that mirrors `inspec check`'s
 	/// argument contract (accepts `check &lt;path&gt; --format json`) and exit-code
 	/// convention, faithful to the CLI grammar only -- never real InSpec/cinc-auditor
-	/// bytes or output (docs/testing.md "CI stubs vs live-lab validation" discipline,
+	/// bytes or output (docs/how-to/testing.md "CI stubs vs live-lab validation" discipline,
 	/// same convention this repo already applies to the licensed VCFDT tool).
 	/// </summary>
 	private string WriteStubInspec(int exitCode, int sleepSeconds, string? stderr = null)

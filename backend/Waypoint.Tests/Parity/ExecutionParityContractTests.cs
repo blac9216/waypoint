@@ -61,7 +61,7 @@ namespace Waypoint.Tests.Parity;
 /// <b>Honest boundary:</b> live wrapper execution against the real shipped PowerShell
 /// modules remains <c>ScanJobHandlerEndToEndTests</c>' own scope (stub-module
 /// Write-Information echoing against the real runspace), plus the owner-run live-lab
-/// acceptance pass documented in docs/testing.md; this suite does not replace either --
+/// acceptance pass documented in docs/how-to/testing.md; this suite does not replace either --
 /// it adds a THIRD, complementary layer that asserts the captured command/parameters
 /// directly rather than through a log-line substring.
 ///

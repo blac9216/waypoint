@@ -1,7 +1,7 @@
 # Testing
 
 Commands and environment the workflow's dispatch prompts copy verbatim. The long-form
-rationale, the isolation recipe and the honesty rules live in [../testing.md](../testing.md)
+rationale, the isolation recipe and the honesty rules live in [../how-to/testing.md](../how-to/testing.md)
 — required reading before any stack bring-up.
 
 ## Required checks
@@ -56,7 +56,7 @@ covers everything unconditionally) falls through to Path 2/3 per `evidence-paths
 ## Commands
 | Suite | Command | Environment |
 |---|---|---|
-| backend unit + integration | `dotnet test backend/Waypoint.sln` | `export PATH="$HOME/.dotnet:$PATH"`; `WAYPOINT_TEST_PG_NETWORK=<docker network of this process>` (devcontainer: `git_devcontainer_default`) — see ../testing.md §Postgres test fixture |
+| backend unit + integration | `dotnet test backend/Waypoint.sln` | `export PATH="$HOME/.dotnet:$PATH"`; `WAYPOINT_TEST_PG_NETWORK=<docker network of this process>` (devcontainer: `git_devcontainer_default`) — see ../how-to/testing.md §Postgres test fixture |
 | backend build (CI parity) | `dotnet build backend/Waypoint.sln -warnaserror` | same PATH |
 | frontend unit | `cd frontend && npm ci && npm test` | Node per `frontend/.nvmrc` / README |
 | frontend build + air-gap guard | `cd frontend && npm run build` | must fail on any external asset (ADR-0007) |
@@ -72,7 +72,7 @@ covers everything unconditionally) falls through to Path 2/3 per `evidence-paths
 | smoke | `cd deploy && ./scripts/fresh-stack-smoke-test.sh <slug> <port>` | same |
 
 ## Isolation on a shared host
-Every bring-up uses its own Compose project name (`-p <slug>`) and host port well away from 8443; verify isolation before trusting a result; `down -v` when done. Docker cannot see `/tmp` — bind mounts live under `/workspaces`. Full recipe: ../testing.md §The recipe.
+Every bring-up uses its own Compose project name (`-p <slug>`) and host port well away from 8443; verify isolation before trusting a result; `down -v` when done. Docker cannot see `/tmp` — bind mounts live under `/workspaces`. Full recipe: ../how-to/testing.md §The recipe.
 
 ## Live testing
 Pointer only: environment-specific recipes live in `docs/testing.local.md` (untracked).
