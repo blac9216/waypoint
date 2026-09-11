@@ -4,8 +4,8 @@ Kind: explanation
 
 Status: living security requirements. This document states plainly what the secrets
 design
-([ADR-0005](adr/0005-secrets.md), [ADR-0011](adr/0011-credential-tiers.md),
-[ADR-0014](adr/0014-runner-job-ownership.md)) does and
+([ADR-0005](../adr/0005-secrets.md), [ADR-0011](../adr/0011-credential-tiers.md),
+[ADR-0014](../adr/0014-runner-job-ownership.md)) does and
 does not protect, and lists the implementation requirements that keep secrets from
 leaking. These are requirements, not suggestions — several have CI enforcement.
 Sections marked 📋 **Planned** extend this contract for epic
@@ -44,12 +44,12 @@ The design goals that follow are:
 2. **Keep the fully-autonomous tier as small as possible** (credential tiers, below).
 3. **Detect use** (decrypt audit trail).
 
-## Credential tiers ([ADR-0011](adr/0011-credential-tiers.md))
+## Credential tiers ([ADR-0011](../adr/0011-credential-tiers.md))
 
 | Tier | Storage | Blast radius if DB + master key are stolen |
 |---|---|---|
 | **Service/shared** | Envelope-encrypted in Postgres | Exposed — accepted, compensated by audit + containment |
-| **Personal** | Envelope-encrypted in Postgres, **run-scoped, terminal/expiry bounded** ([ADR-0011](adr/0011-credential-tiers.md), issue #434) — never a row in the reusable `credentials`/`credential_secrets` store | Exposed only while an ad hoc run has not yet reached a terminal state (deleted on completion/abort; a bounded expiry sweep removes abandoned rows) — same compensating controls as service/shared for that window, nothing to steal outside it |
+| **Personal** | Envelope-encrypted in Postgres, **run-scoped, terminal/expiry bounded** ([ADR-0011](../adr/0011-credential-tiers.md), issue #434) — never a row in the reusable `credentials`/`credential_secrets` store | Exposed only while an ad hoc run has not yet reached a terminal state (deleted on completion/abort; a bounded expiry sweep removes abandoned rows) — same compensating controls as service/shared for that window, nothing to steal outside it |
 
 Personal credentials are the user's own AD/vCenter password. Ad hoc runs are
 interactive by definition and scheduling always uses service credentials, so no
@@ -264,10 +264,10 @@ real-world importance:
 ## Key management
 
 - **Master key loss = service credentials unrecoverable.** Key backup procedure is
-  mandatory install documentation ([ADR-0005](adr/0005-secrets.md)).
+  mandatory install documentation ([ADR-0005](../adr/0005-secrets.md)).
 - **Rotation** re-wraps data keys under a new master key; the schema carries a key-id
   column from day one so rotation is an online operation.
-- Update/transfer **bundle signing keys** are a separate concern ([ADR-0009](adr/0009-self-update.md))
+- Update/transfer **bundle signing keys** are a separate concern ([ADR-0009](../adr/0009-self-update.md))
   and are never stored in the appliance database.
 
 ## Global job observability and destructive actions
@@ -286,7 +286,7 @@ and domain role checks.
 Operational-history deletion never implies domain deletion. Explicit domain purges
 require their own authorization and destructive confirmation, use server-derived
 artifact paths, record retryable partial failure, and retain a non-secret append-only
-audit tombstone ([ADR-0019](adr/0019-global-job-observability.md)). Credential deletion
+audit tombstone ([ADR-0019](../adr/0019-global-job-observability.md)). Credential deletion
 is a separate lifecycle operation and never requires erasing history merely to remove
 encrypted secret material.
 

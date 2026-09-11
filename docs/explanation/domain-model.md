@@ -225,7 +225,7 @@ never silently widened or narrowed. Endpoint, RBAC, and transition wire shapes:
 representation remains.
 
 **Credential purposes and bindings (end state planned —
-[ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+[ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
 A single `credentialRef` per target is not enough: `vsphere` targets need a distinct
 vSphere API credential and VCSA SSH credential, satisfiable independently. ADR-0021
 defines named purposes (never generic numbered slots) and the compatibility matrix;
@@ -281,9 +281,9 @@ Credential-failure halt, swap, and queries inspect every resolved component-purp
 binding, not the transitional `jobs.credential_id` mirror.
 
 ### Credential
-Two tiers ([ADR-0011](adr/0011-credential-tiers.md)):
+Two tiers ([ADR-0011](../adr/0011-credential-tiers.md)):
 
-- **Service/shared** — stored in the encrypted store ([ADR-0005](adr/0005-secrets.md)),
+- **Service/shared** — stored in the encrypted store ([ADR-0005](../adr/0005-secrets.md)),
   decryptable autonomously for scheduled/system runs. Targets reference these via
   purpose bindings; components may override the target binding. "One global service
   account" is only the degenerate case where every binding references one credential.
@@ -309,7 +309,7 @@ manufacture jobs. The job is the sole queue, priority, lease, cancellation, and
 capacity-admission unit;
 the Run is a domain projection, never a second scheduler. Other job families retain
 their own fan-out. Job types: `scan`, `remediate`, `discover`, `credential-test`,
-`download` (retirement-planned, [ADR-0030](adr/0030-retire-legacy-download-job-type.md),
+`download` (retirement-planned, [ADR-0030](../adr/0030-retire-legacy-download-job-type.md),
 issue #1040 -- not yet removed),
 `catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
 `content-pull`, `content-import`, `update`.
@@ -318,8 +318,8 @@ The API creates jobs but does not execute them. The long-lived `compliance-runne
 claims compliance job types and the `download-runner` claims download/content job
 types directly from Postgres. The claiming runner owns the lease, heartbeat,
 cancellation checks, stage transitions, events, and terminal state. See
-[ADR-0013](adr/0013-control-plane-and-runners.md) and
-[ADR-0014](adr/0014-runner-job-ownership.md).
+[ADR-0013](../adr/0013-control-plane-and-runners.md) and
+[ADR-0014](../adr/0014-runner-job-ownership.md).
 
 Each compliance component job owns monotonically numbered, append-only **Attempts**.
 An attempt records start/end, runner/lease and stage transitions, credential-binding
@@ -368,7 +368,7 @@ state, timing, and redacted event/log diagnostics. Durable outputs belong to dom
 Live Jobs and generic history may link to these objects but do not duplicate their
 management actions. Removing operational history cannot implicitly delete a domain
 object; destructive domain cleanup is separately authorized, audited, and retryable
-([ADR-0019](adr/0019-global-job-observability.md)). For planned compliance scans,
+([ADR-0019](../adr/0019-global-job-observability.md)). For planned compliance scans,
 ADR-0025 sets the graph-wide six-month default above. Other job families retain their
 existing domain ownership and generic-history rules.
 
@@ -486,14 +486,14 @@ required for the selected appliance functions. Until the updater/exporter is bui
 the operator separately exports the locally built images and transfers them. The
 future exporter may include those images in the signed transfer package; importing a
 newer image set stages an available appliance update, and applying it remains an
-explicit Admin action. See [ADR-0015](adr/0015-source-build-and-operator-export.md).
+explicit Admin action. See [ADR-0015](../adr/0015-source-build-and-operator-export.md).
 
 ### Depot, catalog identity, subscriptions, and presence sweep (planned)
 
 The authenticated vendor `productVersionCatalog` (pinned publisher certificate) is the
 single source of artifact identity -- product, version, size, sha256 -- for the entire
-vendor depot, not just VCSA binaries (Epic #16, [ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)).
-The local disk walk under the depot volume ([ADR-0029](adr/0029-depot-store-volume-topology.md))
+vendor depot, not just VCSA binaries (Epic #16, [ADR-0028](../adr/0028-subscription-preset-metadata-indexed-default.md)).
+The local disk walk under the depot volume ([ADR-0029](../adr/0029-depot-store-volume-topology.md))
 is a **presence/verification sweep**, not an independent inventory: it matches
 on-disk files against catalog rows by relative path and size/hash, and anything found
 that the catalog does not know about surfaces as an unknown file rather than a new
@@ -534,7 +534,7 @@ undated+unparseable entries are quarantined from automation entirely.
 
 Superseded content inside a subscription's tracked scope enters a grace period before
 an automated retention sweep removes it (alertable, pinnable, purge-now available,
-[ADR-0034](adr/0034-grace-period-retention.md)); manual/ad-hoc downloads use a
+[ADR-0034](../adr/0034-grace-period-retention.md)); manual/ad-hoc downloads use a
 separate, independently configured retention dial. Orphaned content (no subscription
 still matches it) and out-of-scope content (never subscribed) are never auto-removed --
 only surfaced for explicit operator deletion, since a later disconnected-side transfer
@@ -545,21 +545,21 @@ compliance domain already uses for scans (see "Run and Job" above): one Run per
 subscription evaluation or ad-hoc request, one Job per acquired item, so
 parallelism/resume/cancel are per-item without a second scheduler. The legacy
 `download` job type and `POST /downloads` are retired
-([ADR-0030](adr/0030-retire-legacy-download-job-type.md), issue #1040, 📋 not yet
+([ADR-0030](../adr/0030-retire-legacy-download-job-type.md), issue #1040, 📋 not yet
 landed) -- vendor
 acquisition is tool-driven (`binaries-download`, already a live job type below) and
 mirror lanes get their own sync job types over the `Save-WebFile` primitive rather than
 sharing the generic `download` type. Disk space joins CPU/memory as a third resource
 the shared capacity lease pool admits against, using indexed metadata to project a
 job's byte size before it is ever dispatched
-([ADR-0033](adr/0033-disk-admission-joins-capacity-model.md), amends ADR-0018).
+([ADR-0033](../adr/0033-disk-admission-joins-capacity-model.md), amends ADR-0018).
 
 The repo-serving path-space (one appliance nginx, per-store `location`s over one
 shared depot volume, plus the content-library store's own volume — 📋 planned / in
 flight, [owner ruling 2026-09-06 on #1706](https://github.com/blac9216/waypoint/issues/1706#issuecomment-5561980532),
 not yet merged as of this head) enforces per-location independent auth, defaulting to
 Waypoint-managed repo users/tokens and keeping Keycloak out of the serving path
-entirely ([ADR-0031](adr/0031-repo-serving-per-location-auth.md)).
+entirely ([ADR-0031](../adr/0031-repo-serving-per-location-auth.md)).
 
 ### OCI bundle store and push-target consumer (planned)
 
@@ -595,7 +595,7 @@ attempts and receipts belong to the evidence graph and remain retryable while re
 |---|---|
 | **Viewer** | Read-only: dashboards, runs, results |
 | **Cyber** | Viewer + **initiate scans** (using the target's assigned service credential) + export results + full audit history. No config, credentials, downloads, or remediation. |
-| **Operator** | Cyber + ad hoc scans entering **their own** credentials at run time ([ADR-0011](adr/0011-credential-tiers.md)) + download/catalog/content-library management |
+| **Operator** | Cyber + ad hoc scans entering **their own** credentials at run time ([ADR-0011](../adr/0011-credential-tiers.md)) + download/catalog/content-library management |
 | **Admin** | Everything: sites, targets, shared credentials, users/roles, STIG config, remediation, updates, transfer |
 
 Rationale notes:

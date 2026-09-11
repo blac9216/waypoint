@@ -4,19 +4,19 @@ Kind: explanation
 
 Status: living document. Work is organised as **delivery-story milestones** — each
 one a multi-epic story with a rolled-up description on GitHub — per
-[`process/work-tracking.md`](process/work-tracking.md). This page is the narrative
+[`process/work-tracking.md`](../process/work-tracking.md). This page is the narrative
 timeline: closed stories keep their delivered summary and dates; open stories link to
 the milestone, which holds current state. The ordering principle is unchanged:
 **every technology here is a well-trodden path individually; the project risk is
 trying to build auth + job engine + secrets + both product integrations
 simultaneously.** Each story produces something demonstrable and forces exactly one
 new subsystem into existence. (Earlier revisions numbered these M0–M7; the mapping
-is in [`adr/README.md`](adr/README.md#former-milestone-numbering).)
+is in [`adr/README.md`](../adr/README.md#former-milestone-numbering).)
 
 > **Architecture realignment (approved 2026-08-11, delivered via #433).** The first two stories closed
 > against the original combined-backend design, but a fresh appliance exposed that
 > their execution dependencies were not packaged into a functional deployment. ADRs
-> [0013](adr/0013-control-plane-and-runners.md)–[0015](adr/0015-source-build-and-operator-export.md)
+> [0013](../adr/0013-control-plane-and-runners.md)–[0015](../adr/0015-source-build-and-operator-export.md)
 > replaced backend-hosted execution with dedicated runners and clarified operator-built
 > packaging. Epic #433 landed that realignment (split `compliance-runner`/
 > `download-runner` services, control-plane-only backend, issue #443) ahead of the identity story —
@@ -24,10 +24,10 @@ is in [`adr/README.md`](adr/README.md#former-milestone-numbering).)
 
 ## Design & contracts ✅ (closed 2026-08-02 — planning phase, no milestone)
 
-- ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](ui/prototype/);
-  reconciliation recorded in [`ui/design-brief.md`](ui/design-brief.md).
-- ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](api-contract.md).
-- ✅ Job/target state machines and SSE event schema: [`api-contract.md`](api-contract.md).
+- ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](../ui/prototype/);
+  reconciliation recorded in [`ui/design-brief.md`](../ui/design-brief.md).
+- ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](../api-contract.md).
+- ✅ Job/target state machines and SSE event schema: [`api-contract.md`](../api-contract.md).
 
 Next: decompose the first story into epics/issues per the `github-workflow` skill.
 
@@ -72,7 +72,7 @@ long-lived `compliance-runner` and `download-runner` services; moved project-own
 Dockerfiles, orchestration, and PowerShell from the sibling repositories into their
 runner build contexts; runners now own filtered claims, leases, cancellation, events,
 secret decryption, resource-aware concurrency, and readiness, per ADRs
-[0013](adr/0013-control-plane-and-runners.md)/[0014](adr/0014-runner-job-ownership.md).
+[0013](../adr/0013-control-plane-and-runners.md)/[0014](../adr/0014-runner-job-ownership.md).
 The ASP.NET backend is control-plane-only (issue #443) and no longer references the
 PowerShell SDK or any job handler at build time. This closed ahead of the identity story, which
 depended on it.
@@ -81,7 +81,7 @@ depended on it.
 
 Delivered: Keycloak in the Compose stack on its own Postgres database with scripted
 realm bootstrap (four role groups, example LDAP federation config, CAC/PIV x.509 flow
-documented for site enablement — [ADR-0004](adr/0004-identity-keycloak.md)); OIDC
+documented for site enablement — [ADR-0004](../adr/0004-identity-keycloak.md)); OIDC
 bearer-token validation on the backend with canonical-issuer pinning derived from
 one operator-set `Oidc:PublicUrl` (issue #842, decoupled from discovery so a real
 browser-minted token validates correctly behind nginx); a hand-rolled authorization-code + PKCE login flow
@@ -143,15 +143,15 @@ lives on the milestone; #726 is closed as the design record.
 
 **Wave 0 — architectural truth (hard gate, blocks all implementation).**
 [#727](https://github.com/blac9216/waypoint/issues/727) reconciled architecture/
-domain/ADRs (merged: [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md),
-[ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md),
-[ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md),
-[ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)) →
+domain/ADRs (merged: [ADR-0022](../adr/0022-compliance-catalog-and-content-lifecycle.md),
+[ADR-0023](../adr/0023-compliance-inventory-and-immutable-plans.md),
+[ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md),
+[ADR-0025](../adr/0025-compliance-trust-cleanup-and-evidence.md)) →
 [#785](https://github.com/blac9216/waypoint/issues/785) reconciled the API/security/
-RBAC contracts ([api-contract.md](api-contract.md), [security.md](security.md)) →
+RBAC contracts ([api-contract.md](../api-contract.md), [security.md](security.md)) →
 [#786](https://github.com/blac9216/waypoint/issues/786) (this document plus
-[`ui/design-brief.md`](ui/design-brief.md) and
-[`ui/prototype/README.md`](ui/prototype/README.md)) reconciles roadmap sequencing and
+[`ui/design-brief.md`](../ui/design-brief.md) and
+[`ui/prototype/README.md`](../ui/prototype/README.md)) reconciles roadmap sequencing and
 UI/domain vocabulary. No implementation child begins before all three merge.
 
 **Waves 1–5 — implementation, dependency-ordered.** Content foundation (catalog,
@@ -189,7 +189,7 @@ the entire vendor catalog as a true VCF depot (vendor catalog as single artifact
 identity; disk walk as presence sweep), with subscription-driven stores for **ESX
 patches** (the sibling's UMDS-binary lane is **retired** — research proved UMDS is EOL
 in `vcf-download-tool` 9.1; acquisition is VCFDT-only, generation-agnostic reconciliation,
-[ADR-0032](adr/0032-esx-patch-store-vcfdt-acquisition.md)), Photon, VMware Tools, VKS
+[ADR-0032](../adr/0032-esx-patch-store-vcfdt-acquisition.md)), Photon, VMware Tools, VKS
 and local VCSP content libraries. Research-first (epic #1026, closed 2026-08-29, findings
 ratified by the owner 2026-08-29), then Wave 0 doc reconciliation, then the lanes. The
 owner's 2026-08-28 decision record and 2026-08-29 ratification live on #16 (closed as the
@@ -203,11 +203,11 @@ with the functions that require it (ADR-0015).
 **Wave 0 — architectural truth (hard gate, blocks all implementation).**
 [#1033](https://github.com/blac9216/waypoint/issues/1033) reconciled architecture/
 domain/ADRs — merged via PR [#1738](https://github.com/blac9216/waypoint/pull/1738)
-([ADR-0028](adr/0028-subscription-preset-metadata-indexed-default.md)–[ADR-0034](adr/0034-grace-period-retention.md),
+([ADR-0028](../adr/0028-subscription-preset-metadata-indexed-default.md)–[ADR-0034](../adr/0034-grace-period-retention.md),
 plus `architecture.md`/`domain-model.md` depot sections) → #1034 reconciled the
 API/security/RBAC contracts — merged via PR
 [#1747](https://github.com/blac9216/waypoint/pull/1747) → **this document plus
-[`ui/download-domain-ia.md`](ui/download-domain-ia.md)** is #1035, reconciling roadmap
+[`ui/download-domain-ia.md`](../ui/download-domain-ia.md)** is #1035, reconciling roadmap
 sequencing and proposing the download-domain screen IA for owner approval (R2-11).
 
 **Implementation status (as of 2026-09-06).** 21+ issues merged across the seven lane
