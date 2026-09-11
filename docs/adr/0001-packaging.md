@@ -21,7 +21,7 @@ here from the section originally titled "Rationale."_
   none needed by a single-team appliance — at the cost of cluster lifecycle management,
   in-cluster cert rotation, two layers of networking, and ~4x resource footprint.
 - Most non-K8s vendor appliances are exactly "minimal OS + container stack baked in,"
-  so keeping the OVA path open should cost zero rework later.
+  so the OVA path stays open with zero rework.
 
 ## Considered Options
 
