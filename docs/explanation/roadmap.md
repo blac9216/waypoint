@@ -38,19 +38,19 @@ end-to-end slice (no vCenter discovery, no InSpec/SAF pipeline, one credential)
 while still forcing every foundation into existence.
 
 Delivered: Compose stack (nginx + backend + Postgres + frontend shell, local auth
-only); job engine (ADR-0008: queue, dispatcher, runspace hosting per ADR-0006, SSE
-streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
+only); job engine (ADR-0008: queue, dispatcher, runspace hosting per ADR-0013/ADR-0014,
+SSE streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
 encryption + write-only API, holding the Broadcom depot token); **depot catalog
 indexing (`catalog-index`) + catalog browser + download jobs (`download`) with live
 progress, checksum verification, and disk usage**, wired end to end against the
 vcf-docker-download modules as the execution layer. The in-UI download-tool install
-flow (local repo / depot fetch / manual upload, issue #39) **delivered** via
-epic [#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
+flow (local repo / depot fetch / manual upload, issue #39) **delivered** via epic
+[#558](https://github.com/blac9216/waypoint/issues/558) in the *Scan & download
 readiness* story below (PR [#610](https://github.com/blac9216/waypoint/pull/610)) —
 this section's original framing — describing the install flow as still manual in
-development — is stale and is corrected here rather than left standing. Test depot tokens/config
-still come from the private sibling repo at runtime — gitignored mounts, never
-committed.
+development — is stale and is corrected here rather than left standing. Test depot
+tokens/config still come from the private sibling repo at runtime — gitignored mounts,
+never committed.
 
 ## Sites, credentials & STIG scan slice ✅ (closed 2026-08-09 — [milestone](https://github.com/blac9216/waypoint/milestone/4), epic [#13](https://github.com/blac9216/waypoint/issues/13))
 

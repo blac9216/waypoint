@@ -21,8 +21,9 @@ One **job engine** in the backend serves all job types:
 - **Run → Jobs fan-out**: a user-initiated Run expands to one Job per target/component.
   Priorities carry over from the STIG catalog's `reportGroup`/`priority` model
   (NSX=1, VCSA=2, vCenter=3, ESXi=4, VM=5, SRG=6); other job types declare their own.
-- **Workers**: PowerShell runspace pools hosted in-process (ADR-0006) execute the
-  existing modules. The predecessor's parallelism module ceases to be the orchestrator.
+- **Workers**: PowerShell runspace pools hosted in-process (ADR-0013/ADR-0014)
+  execute the existing modules. The predecessor's parallelism module ceases to be the
+  orchestrator.
 - **Streaming**: job log/state events stream to the UI over SSE and persist to
   Postgres. Two scopes: a per-run stream (live run view) and a **global event stream**
   feeding the ever-present job log drawer in the UI.

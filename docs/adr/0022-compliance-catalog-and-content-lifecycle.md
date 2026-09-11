@@ -115,6 +115,11 @@ quarantined; import never overwrites history or auto-activates functional change
 - Candidate and retained revisions require content-addressed storage and garbage
   collection that preserves plans, evidence, active baselines, and rollback choices.
 
+- **2026-09-11 update**: Catalog, ingestion, XCCDF, and lifecycle persistence delivered
+  (#728, #729, #730, #731); the signed transfer path delivered (#748);
+  mutable-directory replacement removal delivered (#595). Still open: fixed-path
+  fallback removal (#650), #625, and #567.
+
 ## Alternatives rejected
 
 - Treat every discovered `inspec.yml` or operator mapping as runnable: execution
