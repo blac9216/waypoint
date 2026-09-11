@@ -27,11 +27,11 @@ one durable home for that provenance.
   PRs. This is the only place that provenance lives — do not duplicate it
   in code comments or in deploy/ markdown.
 
-### Example entry
-
-A filled entry under a `## compose.yaml` section looks like this:
+A filled entry under a `## compose.yaml` section looks like this (fenced —
+illustrative only, not a real entry):
 
 ```markdown
+<!-- Example entry -->
 ### compose-healthcheck-start-period-30s
 
 The backend's first boot runs pending EF Core migrations before it starts
@@ -985,29 +985,34 @@ Refs: #842, #844
 
 ### kcrealmreconcile-why-needed
 
-`start-dev --import-realm` only imports a realm that does not already exist
-in the target database — the *placeholder substitution*
-(`compose-realm-placeholder-substitution`) that bakes `WAYPOINT_PUBLIC_URL`
-into `rootUrl`/`redirectUris`/`webOrigins` therefore only ever happens on
-the FIRST boot against a given `pgdata` volume. A stack whose containers
-were torn down without `-v` (an interrupted run, a crash before the
-`down -v` trap fires) leaves that volume behind; the next `up` against the
-same Compose project — even with a different `WAYPOINT_PUBLIC_URL` and a
-different host port — reuses the old database, skips the import, and the
-two OIDC clients keep advertising the FIRST run's origin forever. Live-
-reproduced: bring up a stack on port A, `stop`+`rm` (not `down -v`) its
-`postgres`/`keycloak` containers and networks, regenerate the same slug
-with port B, bring it back up — the discovery `issuer` correctly reflects
-port B (`KC_HOSTNAME` is a live env var), but `waypoint-backend`'s and
-`waypoint-frontend`'s `rootUrl`/`redirectUris`/`webOrigins` still read port
-A, so the browser's OIDC redirect targets a dead origin (issue #983).
+`start-dev --import-realm` only imports on the FIRST boot against a
+given `pgdata` volume, which is also when the *placeholder substitution*
+(`compose-realm-placeholder-substitution`) bakes `WAYPOINT_PUBLIC_URL`
+into the clients' origin fields. A stack torn down without `-v` leaves
+that volume behind, so the next `up` reuses the old database, skips the
+import, and both OIDC clients keep advertising the first run's origin forever.
+
+Refs: #983, #726
+
+### kcrealmreconcile-live-repro
+
+Live-reproduced: bring up a stack on port A, `stop`+`rm` (not `down -v`)
+its `postgres`/`keycloak` containers and networks, regenerate the same
+slug with port B, and bring it back up. The discovery `issuer` correctly
+reflects port B (`KC_HOSTNAME` is a live env var), but `waypoint-backend`'s
+and `waypoint-frontend`'s `rootUrl`/`redirectUris`/`webOrigins` still read
+port A, so the browser's OIDC redirect targets a dead origin.
+
+Refs: #983, #726
+
+### kcrealmreconcile-every-boot-fix
+
 Fixed by making origin reconciliation a property of every `up`, not of
-`--import-realm`'s one-time substitution: a sidecar service, gated on
-`keycloak` health, re-derives the same two clients' origin fields from the
-CURRENT `WAYPOINT_PUBLIC_URL` via the admin REST API on every boot,
-whether or not the import actually ran. `nginx` (the entrypoint a browser
-actually reaches) waits on this service's successful completion, closing
-the race where a request lands before reconciliation finishes.
+`--import-realm`'s one-time substitution: a sidecar, gated on `keycloak`
+health, re-derives the same two clients' origin fields from the CURRENT
+`WAYPOINT_PUBLIC_URL` via the admin REST API on every boot, whether or
+not the import ran. `nginx` waits on the sidecar's success, closing the
+race where a request lands before reconciliation finishes.
 
 Refs: #983, #726
 
@@ -1015,13 +1020,19 @@ Refs: #983, #726
 
 The reconciliation logic lives in a separate `curl`+`jq` sidecar rather
 than inside `deploy/keycloak/`'s own entrypoint wrapper: the upstream
-`quay.io/keycloak/keycloak:25.0` image is UBI-minimal with no package
-manager and no `curl`/`jq` preinstalled, and its own `kcadm.sh` admin CLI
-takes `--password` only as a CLI argument (see
-`kcdevadmin-secret-passing-design` for why that argv exposure is avoided
-here). A sidecar built the same way as `keycloak-dev-admin/` reuses that
-already-accepted secret-passing discipline instead of adding packages to
-the Keycloak image or accepting the `kcadm.sh` argv exposure.
+`quay.io/keycloak/keycloak:25.0` image is UBI-minimal, with no package
+manager and no `curl`/`jq` preinstalled, so adding this logic there would
+mean adding packages to the Keycloak image itself.
+
+Refs: #983, #726
+
+### kcrealmreconcile-kcadm-argv-secret-avoided
+
+Keycloak's own `kcadm.sh` admin CLI takes `--password` only as a CLI
+argument, exposing it via argv (see `kcdevadmin-secret-passing-design` for
+why that exposure is avoided here). The sidecar is built the same way as
+`keycloak-dev-admin/`, reusing that already-accepted secret-passing
+discipline instead of accepting the `kcadm.sh` argv exposure.
 
 Refs: #983, #726
 
