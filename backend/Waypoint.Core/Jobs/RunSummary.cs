@@ -16,7 +16,7 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// Run row projected for the REST surface (GET /runs/{id}).
-/// Matches docs/api-contract.md "Runs &amp; jobs" — header, progress, pass/fail/na,
+/// Matches docs/reference/api-contract.md "Runs &amp; jobs" — header, progress, pass/fail/na,
 /// per-queue status including <c>blocked</c>.
 /// </summary>
 public sealed record RunSummary(

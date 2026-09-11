@@ -106,7 +106,7 @@ export function isSelectableComponent(node: ComponentNode): boolean {
 
 /**
  * Issue #733: resolves one target's tri-state selection into the wire's
- * `target_scope` shape (docs/api-contract.md "Interim additive
+ * `target_scope` shape (docs/reference/api-contract.md "Interim additive
  * `scope.target_scope`"). `allComponentIds` is every *selectable* (active)
  * leaf-or-parent id known for the target; `selectedIds` is exactly what the
  * operator left checked.
@@ -135,7 +135,7 @@ export function resolveTargetScope(allComponentIds: string[], selectedIds: Reado
 	return { mode: "explicit", component_ids: allComponentIds.filter((id) => selectedIds.has(id)) };
 }
 
-/** `Waypoint.Core.Jobs.TargetScopeRequest` on the wire — one target's resolved tri-state scope, keyed by `target_id` when the wizard sends more than one target's `target_scope` (the backend's `TargetScopeRequest` is itself target-agnostic within one site-wide request, so the wizard folds every selected target's resolution into one request per docs/api-contract.md's `{ mode, target_ids?, component_ids? }` shape: `all`-mode carries the contributing `target_ids`, `explicit`-mode carries the resolved `component_ids` across every target). */
+/** `Waypoint.Core.Jobs.TargetScopeRequest` on the wire — one target's resolved tri-state scope, keyed by `target_id` when the wizard sends more than one target's `target_scope` (the backend's `TargetScopeRequest` is itself target-agnostic within one site-wide request, so the wizard folds every selected target's resolution into one request per docs/reference/api-contract.md's `{ mode, target_ids?, component_ids? }` shape: `all`-mode carries the contributing `target_ids`, `explicit`-mode carries the resolved `component_ids` across every target). */
 export type TargetScopeInput = { mode: "all"; target_ids: string[] } | { mode: "explicit"; component_ids: string[] };
 
 export interface ScanScope {
@@ -153,7 +153,7 @@ export interface ScanScope {
 	profile_id?: string;
 	/** Issue #733 (epic #726 Wave 2, ADR-0023): the operator's resolved
 	 * component-tree selection, additive to `target_ids` in this interim slice
-	 * (docs/api-contract.md "Interim additive `scope.target_scope`"). Omitted
+	 * (docs/reference/api-contract.md "Interim additive `scope.target_scope`"). Omitted
 	 * when no target under this scope has any known components yet (nothing to
 	 * resolve). Mutually exclusive with `profile_id` (issue #895) — never both
 	 * set on the same request. */

@@ -1,5 +1,5 @@
 /**
- * SSE client for the job engine's event streams (docs/api-contract.md
+ * SSE client for the job engine's event streams (docs/reference/api-contract.md
  * "Event streams (SSE)"): `/api/v1/events` (global — job log drawer + nav
  * badges) and `/api/v1/runs/{id}/events` (per-run).
  *

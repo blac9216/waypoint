@@ -23,7 +23,7 @@ namespace Waypoint.Infrastructure.Runs;
 
 /// <summary>
 /// Issues #733/#734 remainder ("`/runs/plan-preview`'s mandatory discovery refresh"
-/// per docs/api-contract.md, and PR #819's planned <c>POST /runs/plan-preview</c>):
+/// per docs/reference/api-contract.md, and PR #819's planned <c>POST /runs/plan-preview</c>):
 /// runs the SAME compile→resolve pipeline <see cref="RunCreationService.CreateScanRunAsync"/>
 /// uses (<see cref="ScopeResolutionService"/> then <see cref="ScanPlannerService"/>, then
 /// read-only credential-gap evaluation) entirely IN MEMORY and returns the would-be
@@ -328,7 +328,7 @@ public sealed class RunPlanPreviewService
 /// The result of <see cref="RunPlanPreviewService.PreviewAsync"/>: the resolved scope
 /// (requested-vs-resolved, with every <see cref="ScopeOmission"/>), the would-be
 /// <see cref="ScanPlan"/> (post credential-gap demotion), and every credential gap found
-/// -- the same three facets docs/api-contract.md's planned <c>/runs/plan-preview</c>
+/// -- the same three facets docs/reference/api-contract.md's planned <c>/runs/plan-preview</c>
 /// response describes ("resolved component set, per-component readiness ... any
 /// fact_conflict ... required-purpose credential coverage").
 /// </summary>

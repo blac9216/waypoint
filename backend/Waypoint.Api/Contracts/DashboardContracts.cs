@@ -18,7 +18,7 @@ namespace Waypoint.Api.Contracts;
 
 /// <summary>
 /// Wire shape for <c>GET /api/v1/dashboard</c> (issue #513, prototype screen 2):
-/// docs/api-contract.md "Aggregate: KPI tiles, site posture, recent runs, attention
+/// docs/reference/api-contract.md "Aggregate: KPI tiles, site posture, recent runs, attention
 /// items." <see cref="Schedules"/> and appliance/version info are deliberately NOT
 /// included here -- the frontend composes the SCHEDULES card from the existing
 /// <c>GET /schedules</c> endpoint and the APPLIANCE card from the existing

@@ -29,7 +29,7 @@ public interface IComponentRepository
 {
 	/// <summary>
 	/// All non-retired-by-default components for a target; pass <paramref name="includeRetired"/>
-	/// to include retired rows too (Configuration-screen visibility, docs/api-contract.md
+	/// to include retired rows too (Configuration-screen visibility, docs/reference/api-contract.md
 	/// <c>/targets/{id}/components</c>: "every known component ... regardless of
 	/// lifecycle"). Issue #1202: for the closed <c>ssh</c>/<c>target</c> declared-root
 	/// shape (a <see cref="CreateDeclaredRootAsync"/> row that has since linked to an
@@ -98,7 +98,7 @@ public interface IComponentRepository
 		Guid targetId, Guid parentComponentId, IReadOnlyList<CatalogDeclaredChild> declared, CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Admin configured-fact write (docs/api-contract.md <c>PUT /components/{id}</c>:
+	/// Admin configured-fact write (docs/reference/api-contract.md <c>PUT /components/{id}</c>:
 	/// "configured_fact only ... never lifecycle or identity"). Recomputes
 	/// <see cref="Component.FactConflict"/> against any existing discovered fact and
 	/// records a <see cref="ComponentObservation"/> with outcome
@@ -150,7 +150,7 @@ public interface IComponentRepository
 	/// </summary>
 	Task<int> RetireContinuouslyAbsentAsync(TimeSpan threshold, CancellationToken cancellationToken);
 
-	/// <summary>Admin-only audited purge (docs/api-contract.md: 409 unless already retired). Historical references outside this table are untouched -- this slice has none yet (plan/run integration is #733/#734).</summary>
+	/// <summary>Admin-only audited purge (docs/reference/api-contract.md: 409 unless already retired). Historical references outside this table are untouched -- this slice has none yet (plan/run integration is #733/#734).</summary>
 	Task<ComponentWriteOutcome> PurgeRetiredAsync(Guid componentId, CancellationToken cancellationToken);
 
 	/// <summary>Immutable observation history for one component, newest first.</summary>

@@ -3,7 +3,7 @@
 -- `runs.site_id` and `jobs.target_id` — both stayed plain UUID columns with
 -- no FK specifically so this migration could add the referenced tables
 -- without an ALTER on either of them). docs/explanation/domain-model.md "Site" /
--- "Target"; docs/api-contract.md "Sites, targets, inventory" and its
+-- "Target"; docs/reference/api-contract.md "Sites, targets, inventory" and its
 -- Postgres schema sketch: `sites` · `targets` (site_id, kind, connection
 -- jsonb, credential_id, discovery_status).
 --
@@ -14,7 +14,7 @@
 -- sites --------------------------------------------------------------------
 -- The top-level grouping ("an enclave's VMware estate" — domain-model.md).
 -- stigman_override carries the per-site STIG Manager connection override
--- (docs/api-contract.md "STIG Manager": "Global default + per-site
+-- (docs/reference/api-contract.md "STIG Manager": "Global default + per-site
 -- override") as JSONB rather than a separate table: it is a single optional
 -- document per site, not a collection, and its shape is planning-grade
 -- pending the #13 STIG Manager slice — the same "don't invent structure
@@ -42,7 +42,7 @@ CREATE OR REPLACE TRIGGER trg_sites_updated_at
 -- connection is JSONB (hostname/address + any kind-specific fields, e.g.
 -- vSphere's optional datacenter path) for the same reason sites'
 -- stigman_override is: the exact per-kind shape is still planning-grade
--- (docs/api-contract.md: "field lists name the load-bearing data, not every
+-- (docs/reference/api-contract.md: "field lists name the load-bearing data, not every
 -- column"), and ADR-0002 keeps vendor/connection shapes JSONB rather than
 -- forcing a premature column-per-field schema. It NEVER carries secret
 -- material — connection secrets are referenced via credential_id only

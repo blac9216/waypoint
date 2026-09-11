@@ -76,7 +76,7 @@ public sealed partial class ScheduleDispatchService
 
 	/// <summary>
 	/// One sweep: reconciles depot-kind auto-pause against the current appliance mode
-	/// (docs/api-contract.md: "auto-paused states in air-gapped mode for depot kinds"),
+	/// (docs/reference/api-contract.md: "auto-paused states in air-gapped mode for depot kinds"),
 	/// then dispatches every due, non-paused, enabled schedule. Errors from a single
 	/// schedule's dispatch are caught and logged, never allowed to abort the sweep --
 	/// the same "one target's failure does not halt the run" discipline CLAUDE.md

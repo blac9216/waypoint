@@ -3,7 +3,7 @@
  * (`GET /runs/{id}`, `GET /runs/{id}/jobs`) so the board paints immediately,
  * then opens the per-run SSE stream (`/runs/{id}/events`) and folds every
  * event through `applyEvent` (liverun.ts) — never a poll, per
- * docs/api-contract.md's "Event streams (SSE)" section.
+ * docs/reference/api-contract.md's "Event streams (SSE)" section.
  *
  * Last-Event-ID replay (AC2): `connectEventStream` (lib/events.ts) already
  * implements the reconnect-with-Last-Event-ID protocol; this hook's job is

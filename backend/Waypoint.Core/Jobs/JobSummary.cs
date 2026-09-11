@@ -16,7 +16,7 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// Job row projected for the REST surface (GET /runs/{id}/jobs).
-/// Matches docs/api-contract.md "Runs &amp; jobs" — job detail fields.
+/// Matches docs/reference/api-contract.md "Runs &amp; jobs" — job detail fields.
 /// <see cref="UploadStatus"/>/<see cref="UploadDetail"/> are issue #311's
 /// <c>jobs.upload_status</c>/<c>upload_detail</c> columns (migration 0018) -- null on
 /// every job type except <c>scan</c>, and null on a <c>scan</c> job until its convert

@@ -18,7 +18,7 @@ namespace Waypoint.Api.Contracts;
 
 /// <summary>
 /// Response body for one row of <c>GET /api/v1/catalog/products</c> and
-/// <c>GET /api/v1/catalog/products/{id}</c> (docs/api-contract.md "Catalog, content
+/// <c>GET /api/v1/catalog/products/{id}</c> (docs/reference/api-contract.md "Catalog, content
 /// sources, and exact-version baselines": "the closed, versioned execution-catalog
 /// vocabulary: supported products/exact versions, component selectors, transports,
 /// credential purposes, priority, output semantics"). One row is one execution

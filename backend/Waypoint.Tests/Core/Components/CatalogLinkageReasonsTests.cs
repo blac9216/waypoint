@@ -20,7 +20,7 @@ namespace Waypoint.Tests.Core.Components;
 
 /// <summary>
 /// Round-2 finding T1 on PR #1232: <see cref="CatalogLinkageReasons"/> is a CLOSED
-/// vocabulary published in <c>docs/api-contract.md</c>'s <c>/targets/{id}/discover</c>
+/// vocabulary published in <c>docs/reference/api-contract.md</c>'s <c>/targets/{id}/discover</c>
 /// row, exactly like <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.All"/> and
 /// <see cref="ScopeOmissionReasons.All"/>. These are its drift guards: the member list
 /// is pinned here, every emitting branch is asserted to be inside
@@ -53,7 +53,7 @@ public sealed class CatalogLinkageReasonsTests
 	/// <summary>
 	/// Doc-vs-code drift guard, following the <c>ParityMatrixCompletenessTests</c>
 	/// precedent of reading the repository's own documentation from the test:
-	/// <c>docs/api-contract.md</c>'s <c>/targets/{id}/discover</c> row publishes this
+	/// <c>docs/reference/api-contract.md</c>'s <c>/targets/{id}/discover</c> row publishes this
 	/// vocabulary as an explicit pipe-delimited CLOSED set, and it must be exactly
 	/// <see cref="CatalogLinkageReasons.All"/> -- same members, same order.
 	///
@@ -71,7 +71,7 @@ public sealed class CatalogLinkageReasonsTests
 		string doc = File.ReadAllText(FindApiContractDoc());
 
 		// Issue #1286: anchor to the SPECIFIC table row each pattern is meant to guard,
-		// not the whole document -- `docs/api-contract.md` already publishes several
+		// not the whole document -- `docs/reference/api-contract.md` already publishes several
 		// other "closed `a`\|`b` set" vocabularies (the `/stigman/test` row, the
 		// `/runs/{id}/purge` outcome set, the schedule `job_type` set) and more than one
 		// row starts with `/components/{id}` (the DELETE row does not mention "unlinked
@@ -85,7 +85,7 @@ public sealed class CatalogLinkageReasonsTests
 		// from the one line that both names the `/targets/{id}/discover` row AND
 		// contains a "closed <list> set" enumeration.
 		Match discoverRow = Regex.Match(discoverRowLine, @"closed ((?:`[a-z_]+`\\\|)*`[a-z_]+`) set", RegexOptions.None, TimeSpan.FromSeconds(5));
-		Assert.True(discoverRow.Success, "docs/api-contract.md's /targets/{id}/discover row no longer publishes a 'closed <list> set' catalog-linkage reason enumeration.");
+		Assert.True(discoverRow.Success, "docs/reference/api-contract.md's /targets/{id}/discover row no longer publishes a 'closed <list> set' catalog-linkage reason enumeration.");
 		Assert.Equal(
 			CatalogLinkageReasons.All,
 			discoverRow.Groups[1].Value.Split("\\|").Select(token => token.Trim('`')).ToArray());
@@ -154,7 +154,7 @@ public sealed class CatalogLinkageReasonsTests
 
 		Assert.True(
 			matchingLines.Length == 1,
-			$"Expected exactly one docs/api-contract.md line containing both '{rowIdentity}' and '{rowMarker}', found {matchingLines.Length}.");
+			$"Expected exactly one docs/reference/api-contract.md line containing both '{rowIdentity}' and '{rowMarker}', found {matchingLines.Length}.");
 
 		return matchingLines[0];
 	}
@@ -164,7 +164,7 @@ public sealed class CatalogLinkageReasonsTests
 		DirectoryInfo? directory = new(AppContext.BaseDirectory);
 		while (directory is not null)
 		{
-			string candidate = Path.Combine(directory.FullName, "docs", "api-contract.md");
+			string candidate = Path.Combine(directory.FullName, "docs", "reference", "api-contract.md");
 			if (File.Exists(candidate))
 			{
 				return candidate;
@@ -173,6 +173,6 @@ public sealed class CatalogLinkageReasonsTests
 			directory = directory.Parent;
 		}
 
-		throw new FileNotFoundException("Could not locate docs/api-contract.md by walking up from AppContext.BaseDirectory");
+		throw new FileNotFoundException("Could not locate docs/reference/api-contract.md by walking up from AppContext.BaseDirectory");
 	}
 }

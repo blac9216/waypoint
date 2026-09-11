@@ -16,7 +16,7 @@ using Waypoint.Core.ComplianceContent;
 
 namespace Waypoint.Api.Contracts;
 
-/// <summary>Response body for one entry of <c>GET /api/v1/baselines</c> (docs/api-contract.md, issue #731).</summary>
+/// <summary>Response body for one entry of <c>GET /api/v1/baselines</c> (docs/reference/api-contract.md, issue #731).</summary>
 public sealed record BaselineResponse(
 	string Id,
 	string ContentRevisionId,
@@ -50,14 +50,14 @@ public sealed record BaselineResponse(
 /// execution profile. Issue #731: this is the missing caller for
 /// <see cref="Waypoint.Core.ComplianceContent.IBaselineRepository.CreateStagedBaselineAsync"/>
 /// -- the naming ("stage a baseline" as its own resource-create rather than an
-/// implicit side effect of content-pull) is a documented assumption; docs/api-contract.md
+/// implicit side effect of content-pull) is a documented assumption; docs/reference/api-contract.md
 /// names the read (<c>GET /baselines</c>) and activate/rollback actions but not a
 /// staging-create route, so this slice adds the minimal honest one under the
 /// documented <c>/baselines</c> resource rather than inventing a new top-level noun.
 /// </summary>
 public sealed record CreateBaselineRequest(Guid? ContentRevisionId, Guid? CatalogExecutionProfileId, Guid? BenchmarkRevisionId);
 
-/// <summary>Request body for <c>POST /api/v1/baselines/{id}/activate</c> and <c>/rollback</c> (docs/api-contract.md confirmation-phrase convention).</summary>
+/// <summary>Request body for <c>POST /api/v1/baselines/{id}/activate</c> and <c>/rollback</c> (docs/reference/api-contract.md confirmation-phrase convention).</summary>
 public sealed record BaselineActivationRequest(string? Confirmation);
 
 /// <summary>Response body for <c>GET /api/v1/baselines/{id}/impact-diff</c> (issue #731 AC "operators see a deterministic impact diff before activation").</summary>

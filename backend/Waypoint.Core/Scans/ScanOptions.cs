@@ -33,7 +33,7 @@ public sealed class ScanOptions
 	/// <summary>
 	/// Root directory of compliance content (InSpec profiles). This M1 slice scans a
 	/// single fixed vSphere profile per target kind; a real profile-selection surface
-	/// (per docs/api-contract.md's <c>/profiles</c>) is out of scope here -- see #274's
+	/// (per docs/reference/api-contract.md's <c>/profiles</c>) is out of scope here -- see #274's
 	/// PR body.
 	/// </summary>
 	public string ProfilePath { get; set; } = "/opt/waypoint/profiles/vsphere";

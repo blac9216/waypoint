@@ -31,7 +31,7 @@ export interface SystemRunnerStatus {
 	starved_job_types: SystemStarvedJobType[];
 }
 
-/** `GET /api/v1/system` (docs/api-contract.md "System, users, audit"):
+/** `GET /api/v1/system` (docs/reference/api-contract.md "System, users, audit"):
  * "Version/build, mode, uptime, disk usage by store, depot sync, update
  * availability." Only the chrome-relevant subset is modeled here — screens
  * that need disk usage / depot sync own their own fetch. `runners` (issue

@@ -1,4 +1,4 @@
--- Issue #31 (epic #14): docs/api-contract.md `/schedules` -- cron-style schedules for
+-- Issue #31 (epic #14): docs/reference/api-contract.md `/schedules` -- cron-style schedules for
 -- read-only job types (scan/discover/credential-test/catalog-index), enqueued by a
 -- control-plane hosted service (ScheduleDispatchHostedService, Waypoint.Api) that
 -- validates due schedules and enqueues via IJobControlRepository. Runners never touch
@@ -18,7 +18,7 @@
 -- (catalog-index -- the only download-domain read-only type) is derived from
 -- job_type membership in ScheduleJobTypes.DepotKinds, which is how
 -- ScheduleDispatchService.ReconcileDepotAutoPauseAsync auto-pauses only those
--- schedules in disconnected mode (docs/api-contract.md `/schedules`: "auto-paused
+-- schedules in disconnected mode (docs/reference/api-contract.md `/schedules`: "auto-paused
 -- states in air-gapped mode for depot kinds"). scope carries the same
 -- site/target-selection JSON shape RunCreationService already parses for `/runs`
 -- (ScanScopeParser) -- re-used, not duplicated, by the dispatcher.

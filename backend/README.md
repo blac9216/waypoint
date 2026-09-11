@@ -95,7 +95,7 @@ dotnet run --project Waypoint.Api --no-launch-profile --urls http://127.0.0.1:52
 
 The foundation-story subset of the schema — `credentials`, `credential_secrets`, `runs`, `jobs`,
 `job_events`, `depot_artifacts`, `downloads`, `audit_log`, `appliance_state` — is the
-contract in [`docs/api-contract.md`](../docs/api-contract.md) ("Postgres schema
+contract in [`docs/reference/api-contract.md`](../docs/reference/api-contract.md) ("Postgres schema
 sketch"); this section is a pointer, not a duplicate. ADR-0002 (Postgres), ADR-0005
 (envelope-encrypted secrets), and ADR-0008 (job engine) are the design rationale for
 that shape.
@@ -145,7 +145,7 @@ that shape.
     the API layer (not the schema) enforces that it never carries secret material —
     only `credential_ref` ever names a credential. `discovery_status`'s value set
     (`never_discovered`/`discovering`/`discovered`/`failed`) is invented: neither
-    `docs/explanation/domain-model.md` nor `docs/api-contract.md` enumerates it, only the field
+    `docs/explanation/domain-model.md` nor `docs/reference/api-contract.md` enumerates it, only the field
     name.
 - **Queue-claim index**: `idx_jobs_queue_claim` is a partial index on
   `(job_type, priority, created_at) WHERE state = 'queued'`, matching the ADR-0008
@@ -297,7 +297,7 @@ directions (unbindable URL → non-zero; valid URL → keeps running).
 
 ## Conventions this scaffold establishes
 
-Everything below implements `docs/api-contract.md` Conventions and is meant to be
+Everything below implements `docs/reference/api-contract.md` Conventions and is meant to be
 reused, not reinvented, by every future endpoint:
 
 - **Errors**: throw `Waypoint.Core.Errors.ApiException` (or a subclass/factory such as

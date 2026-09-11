@@ -134,7 +134,7 @@ public static class VendorProductVersionCatalogParser
 		// (CatalogIndexJobHandler, which always writes null for both), a connected
 		// pull DOES know both from the authenticated vendor catalog itself, so this
 		// is the one indexing path that actually populates the product/version
-		// filters docs/api-contract.md's /catalog/artifacts exposes.
+		// filters docs/reference/api-contract.md's /catalog/artifacts exposes.
 		Dictionary<string, object?> metadata = new(StringComparer.Ordinal)
 		{
 			["product"] = component,

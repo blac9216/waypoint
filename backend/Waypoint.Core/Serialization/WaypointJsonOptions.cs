@@ -18,7 +18,7 @@ namespace Waypoint.Core.Serialization;
 
 /// <summary>
 /// The single <see cref="JsonSerializerOptions"/> instance for the whole API — snake_case
-/// fields per <c>docs/api-contract.md</c> Conventions. Shared between MVC's configured
+/// fields per <c>docs/reference/api-contract.md</c> Conventions. Shared between MVC's configured
 /// output formatter and any code that serializes JSON by hand outside the MVC pipeline
 /// (the error/status-code middleware), so both paths produce byte-identical shapes.
 /// </summary>

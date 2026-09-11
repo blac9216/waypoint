@@ -3,7 +3,7 @@
 -- at Global -> Site -> Target scope. docs/explanation/domain-model.md "STIG configuration
 -- documents": "SAF attestation YAML, InSpec input YAML, remediation input files --
 -- stored as documents in Postgres ... Every save creates a version with author +
--- timestamp." docs/api-contract.md "Config documents (three-layer)" and the Postgres
+-- timestamp." docs/reference/api-contract.md "Config documents (three-layer)" and the Postgres
 -- schema sketch: `config_docs` (kind, profile, layer_type, layer_ref) ·
 -- `config_versions` (doc_id, vN, author, ts, body).
 --
@@ -19,7 +19,7 @@
 -- row, it inserts vN+1 and repoints current_version.
 --
 -- layer_type/layer_ref together encode "global" | "site:{id}" | "target:{id}"
--- (docs/api-contract.md `/config-docs` filter: "layer (global|site:{id}|target:{id})")
+-- (docs/reference/api-contract.md `/config-docs` filter: "layer (global|site:{id}|target:{id})")
 -- without a polymorphic FK: layer_ref is NULL for the global layer, and otherwise
 -- points at sites.id or targets.id depending on layer_type. There is deliberately no DB
 -- FK to sites/targets (a polymorphic reference can't be a single FK without a
@@ -27,7 +27,7 @@
 -- layer_ref against the right table before insert.
 --
 -- profile is a free-text identifier (the compliance-content profile name/id) rather
--- than an FK -- profiles/benchmarks land later in #13 (see docs/api-contract.md
+-- than an FK -- profiles/benchmarks land later in #13 (see docs/reference/api-contract.md
 -- "Profiles & benchmarks"), so this mirrors depot_artifacts.metadata's "don't invent
 -- structure ahead of the real shape" reasoning (ADR-0002).
 --
@@ -86,7 +86,7 @@ CREATE OR REPLACE TRIGGER trg_config_docs_updated_at
 -- issues UPDATE/DELETE against this table), the same convention audit_log's
 -- append-only comment (0006) documents for that table.
 --
--- body_yaml carries the raw YAML text byte-for-byte as submitted (docs/api-contract.md
+-- body_yaml carries the raw YAML text byte-for-byte as submitted (docs/reference/api-contract.md
 -- AC: "valid YAML round-trips byte-stable") -- validated for well-formedness at the API
 -- layer before insert, not reparsed/reformatted here.
 CREATE TABLE IF NOT EXISTS config_versions (

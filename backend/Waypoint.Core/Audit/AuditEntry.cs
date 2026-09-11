@@ -32,7 +32,7 @@ public sealed record AuditEntry(
 	string DetailJson,
 	DateTimeOffset OccurredAt);
 
-/// <summary>Filter parameters for <see cref="IAuditRepository.ListAsync"/>, mirroring <c>docs/api-contract.md</c> `/audit`'s "filterable by kind/actor/time window".</summary>
+/// <summary>Filter parameters for <see cref="IAuditRepository.ListAsync"/>, mirroring <c>docs/reference/api-contract.md</c> `/audit`'s "filterable by kind/actor/time window".</summary>
 public sealed record AuditQuery(
 	string? EventType,
 	string? Actor,

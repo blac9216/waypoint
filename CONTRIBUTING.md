@@ -41,7 +41,7 @@ development hosts.
 - Branch from the current `main` branch and use a descriptive branch name tied to the
   issue when possible.
 - Follow the existing style and keep public contracts aligned with
-  [docs/api-contract.md](docs/api-contract.md) and
+  [docs/reference/api-contract.md](docs/reference/api-contract.md) and
   [docs/explanation/domain-model.md](docs/explanation/domain-model.md).
 - Add or update tests for changed behavior. A bug fix should include a regression test
   whenever practical.

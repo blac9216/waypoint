@@ -1,5 +1,5 @@
 -- Issue #193 (epic #9 slice 1): the catalog REST surface filters by
--- product/version/status (docs/api-contract.md `/catalog/artifacts`). Vendor
+-- product/version/status (docs/reference/api-contract.md `/catalog/artifacts`). Vendor
 -- catalog shapes stay JSONB (ADR-0002, see 0001's depot_artifacts comment) --
 -- product and version are promoted to GENERATED STORED columns rather than
 -- real writable ones, the same reasoning 0001 used for sha256: they exist so

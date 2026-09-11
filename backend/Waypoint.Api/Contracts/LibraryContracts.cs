@@ -100,7 +100,7 @@ public sealed record LibraryItemsResponse(
 	IReadOnlyList<LibraryFamilyResponse> Families);
 
 /// <summary>
-/// One line of the air-gapped "Export request manifest" want-list (docs/api-contract.md
+/// One line of the air-gapped "Export request manifest" want-list (docs/reference/api-contract.md
 /// `/library/request-manifest`) -- machine-readable and consumable by a connected
 /// instance (e.g. to pre-seed a `/downloads` queue or a future `/bundles/export`
 /// selection). Deliberately narrow: just enough to identify the artifact and why it's

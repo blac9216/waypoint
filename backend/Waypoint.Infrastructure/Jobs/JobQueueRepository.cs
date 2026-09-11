@@ -421,7 +421,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// Mirrors <see cref="EmitCredentialSwappedAsync"/>'s "emit after commit" discipline
 	/// (see <see cref="IJobRunnerRepository"/>'s "emit last" doc comment). There is no
 	/// <c>run.state</c> event type in the closed six-value <c>job_events_event_type_check</c>
-	/// set (docs/api-contract.md "Event streams (SSE)") -- <c>run.progress</c> is already
+	/// set (docs/reference/api-contract.md "Event streams (SSE)") -- <c>run.progress</c> is already
 	/// the run-scoped "aggregate run counts/percent" carrier the Live Run/Results screens
 	/// bind their progress UI to (<c>Waypoint.Runner.Jobs.JobDispatcherHostedService.AbortRunAsync</c>
 	/// emits the same type for the abort case), so a run reaching a contract terminal
@@ -2041,7 +2041,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	}
 
 	/// <summary>
-	/// True swap semantics for <c>POST /runs/{id}/resume-blocked</c> (docs/api-contract.md,
+	/// True swap semantics for <c>POST /runs/{id}/resume-blocked</c> (docs/reference/api-contract.md,
 	/// ADR-0008) -- see <see cref="IJobControlRepository.SwapAndResumeBlockedCredentialAsync"/>
 	/// for the contract. Built alongside <see cref="UnblockCredentialAsync"/>, not as a
 	/// replacement for it: that method stays the "retry with the same credential"

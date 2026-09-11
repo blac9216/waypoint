@@ -23,7 +23,7 @@ namespace Waypoint.Core.Scheduling;
 /// <c>jobs_job_type_check</c> -- scan/discover/credential-test/catalog-index.
 /// <see cref="Enabled"/> is the operator's own on/off switch (from <c>PUT
 /// /schedules/{id}</c>); <see cref="PausedReason"/> is set only by the auto-pause path
-/// (docs/api-contract.md: "auto-paused states in air-gapped mode for depot kinds") and
+/// (docs/reference/api-contract.md: "auto-paused states in air-gapped mode for depot kinds") and
 /// is independent of it -- a schedule can be operator-enabled but appliance-auto-paused
 /// at the same time, and the dispatcher skips a due schedule if either is true.
 /// </summary>
@@ -46,11 +46,11 @@ public sealed record Schedule(
 
 /// <summary>
 /// The closed, read-only-only set of job types a schedule may target
-/// (docs/api-contract.md `/schedules`: "Read-only job types only (server-rejects
+/// (docs/reference/api-contract.md `/schedules`: "Read-only job types only (server-rejects
 /// `remediate` etc. — domain rule)"). Mirrors <c>schedules_job_type_check</c>
 /// (migration 0030) so the API rejects an invalid <c>job_type</c> with a clear error
 /// before ever reaching the database constraint. <see cref="DepotKinds"/> is the subset
-/// that auto-pauses in disconnected mode (docs/api-contract.md: "auto-paused states in
+/// that auto-pauses in disconnected mode (docs/reference/api-contract.md: "auto-paused states in
 /// air-gapped mode for depot kinds") -- exactly <see cref="Waypoint.Core.Jobs.JobCapabilities.Download"/>'s
 /// read-only member, <c>catalog-index</c>.
 /// </summary>

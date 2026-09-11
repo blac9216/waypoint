@@ -32,7 +32,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issue #598 end to end against real Postgres: <c>GET /profiles/{id}/controls</c>
-/// (docs/api-contract.md: "Control, severity, title, effective input + scope, attest
+/// (docs/reference/api-contract.md: "Control, severity, title, effective input + scope, attest
 /// status"). Covers the 404-unknown-profile case, the "installed profile with zero
 /// parsed controls" vs. "no content installed" distinction (an empty controls array is
 /// a valid response, not a 404), Viewer+ role gating, and the profile-level (not truly

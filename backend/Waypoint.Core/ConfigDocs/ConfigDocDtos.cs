@@ -15,7 +15,7 @@
 namespace Waypoint.Core.ConfigDocs;
 
 /// <summary>
-/// The closed <c>kind</c> set (docs/api-contract.md `/config-docs`: "Filter by kind
+/// The closed <c>kind</c> set (docs/reference/api-contract.md `/config-docs`: "Filter by kind
 /// (input|attestation|remediation-input)"; docs/explanation/domain-model.md "STIG configuration
 /// documents").
 /// </summary>
@@ -66,7 +66,7 @@ public sealed record ConfigDoc(
 	DateTimeOffset UpdatedAt,
 	Guid? CatalogExecutionProfileId = null);
 
-/// <summary>One immutable version of a config-doc's body (docs/api-contract.md `/config-docs/{id}/versions`: "Full history -- the auditor answer").</summary>
+/// <summary>One immutable version of a config-doc's body (docs/reference/api-contract.md `/config-docs/{id}/versions`: "Full history -- the auditor answer").</summary>
 public sealed record ConfigDocVersion(
 	Guid Id,
 	Guid DocId,

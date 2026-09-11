@@ -283,7 +283,7 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		return await _client.SendAsync(request);
 	}
 
-	/// <summary>The `X-Total-Count` response header (docs/api-contract.md Conventions' `?limit/offset` idiom, the `GET /runs` precedent) -- the ONLY place the total travels; the body never carries a count.</summary>
+	/// <summary>The `X-Total-Count` response header (docs/reference/api-contract.md Conventions' `?limit/offset` idiom, the `GET /runs` precedent) -- the ONLY place the total travels; the body never carries a count.</summary>
 	private static int GetTotalCountHeader(HttpResponseMessage response)
 	{
 		Assert.True(response.Headers.TryGetValues("X-Total-Count", out IEnumerable<string>? values), "X-Total-Count header missing");
@@ -392,7 +392,7 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 
 	/// <summary>
 	/// Round-1 review finding on PR #1010: the total must travel in the
-	/// <c>X-Total-Count</c> response header per docs/api-contract.md Conventions'
+	/// <c>X-Total-Count</c> response header per docs/reference/api-contract.md Conventions'
 	/// `?limit/offset` idiom (the `GET /runs` precedent) -- never as an in-body
 	/// `total_count` field. Pins the header on every page of a multi-page walk AND the
 	/// body field's absence on each.

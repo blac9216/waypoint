@@ -54,7 +54,7 @@ public interface IBaselineRepository
 	/// <summary>Every baseline for one execution profile, newest first.</summary>
 	Task<IReadOnlyList<Baseline>> ListBaselinesForExecutionProfileAsync(Guid catalogExecutionProfileId, CancellationToken cancellationToken);
 
-	/// <summary>Every baseline, newest first -- the backing read for a future <c>GET /baselines</c> (docs/api-contract.md).</summary>
+	/// <summary>Every baseline, newest first -- the backing read for a future <c>GET /baselines</c> (docs/reference/api-contract.md).</summary>
 	Task<IReadOnlyList<Baseline>> ListAllBaselinesAsync(CancellationToken cancellationToken);
 
 	/// <summary>The current active baseline for one execution profile, or null if none is active.</summary>

@@ -2,7 +2,7 @@
 --
 -- Tables: credentials, credential_secrets, runs, jobs, job_events,
 -- depot_artifacts, downloads, audit_log, appliance_state. See
--- docs/api-contract.md "Postgres schema sketch" (the contract this
+-- docs/reference/api-contract.md "Postgres schema sketch" (the contract this
 -- implements) and ADR-0002 (Postgres), ADR-0005 (envelope-encrypted
 -- secrets), ADR-0008 (job engine). Deviations from the contract sketch are
 -- called out inline and summarized in backend/README.md.
@@ -74,7 +74,7 @@ CREATE OR REPLACE TRIGGER trg_credential_secrets_updated_at
 -- A user-initiated Run fans out into one Job per target/component
 -- (ADR-0008). Only the scan/remediate job types are ever wrapped in a Run;
 -- the M1 download vertical slice's job types (download, catalog-index,
--- discover, ...) are queued as standalone jobs per docs/api-contract.md's
+-- discover, ...) are queued as standalone jobs per docs/reference/api-contract.md's
 -- per-endpoint "202 -> <type> job" notes, so jobs.run_id is nullable (see
 -- jobs table below) rather than required as the contract sketch's flat
 -- field list might suggest.
@@ -185,7 +185,7 @@ CREATE OR REPLACE TRIGGER trg_jobs_updated_at
 
 -- job_events ---------------------------------------------------------
 -- Append-only SSE replay source for both stream scopes in
--- docs/api-contract.md: the global stream (every event) and the per-run
+-- docs/reference/api-contract.md: the global stream (every event) and the per-run
 -- stream (run_id set).
 --
 -- Scope. The contract's six event types are NOT all job-scoped, so neither
@@ -327,7 +327,7 @@ CREATE OR REPLACE TRIGGER trg_depot_artifacts_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- downloads ------------------------------------------------------------
--- Download state machine (docs/api-contract.md):
+-- Download state machine (docs/reference/api-contract.md):
 --   queued -> downloading -> verifying -> verified | failed
 -- (checksum mismatch => failed, artifact quarantined). job_id links to the
 -- jobs-queue row that actually executes the download; nullable because a

@@ -725,7 +725,7 @@ Rejects methods this stack never serves (TRACE/CONNECT/etc., DISA/CIS
 guidance) with a single `if ($request_method !~ ...) { return 405; }` at
 server level rather than `limit_except` per location, which would have to
 be repeated across every `location` block. The allowed set is derived from
-docs/api-contract.md's full resource table.
+docs/reference/api-contract.md's full resource table.
 
 Refs: #388, #52
 

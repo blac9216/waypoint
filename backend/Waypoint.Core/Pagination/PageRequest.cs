@@ -16,7 +16,7 @@ namespace Waypoint.Core.Pagination;
 
 /// <summary>
 /// Query parameters accepted by every list endpoint. There is deliberately no paired
-/// "page of results" wrapper type: per <c>docs/api-contract.md</c> Conventions
+/// "page of results" wrapper type: per <c>docs/reference/api-contract.md</c> Conventions
 /// ("Pagination: `?limit/offset` + `X-Total-Count` on list endpoints") and
 /// <c>backend/README.md</c>, each collection endpoint returns a bare array and sets the
 /// <c>X-Total-Count</c> response header itself (see

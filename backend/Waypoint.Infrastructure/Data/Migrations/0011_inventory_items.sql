@@ -1,6 +1,6 @@
 -- Issue #21 (epic #13, M2): the `discover` job's cached inventory store.
 -- docs/explanation/domain-model.md "Target": "Discovered ESXi hosts and VMs are cached inventory
--- under a `vsphere` target, not standalone targets." docs/api-contract.md
+-- under a `vsphere` target, not standalone targets." docs/reference/api-contract.md
 -- `/targets/{id}/inventory` and the Postgres schema sketch:
 -- `inventory_items` (target_id, type, parent_id, name, build, maintenance).
 --

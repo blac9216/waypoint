@@ -67,7 +67,7 @@ public sealed record BinariesDownloadQueuedResponse(
 
 /// <summary>
 /// Response body for one row of <c>GET /api/v1/downloads</c>
-/// (docs/api-contract.md "Queue view: rate, ETA, retries").
+/// (docs/reference/api-contract.md "Queue view: rate, ETA, retries").
 /// </summary>
 public sealed record DownloadResponse(
 	[property: JsonPropertyName("id")]

@@ -16,7 +16,7 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// Which state-machine shape a <c>jobs.job_type</c> follows (see
-/// <see cref="JobStateMachine"/>). <c>docs/api-contract.md</c> "State machines" defines
+/// <see cref="JobStateMachine"/>). <c>docs/reference/api-contract.md</c> "State machines" defines
 /// three: the full STIG scan pipeline (<c>queued -> running -> attesting -> converting
 /// -> uploaded</c>), the SRG scan pipeline that attests but skips converting/uploaded
 /// ("SRG jobs skip converting/uploaded (HDF-only) -> done", <see cref="Srg"/>), and the

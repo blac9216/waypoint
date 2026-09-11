@@ -1038,7 +1038,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 
 	/// <summary>
 	/// Issue #757's "Cyber controls owned live scans" owner decision lowered
-	/// pause/resume/abort's floor from Operator+ to Cyber+ (docs/api-contract.md's
+	/// pause/resume/abort's floor from Operator+ to Cyber+ (docs/reference/api-contract.md's
 	/// role matrix, PR #819) -- a Cyber caller on their OWN run now succeeds.
 	/// </summary>
 	[Fact]
@@ -1109,7 +1109,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	}
 
 	// -- issue #209: run-action ownership ------------------------------------
-	// docs/api-contract.md: "/runs/{id}/pause · /resume · /abort ... Cyber+ (own
+	// docs/reference/api-contract.md: "/runs/{id}/pause · /resume · /abort ... Cyber+ (own
 	// runs), Admin any" (floor lowered from Operator+ by issue #757's "Cyber controls
 	// owned live scans" decision, PR #819). TestAuthHandler names every principal
 	// "test-user".

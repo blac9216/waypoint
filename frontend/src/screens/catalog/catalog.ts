@@ -1,5 +1,5 @@
 /**
- * Download Catalog data layer (docs/api-contract.md "Depot catalog &
+ * Download Catalog data layer (docs/reference/api-contract.md "Depot catalog &
  * downloads (connected mode)" + the "Download Catalog" ledger row):
  *
  *   GET  /catalog/artifacts   — indexed depot listing, filterable
@@ -9,7 +9,7 @@
  *                                (PR #228: "one run, N jobs")
  *
  * Progress is never polled — `download.progress` / `job.state` SSE events
- * (docs/api-contract.md "Event streams (SSE)") are the only source for
+ * (docs/reference/api-contract.md "Event streams (SSE)") are the only source for
  * anything that moves on this screen, per the contract's explicit rule.
  */
 

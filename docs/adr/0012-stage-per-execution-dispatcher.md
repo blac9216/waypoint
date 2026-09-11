@@ -6,7 +6,7 @@ Date: 2026-08-08
 ## Context
 
 ADR-0008 defines the job engine as one Postgres-backed queue, one lease per claimed
-job, one worker executing a job to completion. `docs/api-contract.md`'s "State
+job, one worker executing a job to completion. `docs/reference/api-contract.md`'s "State
 machines" section already describes a `Standard`-shape scan job's pipeline as
 `queued → running → attesting → converting → uploaded`, and migration 0015
 (#124/#280) made `attesting`/`converting` require a live lease exactly like `running`

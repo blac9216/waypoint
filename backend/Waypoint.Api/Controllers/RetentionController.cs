@@ -81,7 +81,7 @@ public sealed class RetentionController : ControllerBase
 	/// <summary>
 	/// The three ADR-0034 states an operator must be able to tell apart --
 	/// <c>grace</c> (approaching the grace period), <c>pending-purge</c> (past it),
-	/// and <c>pinned</c> (exempt, sweep will skip) -- per <c>docs/api-contract.md</c>'s
+	/// and <c>pinned</c> (exempt, sweep will skip) -- per <c>docs/reference/api-contract.md</c>'s
 	/// row for this endpoint. Paged the same way as <c>CatalogController.ListArtifacts</c>
 	/// on the wire (<see cref="PageRequest"/>, <c>X-Total-Count</c> header) but not
 	/// underneath it: <see cref="IRetainedContentStateRepository.ListByStateAsync"/>

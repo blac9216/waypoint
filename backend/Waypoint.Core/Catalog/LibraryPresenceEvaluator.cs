@@ -23,7 +23,7 @@ namespace Waypoint.Core.Catalog;
 /// <c>LibraryController</c> is the only caller, and it owns fetching the artifact list
 /// and the current <c>appliance_state.mode</c>.
 ///
-/// Scope line for "missing vs last bundle manifest" (docs/api-contract.md's exact
+/// Scope line for "missing vs last bundle manifest" (docs/reference/api-contract.md's exact
 /// phrase): a <c>bundles</c> table with imported-manifest metadata does not exist on
 /// `main` yet -- that's issue #44 ("transfer import: verify, diff, apply (disconnected
 /// side)"), a different content type from PR #566's compliance-content pull. Until #44

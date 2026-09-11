@@ -1,4 +1,4 @@
--- Issue #512 (epic #14, split from #32): docs/api-contract.md `/users` -- Admin
+-- Issue #512 (epic #14, split from #32): docs/reference/api-contract.md `/users` -- Admin
 -- GET/POST/PUT surface over a local `users` table keyed by `oidc_sub`, the OIDC
 -- provider's stable subject claim (Keycloak `sub`; ADR-0004 -- app is a plain OIDC
 -- relying party, never a Keycloak admin-API caller). One row per principal who has

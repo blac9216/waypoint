@@ -44,7 +44,7 @@ namespace Waypoint.Api.Controllers;
 /// priority, benchmark, remediation capability) shipped in this repository and backed
 /// by <see cref="ICatalogRepository"/> (migration 0050, PR #822). It shares this
 /// controller/route prefix with the depot-catalog surface above only because both are
-/// named "catalog" in docs/api-contract.md -- they are otherwise unrelated resources
+/// named "catalog" in docs/reference/api-contract.md -- they are otherwise unrelated resources
 /// (depot artifacts to download vs. the compliance execution-catalog vocabulary) with
 /// no shared repository or state.
 /// </summary>

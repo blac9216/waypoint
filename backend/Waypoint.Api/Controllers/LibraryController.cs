@@ -57,7 +57,7 @@ public sealed class LibraryController : ControllerBase
 
 	/// <summary>
 	/// The Repository tab's item list plus the product-family rail, evaluated against the
-	/// current <c>appliance_state.mode</c> (docs/api-contract.md: "Presence model per
+	/// current <c>appliance_state.mode</c> (docs/reference/api-contract.md: "Presence model per
 	/// mode"). A missing/deleted <c>appliance_state</c> row (see
 	/// <see cref="IApplianceStateRepository.GetAsync"/>'s doc comment) is treated as
 	/// disconnected -- the same fail-safe <c>ScheduleDispatchService</c> and the frontend's
@@ -80,7 +80,7 @@ public sealed class LibraryController : ControllerBase
 	}
 
 	/// <summary>
-	/// The air-gapped "Export request manifest" action (docs/api-contract.md
+	/// The air-gapped "Export request manifest" action (docs/reference/api-contract.md
 	/// `/library/request-manifest`; prototype screen 7's primary action when
 	/// disconnected): a machine-readable want-list of everything not currently present,
 	/// meant to be handed to a connected instance (e.g. to pre-seed its

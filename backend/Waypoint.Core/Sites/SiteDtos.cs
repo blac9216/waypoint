@@ -17,7 +17,7 @@ namespace Waypoint.Core.Sites;
 /// <summary>
 /// A site as stored (docs/explanation/domain-model.md "Site"): the top-level grouping, roughly "an
 /// enclave's VMware estate." <see cref="StigmanOverrideJson"/> is the optional per-site
-/// STIG Manager connection override (docs/api-contract.md "STIG Manager"), carried as
+/// STIG Manager connection override (docs/reference/api-contract.md "STIG Manager"), carried as
 /// raw JSON text -- the same "JSON string, not a nested object" convention
 /// <c>RunResponse.Scope</c> and <c>DepotArtifact.MetadataJson</c> already use for a
 /// JSONB column on the wire.

@@ -18,7 +18,7 @@ using Waypoint.Core.ConfigDocs;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// Response body for a config-doc, latest version inlined (docs/api-contract.md
+/// Response body for a config-doc, latest version inlined (docs/reference/api-contract.md
 /// `/config-docs/{id}`: GET returns the doc; PUT returns the new version). <c>layer</c>
 /// rides as the single <c>global|site:{id}|target:{id}</c> string the contract's list
 /// filter documents, not the two split columns the row is actually stored under.
@@ -87,7 +87,7 @@ public sealed record ConfigDocVersionResponse(
 
 /// <summary>
 /// Request body for <c>PUT /api/v1/config-docs/{id}</c>: the only write path
-/// (docs/api-contract.md: "PUT creates a new immutable version"). When <c>id</c> names
+/// (docs/reference/api-contract.md: "PUT creates a new immutable version"). When <c>id</c> names
 /// an existing doc, <c>kind</c>/<c>profile</c>/<c>layer</c> are ignored (the slot is
 /// fixed); when it does not, this is the write that creates the slot at @v1 and those
 /// three fields are required.
@@ -107,7 +107,7 @@ public sealed record ConfigDocSaveBody(
 
 /// <summary>
 /// One kind's entry in the <c>GET /config-docs/resolve</c> response -- the EFFECTIVE card
-/// (docs/api-contract.md: "resolved value + supplying layer"). <c>layer</c>/<c>body</c>/
+/// (docs/reference/api-contract.md: "resolved value + supplying layer"). <c>layer</c>/<c>body</c>/
 /// <c>doc_id</c>/<c>version</c>/<c>author</c>/<c>updated_at</c> are all null when no layer
 /// has a doc for this (kind, profile) at all (prototype: input layer "not defined ...
 /// inherits site value" collapses further to nothing defined anywhere). <c>attestation_expired</c>

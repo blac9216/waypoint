@@ -49,7 +49,7 @@ public sealed class AuditController : ControllerBase
 
 	/// <summary>
 	/// Returns JSON by default; <c>?format=csv</c> streams the identical filtered,
-	/// stably-ordered set as <c>text/csv</c> instead (docs/api-contract.md `/audit`:
+	/// stably-ordered set as <c>text/csv</c> instead (docs/reference/api-contract.md `/audit`:
 	/// "CSV export of the current filter") -- one query surface, two representations,
 	/// so the export can never drift from what the caller was just looking at.
 	/// </summary>

@@ -1,6 +1,6 @@
 /**
  * Loads `GET /dashboard` and `GET /schedules` in parallel on mount (issue
- * #513). The two are independent per docs/api-contract.md, so one failing
+ * #513). The two are independent per docs/reference/api-contract.md, so one failing
  * must not blank the other — same "Promise.allSettled, degrade
  * independently" posture `SystemProvider` uses for `/system` + `/stigman`.
  * A `/schedules` failure renders the SCHEDULES card's empty state rather than

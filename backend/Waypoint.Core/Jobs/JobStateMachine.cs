@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Jobs;
 
 /// <summary>
-/// The <c>jobs.state</c> transition graph from <c>docs/api-contract.md</c> "State
+/// The <c>jobs.state</c> transition graph from <c>docs/reference/api-contract.md</c> "State
 /// machines", as an explicit, testable table rather than scattered <c>if</c> checks
 /// through the dispatcher. Three shapes share the table (see <see cref="JobShape"/>);
 /// <see cref="Waypoint.Core.Jobs.JobStates.Cancelled"/> is reachable from every active

@@ -10,7 +10,7 @@ Only the values below are repository-specific — the rules themselves are not r
 - docs/explanation/domain-model.md
 - docs/explanation/security.md
 - docs/explanation/roadmap.md
-- docs/api-contract.md
+- docs/reference/api-contract.md
 - docs/adr/
 - docs/rationale/
 - CONTEXT.md

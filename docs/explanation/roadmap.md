@@ -26,8 +26,8 @@ is in [`adr/README.md`](../adr/README.md#former-milestone-numbering).)
 
 - ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](../ui/prototype/);
   reconciliation recorded in [`ui-design-brief.md`](ui-design-brief.md).
-- ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](../api-contract.md).
-- ✅ Job/target state machines and SSE event schema: [`api-contract.md`](../api-contract.md).
+- ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](../reference/api-contract.md).
+- ✅ Job/target state machines and SSE event schema: [`api-contract.md`](../reference/api-contract.md).
 
 Next: decompose the first story into epics/issues per the `github-workflow` skill.
 
@@ -148,7 +148,7 @@ domain/ADRs (merged: [ADR-0022](../adr/0022-compliance-catalog-and-content-lifec
 [ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md),
 [ADR-0025](../adr/0025-compliance-trust-cleanup-and-evidence.md)) →
 [#785](https://github.com/blac9216/waypoint/issues/785) reconciled the API/security/
-RBAC contracts ([api-contract.md](../api-contract.md), [security.md](security.md)) →
+RBAC contracts ([api-contract.md](../reference/api-contract.md), [security.md](security.md)) →
 [#786](https://github.com/blac9216/waypoint/issues/786) (this document plus
 [`ui-design-brief.md`](ui-design-brief.md) and
 [`how-to/ui-prototype.md`](../how-to/ui-prototype.md)) reconciles roadmap sequencing and

@@ -32,7 +32,7 @@ namespace Waypoint.Api.Controllers;
 /// model (PR #828) unchanged -- this controller adds no new mapping semantics, only a
 /// validated HTTP adapter over it.
 ///
-/// docs/api-contract.md's "Profiles &amp; benchmarks" section previously marked
+/// docs/reference/api-contract.md's "Profiles &amp; benchmarks" section previously marked
 /// <c>/benchmarks</c>/<c>/profiles/{id}/mapping</c> superseded by the ADR-0022
 /// candidate/diff/approval pipeline; that supersession is about automatic vendor-sync
 /// ingestion (still #729/#731 territory), not about this read/override surface over

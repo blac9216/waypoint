@@ -18,7 +18,7 @@ using Waypoint.Core.Sites;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// Response body for a site (docs/api-contract.md `/sites`: name, description,
+/// Response body for a site (docs/reference/api-contract.md `/sites`: name, description,
 /// stigman_override?). <see cref="StigmanOverride"/> rides as a raw JSON string, not a
 /// nested object -- the same convention <c>RunResponse.Scope</c> and
 /// <c>CatalogArtifactResponse.Metadata</c> already use for a JSONB column on the wire.

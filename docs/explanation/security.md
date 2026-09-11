@@ -298,7 +298,7 @@ and never will be — a connection either verifies against a managed trust bundl
 carries an explicit, narrowly scoped bypass, and both states are visible.
 
 - **Managed CA trust is public material, not a secret.** Admin-uploaded CA
-  certificates/chains (`/trust/bundles`, `docs/api-contract.md`) are versioned and
+  certificates/chains (`/trust/bundles`, `docs/reference/api-contract.md`) are versioned and
   validated (format, size, chain, duplicates, expiry, safe storage paths) at
   ingestion and fail closed on any defect. They are stored and transferred
   separately from encrypted credentials — a trust bundle leaking is not a
@@ -314,7 +314,7 @@ carries an explicit, narrowly scoped bypass, and both states are visible.
   another connection and never becomes a default.
 - **Planning freezes the policy identity/version, not live state.** A
   `PlannedComponentItem` references the trust-policy identity/version in effect at
-  plan time (`docs/api-contract.md`'s `/runs/{id}/plan`). A later trust-policy edit
+  plan time (`docs/reference/api-contract.md`'s `/runs/{id}/plan`). A later trust-policy edit
   never silently changes an in-flight or already-created run's behavior — this is
   the same "later target edits cannot change an in-flight run" property ADR-0021 §5
   already established for credentials, extended to trust.
@@ -355,7 +355,7 @@ obligation is unconditional restoration:
   `cleanup_failed`, never silently dropped. An attempt is not cleanly terminal until
   restoration succeeds or that failure state is durably recorded.
 - **`cleanup_failed` is a security alert, not a scan note.** It raises a prominent,
-  persistent alert (`ssh_cleanup_failed`, `docs/api-contract.md` Alerts) that remains
+  persistent alert (`ssh_cleanup_failed`, `docs/reference/api-contract.md` Alerts) that remains
   visible and actionable until reconciled — starting a new scan attempt against that
   service never clears or supersedes it. Before another attempt may mutate the same
   service, the unresolved obligation must be explicitly reconciled or the service
@@ -384,7 +384,7 @@ surface even though neither carries traditional infrastructure credentials:
   retroactively rewrite what an approver actually reviewed.
 - **Candidate-execution evidence is scoped like production scan evidence.**
   Admin-only candidate test runs (`POST /candidate-content/{id}/test-run`,
-  `docs/api-contract.md`) resolve credentials through the exact same purpose/binding
+  `docs/reference/api-contract.md`) resolve credentials through the exact same purpose/binding
   mechanism as a production scan (ADR-0024) — there is no separate, looser
   credential path "because it's just a test." A candidate run against a production
   target uses that target's real bindings and is subject to the same decrypt-audit
@@ -428,7 +428,7 @@ epic #726 introduces, none of which existed when that control was first written:
 
 Every row above is append-only, attributable to a real actor (human or a named
 system trigger such as a schedule or retention sweep — never an anonymous "system"),
-and readable by Cyber+ through `/audit` (`docs/api-contract.md`) alongside the
+and readable by Cyber+ through `/audit` (`docs/reference/api-contract.md`) alongside the
 existing decrypt/config-version/run-initiation events. None of these records contain
 secret material; several (trust bypass, SSH cleanup failure) additionally surface as
 persistent in-app alerts because they represent an ongoing risk posture, not merely
@@ -438,7 +438,7 @@ a historical fact.
 
 Reconciles this document with the approved download-parity design (#16, ratified
 research #1026) against what has actually shipped. Full endpoint list is
-`docs/api-contract.md`'s "Depot catalog & downloads" section; this section states the
+`docs/reference/api-contract.md`'s "Depot catalog & downloads" section; this section states the
 security-relevant facts and consequences.
 
 **Legacy Download Token — demoted, not retired, and no new consumer is built.** The
@@ -525,7 +525,7 @@ until that PR merges; ADR-0029 records the decision as accepted and binding rega
 
 ## RBAC reconciliation (epic #726)
 
-`docs/explanation/domain-model.md`'s Roles table and `docs/api-contract.md`'s RBAC summary are
+`docs/explanation/domain-model.md`'s Roles table and `docs/reference/api-contract.md`'s RBAC summary are
 the wire-facing source of truth; this section states the security rationale for
 where epic #726 narrows or clarifies existing role boundaries. It widens nothing
 beyond what those two documents already specify.
@@ -544,7 +544,7 @@ beyond what those two documents already specify.
   of initiator. This rule is deliberately narrow: it grants nothing toward
   `download`, `bundle-import`, `update`, or any other job family's control
   actions — the existing ownership-scoped checks on those endpoints
-  (`docs/api-contract.md`) are unchanged. Cyber+ also gets review authority over
+  (`docs/reference/api-contract.md`) are unchanged. Cyber+ also gets review authority over
   content diffs and control approval (a review action, not an activation action),
   matching ADR-0022's "Cyber-level approval" for changed/unknown controls.
 - **Admin-only actions are exactly the destructive, appliance-wide, or
@@ -572,7 +572,7 @@ beyond what those two documents already specify.
 
 ## RBAC reconciliation — download domain (epic #16, decision R2-10, issue #1034)
 
-`docs/api-contract.md`'s new "RBAC map — download domain" table is the wire-facing
+`docs/reference/api-contract.md`'s new "RBAC map — download domain" table is the wire-facing
 reconciliation of owner grill decision R2-10 against shipped controllers, checked
 attribute-by-attribute rather than inferred. It is not repeated here; this paragraph
 states the one finding worth a security-document callout. **The divergence flagged in

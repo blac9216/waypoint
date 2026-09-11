@@ -148,7 +148,7 @@ describe("applyEvent", () => {
 	});
 
 	it("is idempotent-safe under out-of-order-looking replays: applying events in commit (seq) order converges", () => {
-		// docs/api-contract.md: seq is assigned in commit order, so replaying
+		// docs/reference/api-contract.md: seq is assigned in commit order, so replaying
 		// WHERE seq > last in that order is exact. This test proves applying
 		// a sequence of events via applyEvent produces the terminal board a
 		// human reading the events in order would expect.

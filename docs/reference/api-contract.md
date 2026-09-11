@@ -1,5 +1,7 @@
 # Waypoint — API Contract & Data Ledger (design-phase output)
 
+Kind: reference
+
 Status: **draft v1 — closes the design phase**. Derived from the UI prototype
 (`ui/prototype/`) reconciled against `domain-model.md`. This is the contract the foundation story
 backend implements and the frontend consumes; refine it in PRs, don't fork it in code.
@@ -84,7 +86,7 @@ plus a deferred issue.
 | Repo-serving credential binding (create/read/rotate/delete) | — | — | ✅ | `RepoCredentialsController` (all verbs, including read) | ✅ yes — stricter than R2-10's floor even names ("serving/auth dials" is Admin; this controller also gates *read*, which R2-10 does not explicitly require but does not forbid either). |
 | Depot enrollment (Software Depot ID, Activation Code, validate, reset) | — | — | ✅ | `DepotEnrollmentController` (all writes) | ✅ yes |
 | Catalog sync/pull (tool-driven acquisition) | — | — | ✅ | `CatalogController.Sync`/`Pull` | Not explicitly named in R2-10's list, but falls under "Admin: everything persistent or destructive" via the domain-model.md Roles catch-all; consistent, not a gap. |
-| Alert acknowledge | — | — | ✅ (🚧 planned surface) | `docs/api-contract.md` Alerts section | ✅ yes (planned, matches the existing epic #726 alert model adopted wholesale per decision R2-9) |
+| Alert acknowledge | — | — | ✅ (🚧 planned surface) | `docs/reference/api-contract.md` Alerts section | ✅ yes (planned, matches the existing epic #726 alert model adopted wholesale per decision R2-9) |
 
 ## Resources
 
@@ -194,7 +196,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 | `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), plus a top-level `vcenter` row for the appliance itself (issue #1081), build info, semantic version (issue #974, host and vcenter rows only), maintenance_mode, `instance_uuid` (issue #1063, vm rows only — vSphere's authoritative instance UUID, deconflicts identically named VMs). |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. Its `discover.progress` job event carries, alongside the existing upsert/removal/declared-service counters, `components_unlinked` (count of discovered components left with no `catalog_component_id` this pass) and `components_unlinked_by_reason` (a `{ reason: count }` breakdown over the closed `no_exact_version_fact`\|`out_of_declared_scope`\|`ambiguous`\|`lookup_failed` set — issue #1082); the job's completion note and one `job.log` warning per unlinked component name the same reasons, so a run where every component is catalog-unlinked is never indistinguishable from a fully-successful one. |
 
-🚧 **Planned cached component inventory (epic #726, [ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md)).**
+🚧 **Planned cached component inventory (epic #726, [ADR-0023](../adr/0023-compliance-inventory-and-immutable-plans.md)).**
 `/targets/{id}/inventory` supersedes the flat cluster/host/VM tree above with a
 component-identity collection once #732–#734 land. Every row is a stable
 `Component`: `component_id` (opaque, identity is `(target_id, catalog_component_key,
@@ -233,7 +235,7 @@ run that hits a conflicted component cannot choose; it skips that component as a
 `CoverageOmission` and the conflict remains visible here for an Admin/Cyber to
 resolve out-of-band (e.g. correcting the `configured_fact` via `PUT /components/{id}`).
 
-**Shipped by #584/#585/#586, remaining for #587** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
+**Shipped by #584/#585/#586, remaining for #587** ([ADR-0021](../adr/0021-credential-purpose-matrix.md)):
 #584 shipped the per-`(target, purpose)` binding surface —
 `PUT`/`DELETE /targets/{id}/credential-bindings/{purpose}` (Admin, purpose
 applicability and credential-type compatibility validated against the shared matrix;
@@ -254,7 +256,7 @@ both is a 400); the flat legacy `credential` tier (one shared secret for the who
 remains and is mutually exclusive with `ad_hoc_credentials`. The wizard UI defaulting to
 assigned credentials is #587.
 
-🚧 **Superseded precedence order (epic #726, [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+🚧 **Superseded precedence order (epic #726, [ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
 The paragraph above describes the shipped `(target, purpose)`-only binding model.
 ADR-0024 supersedes ADR-0021 §§4–7 (target-only defaulting, whole-run missing-binding
 rejection, schedule-carried overrides) once #735–#737 land. The end-state precedence,
@@ -392,7 +394,7 @@ becomes a `CoverageOmission` and the schedule re-evaluates at next dispatch,
 ADR-0023). `POST /schedules` for a scan schedule stores `{ site_id, target_scope }`
 the same shape, never `profile_id`.
 
-**Shipped by #585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
+**Shipped by #585/#586** ([ADR-0021](../adr/0021-credential-purpose-matrix.md)):
 #585 landed the stored-credential half of per-purpose resolution — `credential_overrides`
 on `POST /runs`, per-job `job_credential_bindings` snapshots, and the
 `credential_binding_gaps` rejection contract (see the `/runs` row above). #586 landed
@@ -611,7 +613,7 @@ whole-profile answer per target.
 
 ### Config documents (three-layer) — superseded by per-control settings
 
-🚧 **Superseded (epic #726, [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+🚧 **Superseded (epic #726, [ADR-0024](../adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
 The whole-profile config-doc shortcut below is transitional. It does not survive
 alongside the per-control model that follows — once #735–#737 land, `/config-docs`
 stops accepting `kind: "input"`/`"attestation"` scoped to a whole profile; only
@@ -650,7 +652,7 @@ there is no post-scan human-assessment workflow.
 
 ### Catalog, content sources, and exact-version baselines
 
-📋 **Planned** (epic #726, [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md)).
+📋 **Planned** (epic #726, [ADR-0022](../adr/0022-compliance-catalog-and-content-lifecycle.md)).
 Supersedes the mutable-profile-directory model implied by "Compliance content"
 below: baselines bind one exact product version to one exact profile version, never
 a range or scan-time picker. ✅ **`/catalog/products` implemented** (issues #728/#729,
@@ -811,7 +813,7 @@ before it is executable — `/compliance-content/pull` stages, it does not activ
 
 ### Trust and temporary SSH cleanup
 
-📋 **Planned** (epic #726, [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)).
+📋 **Planned** (epic #726, [ADR-0025](../adr/0025-compliance-trust-cleanup-and-evidence.md)).
 
 | Endpoint | Methods | Notes |
 |---|---|---|
@@ -868,7 +870,7 @@ shipped addition; the retention sweep job itself (ADR-0034) is also not yet buil
 | `/dashboard` | GET | Aggregate: KPI tiles, site posture, recent runs, attention items. |
 
 **Compliance evidence retention sweep (issue #1062, epic #726 sections 6/7; supersedes
-the sketch previously here — see [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)
+the sketch previously here — see [ADR-0025](../adr/0025-compliance-trust-cleanup-and-evidence.md)
 for the design rationale).** The shipped `/runs/{id}/purge` (documented above, in Runs
 & jobs) purges one run's compliance projections. This is the graph-wide policy that
 composes with it:

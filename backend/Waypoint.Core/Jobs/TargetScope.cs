@@ -18,7 +18,7 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// The closed <c>target_scope.mode</c> vocabulary (issue #733, epic #726 Wave 2,
-/// docs/api-contract.md's planned end-state <c>{ site_id, target_scope }</c> shape).
+/// docs/reference/api-contract.md's planned end-state <c>{ site_id, target_scope }</c> shape).
 /// <see cref="All"/> expands to every catalog-compatible component discovered beneath
 /// the named top-level targets after the mandatory pre-scan refresh (ADR-0023 §3:
 /// "Top-level 'all' expands against refreshed inventory and includes newly discovered
@@ -39,7 +39,7 @@ public static class TargetScopeModes
 
 /// <summary>
 /// The parsed, not-yet-resolved shape of a scan run's <c>scope.target_scope</c>
-/// (docs/api-contract.md planned end-state: "<c>target_scope</c> is exactly one of
+/// (docs/reference/api-contract.md planned end-state: "<c>target_scope</c> is exactly one of
 /// <c>{ "mode": "all", "target_ids": [...] }</c> ... or <c>{ "mode": "explicit",
 /// "component_ids": [...] }</c>"). This is the tri-state REQUEST shape -- see
 /// <see cref="Components.ResolvedTargetScope"/> for what it resolves to once joined

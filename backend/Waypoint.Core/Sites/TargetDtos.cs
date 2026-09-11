@@ -32,7 +32,7 @@ public static class TargetKinds
 
 /// <summary>
 /// The closed set of discovery_status values. Not enumerated anywhere in
-/// docs/explanation/domain-model.md or docs/api-contract.md (both name the field only) -- this set
+/// docs/explanation/domain-model.md or docs/reference/api-contract.md (both name the field only) -- this set
 /// is invented here to match the `/targets/{id}/discover` job lifecycle the contract
 /// does describe (queued discover job -> running -> terminal), and is intentionally
 /// small pending the real #13 discovery-job slice.

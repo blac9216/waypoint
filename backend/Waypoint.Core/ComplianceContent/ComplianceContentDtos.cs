@@ -31,7 +31,7 @@ public static class ComplianceContentPullStatuses
 	public const string Failed = "failed";
 }
 
-/// <summary>Closed profile-inventory <c>state</c> values (docs/api-contract.md, issue #40 AC).</summary>
+/// <summary>Closed profile-inventory <c>state</c> values (docs/reference/api-contract.md, issue #40 AC).</summary>
 public static class ProfileStates
 {
 	public const string Current = "current";

@@ -16,7 +16,7 @@ namespace Waypoint.Core.Catalog;
 
 /// <summary>
 /// The closed set of presence states the Library "Repository" tab renders (issue #36,
-/// docs/api-contract.md "Library & content library": "Presence model per mode:
+/// docs/reference/api-contract.md "Library & content library": "Presence model per mode:
 /// `present`|`superseded`|`in_depot`(connected)|`missing`(air-gapped, vs last bundle
 /// manifest)"). Evaluated by <see cref="LibraryPresenceEvaluator"/> from the existing
 /// <c>depot_artifacts</c> catalog -- there is no separate library store (deliberately;

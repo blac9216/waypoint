@@ -21,7 +21,7 @@ public sealed record ScheduleCreateRequest(
 	[property: JsonPropertyName("name")]
 	string Name,
 
-	/// <summary>Read-only job type only -- scan, discover, credential-test, catalog-index (docs/api-contract.md `/schedules`).</summary>
+	/// <summary>Read-only job type only -- scan, discover, credential-test, catalog-index (docs/reference/api-contract.md `/schedules`).</summary>
 	[property: JsonPropertyName("job_type")]
 	string JobType,
 
@@ -84,7 +84,7 @@ public sealed record ScheduleResponse(
 	[property: JsonPropertyName("enabled")]
 	bool Enabled,
 
-	/// <summary>Non-null when auto-paused (docs/api-contract.md: "auto-paused states in air-gapped mode for depot kinds"); independent of <see cref="Enabled"/>.</summary>
+	/// <summary>Non-null when auto-paused (docs/reference/api-contract.md: "auto-paused states in air-gapped mode for depot kinds"); independent of <see cref="Enabled"/>.</summary>
 	[property: JsonPropertyName("paused_reason")]
 	string? PausedReason,
 

@@ -22,7 +22,7 @@ using Waypoint.Core.Serialization;
 namespace Waypoint.Api.Middleware;
 
 /// <summary>
-/// Writes the documented error envelope (<c>docs/api-contract.md</c> Conventions:
+/// Writes the documented error envelope (<c>docs/reference/api-contract.md</c> Conventions:
 /// <c>{ "error": { code, message, detail? } }</c>) to a response. Shared by
 /// <see cref="ErrorHandlingMiddleware"/> (thrown <see cref="ApiException"/> /unhandled
 /// exceptions) and the status-code-pages handler wired in <c>Program.cs</c> (401/403/404

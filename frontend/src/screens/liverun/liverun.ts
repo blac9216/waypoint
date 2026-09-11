@@ -1,5 +1,5 @@
 /**
- * Live Run data layer (issue #283, first slice of #26) — docs/api-contract.md
+ * Live Run data layer (issue #283, first slice of #26) — docs/reference/api-contract.md
  * "Runs & jobs" (`GET /runs/{id}`, `GET /runs/{id}/jobs`) and "Event streams
  * (SSE)" (`job.state`, `job.log`, `run.progress`, `queue.state`).
  *
@@ -7,7 +7,7 @@
  *   1. REST seed (`fetchRunSnapshot`, backed by `fetchRunJobs`) — a snapshot for first paint.
  *   2. SSE events folded by `applyEvent`, a pure reducer, so the exact same
  *      function drives live updates AND Last-Event-ID replay after a reload
- *      (docs/api-contract.md: "commit order" seq guarantee makes replay
+ *      (docs/reference/api-contract.md: "commit order" seq guarantee makes replay
  *      exact) — see useLiveRun.ts and LiveRunScreen.test.tsx.
  *
  * Issue #494: `RunHeader`/`RunJob`/`QueueStatus` below are a client-only VIEW
@@ -22,7 +22,7 @@
  * `mapRunHeader`/`mapRunJob` synthesize the closest honest projection: jobs
  * are grouped into one queue per `JobResponse.priority`, and `pass`/`fail`/
  * `na`/`benchmark` are left null/empty rather than fabricated. Where
- * docs/api-contract.md previously described the fictional contract, it has
+ * docs/reference/api-contract.md previously described the fictional contract, it has
  * been corrected to match this real shape.
  *
  * Run controls (#285): `pauseRun`/`resumeRun`/`abortRun` map to
@@ -370,7 +370,7 @@ interface RunProgressData {
 	/** Issue #406: present when this event is the run reaching a contract terminal
 	 * state (`completed`/`completed_with_failures`) — the job-engine's run-completion
 	 * write rides the existing `run.progress` channel rather than a new event type
-	 * (docs/api-contract.md's SSE types are a closed six-value set). Absent on every
+	 * (docs/reference/api-contract.md's SSE types are a closed six-value set). Absent on every
 	 * other `run.progress` emission (plain counter progress, abort), so it must never
 	 * overwrite `header.state` with `undefined`. */
 	state?: RunHeader["state"];

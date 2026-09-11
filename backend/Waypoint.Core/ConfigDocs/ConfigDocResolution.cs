@@ -16,7 +16,7 @@ namespace Waypoint.Core.ConfigDocs;
 
 /// <summary>
 /// One (kind, profile, target) slot's resolved value -- the EFFECTIVE card
-/// (docs/api-contract.md `/config-docs/resolve`: "resolved value + supplying layer").
+/// (docs/reference/api-contract.md `/config-docs/resolve`: "resolved value + supplying layer").
 /// <see cref="Layer"/> is the layer that actually supplied <see cref="Body"/> (the
 /// most-specific non-empty layer among global/site/target -- docs/explanation/domain-model.md: "most
 /// specific wins ... not a tighten-only relationship"), or null when no layer has a doc

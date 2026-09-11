@@ -43,7 +43,7 @@ public sealed class ConfigDocRepository
 
 	/// <summary>
 	/// Lists config-docs, optionally filtered by kind/profile/layer
-	/// (docs/api-contract.md `/config-docs`: "Filter by kind, profile, layer").
+	/// (docs/reference/api-contract.md `/config-docs`: "Filter by kind, profile, layer").
 	/// </summary>
 	public async Task<(IReadOnlyList<ConfigDoc> Items, long TotalCount)> ListAsync(
 		string? kind, string? profile, string? layerType, Guid? layerRef, PageRequest page, CancellationToken cancellationToken)
@@ -208,7 +208,7 @@ public sealed class ConfigDocRepository
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? MapVersion(reader) : null;
 	}
 
-	/// <summary>Full version history, newest first -- the auditor answer (docs/api-contract.md `/config-docs/{id}/versions`).</summary>
+	/// <summary>Full version history, newest first -- the auditor answer (docs/reference/api-contract.md `/config-docs/{id}/versions`).</summary>
 	public async Task<IReadOnlyList<ConfigDocVersion>> ListVersionsAsync(Guid docId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
@@ -314,7 +314,7 @@ public sealed class ConfigDocRepository
 	/// <summary>
 	/// Writes the first (or next) version at the (kind, profile, layer) slot, creating the
 	/// <c>config_docs</c> identity row on first use -- this is what backs
-	/// <c>PUT /config-docs/{id}</c> per docs/api-contract.md: "PUT creates a new immutable
+	/// <c>PUT /config-docs/{id}</c> per docs/reference/api-contract.md: "PUT creates a new immutable
 	/// version"; there is no separate POST-to-create-the-slot step in the documented
 	/// contract, so the first PUT to a not-yet-existing slot both creates the doc and
 	/// writes @v1. <paramref name="layerType"/>/<paramref name="layerRef"/> are validated by

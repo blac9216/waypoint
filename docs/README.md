@@ -17,7 +17,7 @@ remediation from the baseline audit, not done here.
 - [how-to/ui-prototype.md](how-to/ui-prototype.md) — UI prototype handoff and per-screen visual/interaction reference
 
 ## Reference — facts and contracts
-- [api-contract.md](api-contract.md) — REST resources, SSE events, state machines, schema, data ledger
+- [reference/api-contract.md](reference/api-contract.md) — REST resources, SSE events, state machines, schema, data ledger
 
 ## Explanation — why things are the way they are
 - [explanation/architecture.md](explanation/architecture.md) — system architecture: components, job engine, modes, update flow

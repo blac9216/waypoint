@@ -45,7 +45,7 @@ namespace Waypoint.Infrastructure.Credentials;
 /// <c>{}</c>.
 ///
 /// <see cref="CredentialTypes.Token"/> has no dialable endpoint at all in this slice
-/// (docs/api-contract.md does not name one) -- per #245's AC, a token credential test
+/// (docs/reference/api-contract.md does not name one) -- per #245's AC, a token credential test
 /// stays decrypt-only: this handler still runs it through the same job/audit path
 /// (rather than leaving the old synchronous 200) so the health-flip source is uniform,
 /// it just never invokes PowerShell or looks up a target.

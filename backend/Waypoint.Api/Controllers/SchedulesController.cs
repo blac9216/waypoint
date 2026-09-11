@@ -86,7 +86,7 @@ public sealed class SchedulesController : ControllerBase
 	/// Creates a schedule. Rejects any <paramref name="request"/> whose
 	/// <c>job_type</c> is outside <see cref="ScheduleJobTypes.All"/> with a clear
 	/// <c>validation_failed</c> error -- "server-rejects `remediate` etc. — domain rule"
-	/// (docs/api-contract.md), enforced here BY DESIGN (a fixed closed set,
+	/// (docs/reference/api-contract.md), enforced here BY DESIGN (a fixed closed set,
 	/// <see cref="ScheduleJobTypes"/>), not by configuration, matching
 	/// <c>schedules_job_type_check</c>'s equally fixed CHECK constraint.
 	/// </summary>

@@ -37,7 +37,7 @@ public sealed record ComponentFactResponse(
 }
 
 /// <summary>
-/// docs/api-contract.md's planned <c>/targets/{id}/components</c> row shape: stable
+/// docs/reference/api-contract.md's planned <c>/targets/{id}/components</c> row shape: stable
 /// identity, lifecycle, independent configured/discovered facts, and the explicit
 /// <see cref="FactConflict"/> readiness signal -- never a silently resolved value.
 /// </summary>
@@ -80,7 +80,7 @@ public sealed record ComponentResponse(
 	}
 }
 
-/// <summary>Admin configured-fact write body (docs/api-contract.md: "configured_fact only").</summary>
+/// <summary>Admin configured-fact write body (docs/reference/api-contract.md: "configured_fact only").</summary>
 public sealed record ComponentConfiguredFactBody(string? ExactVersion);
 
 /// <summary>
@@ -94,7 +94,7 @@ public sealed record ComponentConfiguredFactBody(string? ExactVersion);
 /// </summary>
 public sealed record ComponentDeclareRootBody(string? CatalogComponentKey, string? ExactVersion);
 
-/// <summary>One immutable observation-history row (docs/api-contract.md <c>/components/{id}/observations</c>).</summary>
+/// <summary>One immutable observation-history row (docs/reference/api-contract.md <c>/components/{id}/observations</c>).</summary>
 public sealed record ComponentObservationResponse(string Id, string ComponentId, string Source, ComponentFactResponse ObservedFact, string Outcome, DateTimeOffset ObservedAt)
 {
 	public static ComponentObservationResponse FromDomain(ComponentObservation observation)

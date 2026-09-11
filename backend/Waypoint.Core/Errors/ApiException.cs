@@ -79,7 +79,7 @@ public class ApiException : Exception
 
 	/// <summary>
 	/// The endpoint exists but cannot function in the appliance's current mode
-	/// (<c>docs/api-contract.md</c>: "every response is mode-aware"). Reserved for
+	/// (<c>docs/reference/api-contract.md</c>: "every response is mode-aware"). Reserved for
 	/// mode-gated endpoints landing in later milestones (ADR-0010) — no caller in this
 	/// scaffold raises it yet.
 	/// </summary>

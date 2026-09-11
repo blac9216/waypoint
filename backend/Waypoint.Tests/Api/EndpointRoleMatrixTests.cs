@@ -85,7 +85,7 @@ public sealed class EndpointRoleMatrixTests
 		["CatalogController.PullStatus"] = WaypointRole.Viewer,
 		["CatalogController.Pull"] = WaypointRole.Admin,
 		// Issue #728: the execution-catalog read surface (GET /catalog/products[/{id}])
-		// is Viewer+ per docs/api-contract.md -- read-only reflection of the reviewed
+		// is Viewer+ per docs/reference/api-contract.md -- read-only reflection of the reviewed
 		// catalog; no write endpoint exists (ADR-0022), so no Admin rows here.
 		["CatalogController.ListProducts"] = WaypointRole.Viewer,
 		["CatalogController.GetProduct"] = WaypointRole.Viewer,
@@ -109,7 +109,7 @@ public sealed class EndpointRoleMatrixTests
 		// (including the derived capability read) are Viewer+, same floor as every
 		// other read surface in this table. The Admin-only configured-fact write and
 		// retired-purge match TargetsController's write floor. Observation history is
-		// Cyber+ (audit/troubleshooting read) per docs/api-contract.md, matching
+		// Cyber+ (audit/troubleshooting read) per docs/reference/api-contract.md, matching
 		// AuditController.List's floor for the same reason.
 		["ComponentsController.ListForTarget"] = WaypointRole.Viewer,
 		// Issue #743: declared-root creation is target/component persistent
@@ -139,7 +139,7 @@ public sealed class EndpointRoleMatrixTests
 		// BaselinesController -- issue #731's missing operator surface (round-5
 		// live-lab finding: CreateStagedBaselineAsync/BaselineActivationService had
 		// zero non-test callers). Reads (list/get/impact-diff) are Viewer+, matching
-		// docs/api-contract.md's documented "GET /baselines ... Viewer+" row. Every
+		// docs/reference/api-contract.md's documented "GET /baselines ... Viewer+" row. Every
 		// write (stage-create, activate, rollback) is Admin-only, matching the
 		// contract's RBAC summary row "Content: activate/roll back a baseline; waive
 		// a candidate test" (checked Admin only) and ComplianceContentController.Pull's
@@ -266,7 +266,7 @@ public sealed class EndpointRoleMatrixTests
 		// JobsController -- per-job cancel is Cyber+ (own runs), Admin any
 		// (RunsController.EnforceRunOwnership, checked in-action -- see class doc
 		// comment); issue #757's "Cyber controls owned live scans" owner decision
-		// lowered this floor from Operator+ to match docs/api-contract.md's role
+		// lowered this floor from Operator+ to match docs/reference/api-contract.md's role
 		// matrix (PR #819). Upload-retry (a narrower STIG Manager re-upload action,
 		// not a job-state control) stays Operator+; artifact download is Viewer+.
 		["JobsController.CancelJob"] = WaypointRole.Cyber,
@@ -281,11 +281,11 @@ public sealed class EndpointRoleMatrixTests
 		// -- see class doc comment); reads Viewer+; pause/resume/abort/retry/bulk-*
 		// are Cyber+ (own runs), Admin any (EnforceRunOwnership, in-action) -- issue
 		// #757's "Cyber controls owned live scans" owner decision, matching
-		// docs/api-contract.md's role matrix (PR #819); resume-blocked
+		// docs/reference/api-contract.md's role matrix (PR #819); resume-blocked
 		// (credential-swap-resume) is Admin.
 		["RunsController.CreateRun"] = WaypointRole.Cyber,
 		// Issues #733/#734 remainder: POST /runs/plan-preview shares CreateRun's Cyber+
-		// floor exactly (docs/api-contract.md's planned `/runs/plan-preview` row) -- it
+		// floor exactly (docs/reference/api-contract.md's planned `/runs/plan-preview` row) -- it
 		// is the same "may initiate a scan" capability, just without committing yet.
 		["RunsController.PreviewPlan"] = WaypointRole.Cyber,
 		["RunsController.ListRuns"] = WaypointRole.Viewer,

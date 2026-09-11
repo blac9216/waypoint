@@ -30,13 +30,13 @@ namespace Waypoint.Api.Controllers;
 /// no route, so <c>baselines</c> stayed empty after every successful content promote
 /// and the planner honestly reported <c>no_active_baseline</c> for every linked
 /// component. This controller wires the existing repository/service -- it invents no
-/// new activation semantics, only the HTTP surface docs/api-contract.md names
+/// new activation semantics, only the HTTP surface docs/reference/api-contract.md names
 /// (<c>GET /baselines</c>, <c>POST /baselines/{id}/rollback</c>) plus the stage-create
 /// and activate routes the contract's "Content: activate/roll back a baseline" RBAC
 /// row implies but does not spell out as its own path -- see this PR's body for that
 /// naming assumption.
 ///
-/// RBAC floor: every write here is Admin-only (docs/api-contract.md's RBAC summary row
+/// RBAC floor: every write here is Admin-only (docs/reference/api-contract.md's RBAC summary row
 /// "Content: activate/roll back a baseline; waive a candidate test" lists only ✅ under
 /// Admin; `/candidate-content/{id}/activate` and `/baselines/{id}/rollback` are both
 /// documented Admin-only). Reads are Viewer+ (`GET /baselines` is documented
@@ -63,7 +63,7 @@ public sealed class BaselinesController : ControllerBase
 		_activation = activation;
 	}
 
-	/// <summary>Every baseline, active/superseded/staged (docs/api-contract.md "GET /baselines ... Viewer+").</summary>
+	/// <summary>Every baseline, active/superseded/staged (docs/reference/api-contract.md "GET /baselines ... Viewer+").</summary>
 	[HttpGet]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(IReadOnlyList<BaselineResponse>), StatusCodes.Status200OK)]
@@ -156,7 +156,7 @@ public sealed class BaselinesController : ControllerBase
 	}
 
 	/// <summary>
-	/// Admin-only atomic activation (docs/api-contract.md's confirmation-phrase
+	/// Admin-only atomic activation (docs/reference/api-contract.md's confirmation-phrase
 	/// convention, matching <c>/candidate-content/{id}/activate</c>'s
 	/// <c>{ confirmation: "ACTIVATE" }</c> shape). Supersedes any existing active
 	/// baseline for the SAME execution profile -- see
@@ -182,7 +182,7 @@ public sealed class BaselinesController : ControllerBase
 
 	/// <summary>
 	/// Admin-only atomic rollback to a previously-activated (now superseded) baseline
-	/// for the same execution profile (docs/api-contract.md <c>{ confirmation:
+	/// for the same execution profile (docs/reference/api-contract.md <c>{ confirmation:
 	/// "ROLLBACK" }</c>). Same underlying atomic operation as activate -- see
 	/// <see cref="IBaselineRepository.RollbackAsync"/>.
 	/// </summary>

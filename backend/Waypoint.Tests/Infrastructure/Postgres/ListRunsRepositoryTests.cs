@@ -119,7 +119,7 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// docs/api-contract.md's "?limit/offset" convention says nothing about how ties in
+	/// docs/reference/api-contract.md's "?limit/offset" convention says nothing about how ties in
 	/// the sort key resolve, but an ORDER BY with no tiebreaker is a non-deterministic
 	/// sort in Postgres -- two runs created in the same instant could be returned in
 	/// either order on different calls, corrupting a paginated walk across them (a row

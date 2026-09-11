@@ -540,7 +540,7 @@ public sealed class CredentialRepository
 			await jobBindings.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
-		// A run's own credential_id (docs/api-contract.md: the credential a scan/
+		// A run's own credential_id (docs/reference/api-contract.md: the credential a scan/
 		// remediate run was initiated with) is independent of its jobs' -- detach it
 		// whenever the run itself is no longer 'running'/'pending' (its own terminal
 		// states, RunStates in api-contract.md), regardless of the jobs UPDATE above.

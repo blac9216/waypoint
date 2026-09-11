@@ -38,7 +38,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issues #733/#734 remainder ("`/runs/plan-preview`'s mandatory discovery refresh" per
-/// docs/api-contract.md, planned by PR #819): end to end against real Postgres and the
+/// docs/reference/api-contract.md, planned by PR #819): end to end against real Postgres and the
 /// real API, <c>POST /api/v1/runs/plan-preview</c> runs the identical resolve→compile
 /// pipeline <c>POST /runs</c> uses (see <see cref="ScanRunTargetScopeTests"/> for that
 /// path's own coverage) but persists NOTHING -- this suite's own required proof is the
@@ -385,7 +385,7 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	[Fact]
 	public async Task Preview_WithOnlyUnresolvableComponents_Returns200_AsHonestEmptyPlan()
 	{
-		// Docs/api-contract.md: "Zero-runnable-component previews are still 200 (an
+		// docs/reference/api-contract.md: "Zero-runnable-component previews are still 200 (an
 		// honest empty plan), not an error; the caller decides whether to proceed" --
 		// the opposite of create's no_runnable_component 400 for the identical scope.
 		Guid siteId = await CreateSiteAsync("preview-empty-plan-site");

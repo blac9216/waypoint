@@ -62,7 +62,7 @@ public sealed class ProfilesController : ControllerBase
 	}
 
 	/// <summary>
-	/// The per-control inventory (docs/api-contract.md `/profiles/{id}/controls`:
+	/// The per-control inventory (docs/reference/api-contract.md `/profiles/{id}/controls`:
 	/// "Control, severity, title, effective input + scope, attest status"). Controls
 	/// come from <c>profile_controls</c> (parsed at content-pull time, migration 0038);
 	/// an installed profile with zero parsed controls returns an empty array (distinct

@@ -23,7 +23,7 @@ namespace Waypoint.Tests.Core.Scans;
 /// application code -- <c>scan_plans.skips_json</c> (migration 0057) is JSONB with no
 /// CHECK constraint, so there is no database vocabulary to drift-guard against the way
 /// <c>ComponentResultStatusConstraintDriftTests</c> does for a CHECK-constrained
-/// column. Instead this test parses docs/api-contract.md's own "closed vocabulary"
+/// column. Instead this test parses docs/reference/api-contract.md's own "closed vocabulary"
 /// list -- the documentation this codebase treats as the contract of record for every
 /// other closed set (see that file's other "closed vocabulary" tables) -- and asserts
 /// it matches <see cref="ScanPlanSkipReasons.All"/> exactly, in order. A future skip
@@ -35,11 +35,11 @@ public sealed class ScanPlanSkipReasonsDriftGuardTests
 	public void ScanPlanSkipReasons_All_EqualsApiContractDocumentedClosedVocabulary()
 	{
 		string repoRoot = FindRepoRoot();
-		string docPath = Path.Combine(repoRoot, "docs", "api-contract.md");
+		string docPath = Path.Combine(repoRoot, "docs", "reference", "api-contract.md");
 		string doc = File.ReadAllText(docPath);
 
 		int headingIndex = doc.IndexOf("#### `/runs/{id}/plan` skip reason closed vocabulary", StringComparison.Ordinal);
-		Assert.True(headingIndex >= 0, "docs/api-contract.md must document the /runs/{id}/plan skip reason closed vocabulary.");
+		Assert.True(headingIndex >= 0, "docs/reference/api-contract.md must document the /runs/{id}/plan skip reason closed vocabulary.");
 
 		int nextHeadingIndex = doc.IndexOf("\n#### ", headingIndex + 1, StringComparison.Ordinal);
 		string section = nextHeadingIndex > 0
@@ -60,7 +60,7 @@ public sealed class ScanPlanSkipReasonsDriftGuardTests
 		DirectoryInfo? directory = new(AppContext.BaseDirectory);
 		while (directory is not null)
 		{
-			if (File.Exists(Path.Combine(directory.FullName, "docs", "api-contract.md")))
+			if (File.Exists(Path.Combine(directory.FullName, "docs", "reference", "api-contract.md")))
 			{
 				return directory.FullName;
 			}
@@ -68,6 +68,6 @@ public sealed class ScanPlanSkipReasonsDriftGuardTests
 			directory = directory.Parent;
 		}
 
-		throw new InvalidOperationException("Could not locate repository root (docs/api-contract.md not found in any ancestor directory).");
+		throw new InvalidOperationException("Could not locate repository root (docs/reference/api-contract.md not found in any ancestor directory).");
 	}
 }

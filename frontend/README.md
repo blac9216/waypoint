@@ -74,7 +74,7 @@ vite-plugins/
 
 This issue scopes the **global chrome** (top bar, left rail, job log drawer)
 and the login flow — not the nine screens themselves. Each screen in
-`src/screens/` is a `PlaceholderScreen` naming the `docs/api-contract.md`
+`src/screens/` is a `PlaceholderScreen` naming the `docs/reference/api-contract.md`
 endpoints it will eventually read, so routing, the role/mode guard, and the
 top-bar screen-title binding all have somewhere real to land today. Building
 out an individual screen (Dashboard, Live Run, the Download Catalog, …) is
@@ -93,7 +93,7 @@ nothing to `vite build`) implementing:
 - `POST /api/v1/auth/login`, `GET /api/v1/auth/me` — dev credentials
   `admin` / `waypoint-dev` (fictional, not a real secret); response shapes
   match the real backend's `Contracts/AuthContracts.cs` (see
-  `docs/api-contract.md`'s Auth section)
+  `docs/reference/api-contract.md`'s Auth section)
 - `GET /api/v1/system`, `GET /api/v1/stigman` — static mode/version/STIG
   Manager info
 - `GET /api/v1/events` — a synthetic SSE stream (job.state/job.log/
@@ -101,7 +101,7 @@ nothing to `vite build`) implementing:
 
 `src/lib/auth.tsx` consumes the confirmed contract: `POST /api/v1/auth/login`
 returns `{token, role, expires_at}` (no `user` object), and identity comes
-from `GET /api/v1/auth/me`. See `docs/api-contract.md`'s Auth section for the
+from `GET /api/v1/auth/me`. See `docs/reference/api-contract.md`'s Auth section for the
 full shape, including the closed set of PascalCase `role` values.
 
 ## The external-asset guard

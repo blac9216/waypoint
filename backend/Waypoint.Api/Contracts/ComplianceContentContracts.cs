@@ -16,7 +16,7 @@ using Waypoint.Core.ComplianceContent;
 
 namespace Waypoint.Api.Contracts;
 
-/// <summary>Response body for <c>GET</c>/<c>PUT /api/v1/compliance-content</c> (docs/api-contract.md).</summary>
+/// <summary>Response body for <c>GET</c>/<c>PUT /api/v1/compliance-content</c> (docs/reference/api-contract.md).</summary>
 public sealed record ComplianceContentResponse(
 	string RepositoryUrl,
 	string RefType,
@@ -84,7 +84,7 @@ public sealed record ProfileResponse(
 
 /// <summary>
 /// Response body for one entry of <c>GET /api/v1/profiles/{id}/controls</c>
-/// (docs/api-contract.md: "Control, severity, title, effective input + scope, attest
+/// (docs/reference/api-contract.md: "Control, severity, title, effective input + scope, attest
 /// status", issue #598). <c>title</c>/<c>severity</c> come from
 /// <see cref="Waypoint.Core.ComplianceContent.ProfileControl"/>, parsed from the
 /// profile's InSpec control files at content-pull time -- either can be null for a
