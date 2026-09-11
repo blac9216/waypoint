@@ -40,7 +40,7 @@ public sealed record CatalogDeclaredChildSyncOutcome(int Upserted, int Reconnect
 /// exact VCSA component list" (issue #741 AC), never a hard-coded service list.
 ///
 /// Selection is by the CLOSED transport/selector vocabulary alone
-/// (docs/compliance-parity.md: the "`ssh` / named VCSA service" rows are exactly the
+/// (docs/explanation/compliance-parity.md: the "`ssh` / named VCSA service" rows are exactly the
 /// <see cref="CatalogTransports.Ssh"/> + <see cref="CatalogSelectorKinds.Service"/>
 /// shape), never by product key or a literal service-name list -- deliberately
 /// product-neutral so the VCF 9.x "`ssh` / named service" family (issue #743's

@@ -17,7 +17,7 @@ using Waypoint.Core.ComplianceContent;
 namespace Waypoint.Tests.Parity;
 
 /// <summary>
-/// Machine-readable transcription of docs/compliance-parity.md's provenance matrix,
+/// Machine-readable transcription of docs/explanation/compliance-parity.md's provenance matrix,
 /// re-purposed for issue #749's PLANNER-PARITY slice (the follow-on to the merged
 /// catalog-parity suite, PR #836): given an invented catalog+components+active-baseline
 /// setup shaped like each documented family row, <c>ScanPlannerService.CompileAsync</c>
@@ -49,7 +49,7 @@ namespace Waypoint.Tests.Parity;
 /// PR). This avoids asserting on #736's active internals.
 ///
 /// All product-version keys, component keys, benchmark ids, and vendor/host identifiers
-/// below are INVENTED for this test suite -- shaped like docs/compliance-parity.md's
+/// below are INVENTED for this test suite -- shaped like docs/explanation/compliance-parity.md's
 /// rows, never exported from any real system or the sibling repository (CLAUDE.md
 /// sanitization policy).
 /// </summary>
@@ -81,7 +81,7 @@ public static class PlannerDerivationMatrix
 			"cannot be imported in the first place.",
 	};
 
-	/// <summary>The automatable rows, in the same order as docs/compliance-parity.md's table.</summary>
+	/// <summary>The automatable rows, in the same order as docs/explanation/compliance-parity.md's table.</summary>
 	public static IReadOnlyList<PlannerParityRow> Rows { get; } = BuildRows();
 
 	private static IReadOnlyList<PlannerParityRow> BuildRows()
@@ -266,7 +266,7 @@ public static class PlannerDerivationMatrix
 /// <summary>
 /// One documented family's per-selector-kind instance shape: how many concrete
 /// components of this kind the invented fixture seeds, and the expected per-item tuple
-/// every resulting <c>ScanPlanItem</c> must match (docs/compliance-parity.md's Transport/
+/// every resulting <c>ScanPlanItem</c> must match (docs/explanation/compliance-parity.md's Transport/
 /// Selector/Priority/Purpose/Output columns for this row, at plan-item granularity).
 /// </summary>
 public sealed record PlannerParityInstance(

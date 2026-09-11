@@ -127,7 +127,7 @@ designed this way:
 - [Security](docs/explanation/security.md) — secrets threat model and leakage controls
 - [ADRs](docs/adr/) — the decisions and why
 - [Roadmap](docs/explanation/roadmap.md) — build sequencing
-- [UI design brief](docs/ui/design-brief.md) — screen inventory and prototype reconciliation
+- [UI design brief](docs/explanation/ui-design-brief.md) — screen inventory and prototype reconciliation
 - [API contract](docs/api-contract.md) — REST/SSE contract, state machines, and data ledger
 - [Testing](docs/testing.md) — required reading before running the Compose stack
 

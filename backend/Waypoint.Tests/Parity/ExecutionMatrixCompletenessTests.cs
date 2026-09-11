@@ -21,7 +21,7 @@ namespace Waypoint.Tests.Parity;
 /// <see cref="ParityMatrixCompletenessTests"/>/<see cref="PlannerMatrixCompletenessTests"/>'s
 /// mechanics exactly (same 13 documented families, same allow-list-or-covered question,
 /// a THIRD independent question layered on top): every one of
-/// docs/compliance-parity.md's 13 capability-group rows must be either represented by an
+/// docs/explanation/compliance-parity.md's 13 capability-group rows must be either represented by an
 /// <see cref="ExecutionDerivationMatrix.Rows"/> entry (this slice proves the family's
 /// command-construction shape) or explicitly named in
 /// <see cref="ExecutionDerivationMatrix.OwnerLiveOnlyRows"/> with a rationale.
@@ -36,7 +36,7 @@ namespace Waypoint.Tests.Parity;
 public sealed class ExecutionMatrixCompletenessTests
 {
 	/// <summary>
-	/// The complete set of docs/compliance-parity.md family identifiers this test
+	/// The complete set of docs/explanation/compliance-parity.md family identifiers this test
 	/// tracks -- the SAME 13 families <see cref="PlannerMatrixCompletenessTests"/>
 	/// tracks (execution rows are keyed one level finer, per selector-kind instance
 	/// within a family, but every family must have at least one execution row or an
@@ -85,7 +85,7 @@ public sealed class ExecutionMatrixCompletenessTests
 			.ToList();
 
 		Assert.True(uncovered.Count == 0,
-			"docs/compliance-parity.md families not covered by ExecutionDerivationMatrix.Rows nor " +
+			"docs/explanation/compliance-parity.md families not covered by ExecutionDerivationMatrix.Rows nor " +
 			"explicitly allow-listed in ExecutionDerivationMatrix.OwnerLiveOnlyRows: " + string.Join(", ", uncovered));
 	}
 

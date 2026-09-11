@@ -105,7 +105,7 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 	/// given <paramref name="kind"/> (stig|srg) -- the join
 	/// <see cref="IBenchmarkRepository.GetComponentContentKindAsync"/> derives its
 	/// answer from. A STIG kind additionally records a <c>catalog_benchmark_references</c>
-	/// row (docs/compliance-parity.md "STIG: exact profile/XCCDF pair") -- not required
+	/// row (docs/explanation/compliance-parity.md "STIG: exact profile/XCCDF pair") -- not required
 	/// for the kind derivation itself, but keeps this fixture representative of a real
 	/// STIG execution profile.
 	/// </summary>

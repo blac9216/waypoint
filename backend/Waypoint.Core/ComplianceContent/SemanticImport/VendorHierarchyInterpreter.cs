@@ -26,14 +26,14 @@ public sealed record VendorHierarchyInterpretation(
 	IReadOnlyList<SemanticImportRejection> Rejections);
 
 /// <summary>
-/// Interprets the vendor compliance-content repository hierarchy (docs/compliance-parity.md's
+/// Interprets the vendor compliance-content repository hierarchy (docs/explanation/compliance-parity.md's
 /// documented vSphere/VCSA/NSX/Photon/Aria/vIDM layouts) into normalized
 /// <see cref="SemanticCandidate"/> entries -- issue #729's replacement for the raw
 /// recursive <c>inspec.yml</c> walk in <c>WaypointComplianceContent.psm1</c>.
 ///
 /// This is a closed, data-driven family table, not a general path-inference engine
 /// (ADR-0013: new products/components are data, never inferred code). Every family this
-/// recognizes matches one documented row of docs/compliance-parity.md's provenance
+/// recognizes matches one documented row of docs/explanation/compliance-parity.md's provenance
 /// matrix; a profile whose path does not match ANY family's shape is quarantined
 /// (<see cref="SemanticImportRejection"/>), never guessed into the nearest-looking
 /// family. Vocabulary-closed-set validation (does the resulting transport/selector/kind
@@ -43,13 +43,13 @@ public sealed record VendorHierarchyInterpretation(
 /// </summary>
 public static class VendorHierarchyInterpreter
 {
-	// Family layouts, one row per docs/compliance-parity.md provenance-matrix entry.
+	// Family layouts, one row per docs/explanation/compliance-parity.md provenance-matrix entry.
 	// segments[0] is always the vendor-family directory name (case-insensitive); the
 	// interpreter never accepts an unlisted first segment.
 	// Issue #959 (epic #726): upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM
 	// baselines under a consolidated `vcf/<major>.x/...` tree instead of a top-level
 	// `vsphere/9-0/...` tree. This is the SAME vsphere product family and
-	// ObjectKindSplit shape docs/compliance-parity.md already documents -- only the
+	// ObjectKindSplit shape docs/explanation/compliance-parity.md already documents -- only the
 	// vendor-repository directory literal differs, so `vcf` maps to the `vsphere`
 	// VendorFamily.Name (not a new product family) rather than inventing a "vcf"
 	// product. Nothing else changes: the vcf/ tree still fails closed for any layout
@@ -123,7 +123,7 @@ public static class VendorHierarchyInterpreter
 	// real inspec.yml inputs: the six API/token-authenticated application profiles
 	// (hostname/apitoken/sessionToken/url inputs, no ssh-oriented input) under the
 	// umbrella `vmware-cloud-foundation-stig-baseline` use `vcf-api`
-	// (docs/compliance-parity.md "VCF `9.x` ... vcf-api / named service" row); every
+	// (docs/explanation/compliance-parity.md "VCF `9.x` ... vcf-api / named service" row); every
 	// other named VCF service leaf (SDDC Manager nginx/PostgreSQL, Operations
 	// httpd/PostgreSQL, Operations HCX httpd, Operations Networks nginx-platform, ...,
 	// each under its own distinctly-named baseline directory) is a local system service
@@ -307,7 +307,7 @@ public static class VendorHierarchyInterpreter
 	/// <summary>
 	/// Whole-appliance (<c>ssh / target</c>) family: Aria Operations/Automation/Suite
 	/// Lifecycle, Workspace ONE Access (<c>vidm</c>), Photon OS. The component IS the
-	/// appliance -- no sub-service name is invented (docs/compliance-parity.md). A
+	/// appliance -- no sub-service name is invented (docs/explanation/compliance-parity.md). A
 	/// non-empty tail after the baseline directory means this profile has nested
 	/// sub-directories the documented layout does not expect for this family, so it is
 	/// treated as an aggregate grouping node rather than a leaf.
@@ -493,7 +493,7 @@ public static class VendorHierarchyInterpreter
 	/// Splits a release directory name (e.g. <c>v2r3-stig</c>, <c>Y26M05-srg</c>) into
 	/// its (kind, releaseKey) -- kind is read from an explicit trailing
 	/// <c>-stig</c>/<c>-srg</c> suffix, never inferred from any other part of the name
-	/// (docs/compliance-parity.md "STIG and SRG content are distinct first-class kinds").
+	/// (docs/explanation/compliance-parity.md "STIG and SRG content are distinct first-class kinds").
 	/// </summary>
 	private static (string? Kind, string? ReleaseKey) ParseReleaseSegment(string segment)
 	{

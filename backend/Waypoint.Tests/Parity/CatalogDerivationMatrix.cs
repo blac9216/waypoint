@@ -17,7 +17,7 @@ using Waypoint.Core.ComplianceContent;
 namespace Waypoint.Tests.Parity;
 
 /// <summary>
-/// Machine-readable transcription of docs/compliance-parity.md's "Sibling
+/// Machine-readable transcription of docs/explanation/compliance-parity.md's "Sibling
 /// source-capability provenance matrix" -- the single source of truth for issue #749's
 /// first slice (catalog/importer parity). Every row below corresponds 1:1 to one body row
 /// of that markdown table (13 capability-group rows, matching the doc's own reproducible
@@ -32,7 +32,7 @@ namespace Waypoint.Tests.Parity;
 /// <see cref="OwnerLiveOnlyRows"/> with a rationale (issue #749 AC).
 ///
 /// All product-version keys, component keys, benchmark ids, and manifest content below
-/// are INVENTED for this test suite -- shaped like docs/compliance-parity.md's rows, never
+/// are INVENTED for this test suite -- shaped like docs/explanation/compliance-parity.md's rows, never
 /// exported from any real system or the sibling repository (CLAUDE.md sanitization
 /// policy).
 /// </summary>
@@ -65,7 +65,7 @@ public static class CatalogDerivationMatrix
 	};
 
 	/// <summary>
-	/// The automatable rows, in the same order as docs/compliance-parity.md's table.
+	/// The automatable rows, in the same order as docs/explanation/compliance-parity.md's table.
 	/// </summary>
 	public static IReadOnlyList<CatalogParityRow> Rows { get; } = BuildRows();
 

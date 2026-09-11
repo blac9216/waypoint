@@ -21,7 +21,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 
 /// <summary>
 /// Issue #729: <see cref="VendorHierarchyInterpreter"/> against representative INVENTED
-/// miniature layouts for every documented family (docs/compliance-parity.md). No real
+/// miniature layouts for every documented family (docs/explanation/compliance-parity.md). No real
 /// vendor content/paths/output appear anywhere in this file -- every path segment and
 /// manifest below is fabricated.
 /// </summary>
@@ -489,7 +489,7 @@ public sealed class VendorHierarchyInterpreterTests
 	public void StillUnrecognizedFamilies_RemainQuarantined_NeverGuessed(string unrecognizedFamily)
 	{
 		// Issue #959's disposition explicitly keeps aria/vcd/avi (and anything else not
-		// documented in docs/compliance-parity.md's layout table) quarantined -- only
+		// documented in docs/explanation/compliance-parity.md's layout table) quarantined -- only
 		// the vcf tree and the vsphere object-kind-before-inspec shape are newly
 		// recognized.
 		VendorContentEntry entry = Leaf(

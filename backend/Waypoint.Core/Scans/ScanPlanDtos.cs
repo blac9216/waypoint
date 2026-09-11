@@ -135,7 +135,7 @@ public static class ScanPlanSkipReasons
 
 	/// <summary>
 	/// Issue #1012 defense-in-depth: the resolved execution profile's own catalog
-	/// transport is one of docs/compliance-parity.md's closed transport vocabulary --
+	/// transport is one of docs/explanation/compliance-parity.md's closed transport vocabulary --
 	/// EVERY documented transport (<c>vmware</c>, <c>ssh</c>, <c>nsx-api</c>,
 	/// <c>vcf-api</c>) implies at least one required credential purpose per the
 	/// provenance matrix's Purpose column -- yet the profile's

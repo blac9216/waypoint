@@ -872,7 +872,7 @@ function Get-WaypointProfileDeclaredInputNameSet {
 					# of whitespace) is discarded without ever treating a `#` INSIDE
 					# the quotes as a comment introducer -- issue #1152's third
 					# acceptance criterion, pinned by the `quoted-name-containing-hash`
-					# row of docs/compliance-content-shape-inventory.md.
+					# row of docs/explanation/compliance-content-shape-inventory.md.
 					$QuoteChar = $Name[0]
 					$ClosingIndex = $Name.IndexOf($QuoteChar, 1)
 					if ($ClosingIndex -gt 0) {
@@ -1125,7 +1125,7 @@ function Invoke-WaypointNsxScan {
 
 	# Issue #917: auth input key names are baseline-specific. NSX 4.x profiles read
 	# nsxManager/sessionToken/sessionCookieId; the VCF 9.x NSX SRG profiles
-	# (products.nsx.9-x -- docs/compliance-parity.md's `NSX 9-x` row) read
+	# (products.nsx.9-x -- docs/explanation/compliance-parity.md's `NSX 9-x` row) read
 	# nsx_managerAddress/nsx_sessionToken/nsx_sessionCookieId instead. The sibling
 	# transport (module.transport.nsxapi.ps1) resolves the names from its catalog
 	# kind's optional `authInputKeys` map; Waypoint's catalog carries no such signal,

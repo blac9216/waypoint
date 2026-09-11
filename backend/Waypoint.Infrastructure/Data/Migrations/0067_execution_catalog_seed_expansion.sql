@@ -1,5 +1,5 @@
 -- Issue #967 (epic #726): expands migration 0064's execution-catalog seed to the
--- remaining 9 of 13 docs/compliance-parity.md "Sibling source-capability provenance
+-- remaining 9 of 13 docs/explanation/compliance-parity.md "Sibling source-capability provenance
 -- matrix" rows. Migration 0064 seeded only a representative slice (vSphere 8.0.3 STIG
 -- vmware + VCSA-service rows, NSX 4.1.2 STIG named-function row, Photon OS 5.0 SRG
 -- row) -- enough to prove every documented catalog SHAPE, per its own header comment.
@@ -21,7 +21,7 @@
 -- and `8.0.3` for the vSphere `8-0` `exact` row) -- never copied from any real
 -- deployment, changelog, or the lab.
 --
--- Rows covered (docs/compliance-parity.md's remaining 9):
+-- Rows covered (docs/explanation/compliance-parity.md's remaining 9):
 --   - vSphere `9-0` SRG: vmware object-kind row (vCenter, ESXi, VM) + VCSA
 --     named-service row (Envoy, PostgreSQL, VAMI, Photon)
 --   - NSX `9-x` SRG: named-function row (Manager, Routing)
@@ -53,7 +53,7 @@
 
 -- One provenance record for every row this migration inserts.
 INSERT INTO catalog_source_revisions (revision_key, description)
-VALUES ('issue-967-seed', 'Hand-curated execution-catalog seed expansion authored from docs/compliance-parity.md (issue #967)')
+VALUES ('issue-967-seed', 'Hand-curated execution-catalog seed expansion authored from docs/explanation/compliance-parity.md (issue #967)')
 ON CONFLICT (revision_key) DO NOTHING;
 
 -- catalog_products: Aria Operations/Automation/Suite Lifecycle and Workspace ONE
@@ -188,7 +188,7 @@ WHERE p.product_key = 'vcf' AND pv.version_key = '9.0.0'
 ON CONFLICT (product_version_id, component_key) WHERE parent_component_id IS NULL DO NOTHING;
 
 -- catalog_execution_profiles: binds each component above to the shared Y26M05-srg
--- content release + report group. All rows here are SRG (docs/compliance-parity.md
+-- content release + report group. All rows here are SRG (docs/explanation/compliance-parity.md
 -- "Output" column: "HDF only, never CKL/upload"), so output_kind is 'hdf' throughout
 -- and report_group_key is always the catch-all 'srg' group (priority 6, "every SRG 6"
 -- per the doc's Priority row and migration 0064's already-seeded catalog_report_groups
@@ -234,7 +234,7 @@ JOIN catalog_content_releases cr ON cr.release_key = ep.release_key
 JOIN catalog_report_groups rg ON rg.group_key = 'srg'
 ON CONFLICT (component_id, content_release_id) DO NOTHING;
 
--- catalog_credential_requirements: docs/compliance-parity.md "Purpose" column --
+-- catalog_credential_requirements: docs/explanation/compliance-parity.md "Purpose" column --
 -- vmware-transport components require vsphere-api; VCSA named services require BOTH
 -- vsphere-api and vcsa-ssh; NSX named functions require nsx-api; every ssh/target
 -- (whole-appliance) component requires srg-ssh; the VCF ssh named-service row also

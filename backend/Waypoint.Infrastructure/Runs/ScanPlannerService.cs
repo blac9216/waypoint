@@ -369,7 +369,7 @@ public sealed class ScanPlannerService
 		// preferring the lower (higher-precedence) priority is a doc-grounded rule, not
 		// an invented one. Execution profile id remains the final tiebreaker beneath
 		// priority so the method stays fully deterministic. NOTE (flagged for
-		// reviewer/owner): docs/compliance-parity.md's Priority row documents STIG-
+		// reviewer/owner): docs/explanation/compliance-parity.md's Priority row documents STIG-
 		// before-SRG ordering for REPORT SEQUENCING across different components, not
 		// explicitly for choosing between two co-existing profiles of the SAME
 		// component -- no ADR states that preference directly. This PR treats "prefer
@@ -435,7 +435,7 @@ public sealed class ScanPlannerService
 				.Select(r => r.Purpose)
 				.OrderBy(p => p, StringComparer.Ordinal)];
 
-			// Issue #1012 defense-in-depth: every transport in docs/compliance-parity.md's
+			// Issue #1012 defense-in-depth: every transport in docs/explanation/compliance-parity.md's
 			// closed vocabulary that a runner path can actually DISPATCH today (vmware,
 			// ssh, nsx-api) implies at least one required credential purpose per the
 			// provenance matrix's Purpose column -- there is no documented credential-free

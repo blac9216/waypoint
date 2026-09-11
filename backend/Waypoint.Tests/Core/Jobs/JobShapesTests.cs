@@ -99,7 +99,7 @@ public sealed class JobShapesTests
 	public void ForJob_VcsaServiceSrgItemOnVsphereTarget_ReturnsSrg_NotStandard()
 	{
 		// The inverse: an SRG-kind VCSA service item on the SAME vsphere-kind target
-		// (docs/compliance-parity.md's vSphere 9-0 SRG row) must route to Srg (HDF-only)
+		// (docs/explanation/compliance-parity.md's vSphere 9-0 SRG row) must route to Srg (HDF-only)
 		// -- target_kind alone would get this wrong the other direction (it would infer
 		// Standard because the target is vsphere-kind).
 		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"vsphere","transport":"ssh","selector_kind":"service","selector_name":"envoy","output_kind":"hdf"}""";

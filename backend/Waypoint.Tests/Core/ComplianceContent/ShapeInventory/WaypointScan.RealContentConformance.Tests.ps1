@@ -17,7 +17,7 @@
 # inspec.yml manifests Get-WaypointProfileDeclaredInputNameSet resolves at least one
 # declared input for. Skips cleanly (Pester -Skip, no assertion) when the clone is
 # absent, exactly like the C# tests, so this never depends on vendor content being
-# present. As docs/compliance-content-shape-inventory.md's "What this guard does and
+# present. As docs/explanation/compliance-content-shape-inventory.md's "What this guard does and
 # does not cover" section explains: this proves what the parser ACCEPTS today, not
 # that no shape is silently absent -- pair with scripts/parser-shape-diff.sh for that.
 #
