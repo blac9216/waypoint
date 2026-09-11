@@ -385,7 +385,7 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	[Fact]
 	public async Task Preview_WithOnlyUnresolvableComponents_Returns200_AsHonestEmptyPlan()
 	{
-		// Docs/api-contract.md: "Zero-runnable-component previews are still 200 (an
+		// docs/reference/api-contract.md: "Zero-runnable-component previews are still 200 (an
 		// honest empty plan), not an error; the caller decides whether to proceed" --
 		// the opposite of create's no_runnable_component 400 for the identical scope.
 		Guid siteId = await CreateSiteAsync("preview-empty-plan-site");
