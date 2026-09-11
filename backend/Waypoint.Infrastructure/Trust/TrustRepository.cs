@@ -287,7 +287,7 @@ public sealed class TrustRepository : ITrustRepository
 	/// inline <c>audit_log</c> write idiom -- <c>audit_log</c> has no
 	/// <c>trust_bundle_id</c>/<c>trust_policy_id</c> column (migration 0001 fixed its FK
 	/// set to credential/job/run), so every non-secret fact this slice's ADR-0025 audit
-	/// table (docs/security.md) requires (bundle id, fingerprint, scope, mode, reason,
+	/// table (docs/explanation/security.md) requires (bundle id, fingerprint, scope, mode, reason,
 	/// actor, time) travels in <c>detail</c> JSONB instead, exactly like every other
 	/// audited decision this codebase has that predates a dedicated FK column.
 	/// </summary>

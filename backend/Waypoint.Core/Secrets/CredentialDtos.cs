@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Secrets;
 
 /// <summary>
-/// The closed set of credential types (docs/domain-model.md "Credential", plus the
+/// The closed set of credential types (docs/explanation/domain-model.md "Credential", plus the
 /// Broadcom depot types). Migration 0022 (issue #252) added a DB CHECK mirroring this
 /// set; migration 0047 (issue #690) extends it with <see cref="DepotActivationCode"/>
 /// and <see cref="LegacyDownloadToken"/> -- same split

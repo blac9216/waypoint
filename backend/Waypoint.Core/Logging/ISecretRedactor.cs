@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Logging;
 
 /// <summary>
-/// The log-scrubbing hook point required from the start by <c>docs/security.md</c>
+/// The log-scrubbing hook point required from the start by <c>docs/explanation/security.md</c>
 /// control 1: "The logging pipeline maintains the set of secret values currently in
 /// play ... and redacts every occurrence before any line reaches a sink." The API's
 /// Serilog pipeline routes every rendered log line through the registered

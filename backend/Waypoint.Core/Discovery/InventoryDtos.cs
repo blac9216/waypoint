@@ -35,7 +35,7 @@ public static class InventoryItemTypes
 }
 
 /// <summary>
-/// A discovered inventory item as stored (docs/domain-model.md, docs/api-contract.md
+/// A discovered inventory item as stored (docs/explanation/domain-model.md, docs/api-contract.md
 /// `/targets/{id}/inventory`). <see cref="ParentId"/> builds the cluster -&gt; host -&gt;
 /// vm tree; <see cref="Moref"/> is the vSphere managed-object reference, the stable
 /// identity re-discovery upserts against. <see cref="RemovedAt"/> is non-null once a

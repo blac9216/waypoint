@@ -19,7 +19,7 @@
  * config-doc resolution for a selected target, applied identically to
  * every control row in the response — not a truly independent per-control
  * lookup. There is still no per-control structured storage anywhere in the
- * config-doc schema (docs/domain-model.md "STIG configuration documents":
+ * config-doc schema (docs/explanation/domain-model.md "STIG configuration documents":
  * "stored as documents... not parsed into forms; the schemas belong to
  * Broadcom/MITRE"). Waiver "scope" is a free-text field inside the
  * attestation YAML the operator writes, not a structured control picker;

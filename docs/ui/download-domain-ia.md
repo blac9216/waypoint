@@ -15,7 +15,7 @@ approval.
 This document follows [`design-brief.md`](design-brief.md)'s entity/action-map
 convention for each screen (**Entities**, **Actions** with an RBAC tier, then
 **Placement**/**Open questions**) rather than restating it. Domain facts here are
-normative from [`../domain-model.md`](../domain-model.md)'s "Depot, catalog identity,
+normative from [`../explanation/domain-model.md`](../explanation/domain-model.md)'s "Depot, catalog identity,
 subscriptions, and presence sweep" section and the ADRs it cites (0028–0034); wire
 facts (endpoints, shipped-vs-planned, RBAC-as-implemented) are cited from
 [`../api-contract.md`](../api-contract.md)'s "Depot catalog & downloads" and "Library
@@ -64,7 +64,7 @@ screen entirely, and it is orthogonal to the RBAC table above.
 enqueue → handler → verification) already landed against this screen's data source.
 
 **Entities:** `catalog artifact` (vendor `productVersionCatalog` row — product,
-version, size, sha256; single source of artifact identity, `../domain-model.md`) →
+version, size, sha256; single source of artifact identity, `../explanation/domain-model.md`) →
 `unknown catalog file` (on-disk, catalog does not describe it — surfaced, never
 silently dropped, issue #1495/#1488) → `binaries-download run/job` (one run, one job
 per selected artifact or resolved release member, `POST /downloads/binaries`) →
@@ -94,7 +94,7 @@ under CONTENT (Open Question 2). No prototype precedent — this is new for the
 depot-parity story.
 
 **Entities:** shipped, read-only **preset** (stack — VCF or VVF — × generation,
-clone-to-custom, `../domain-model.md`) → **Subscription** (adopted from a preset or
+clone-to-custom, `../explanation/domain-model.md`) → **Subscription** (adopted from a preset or
 built custom; tracks at subminor/minor/major granularity, never a hardcoded major
 version, pulls the whole release when adopted) → per-lane subscription rows —
 `EsxAcquisitionSubscription` (shipped: issue #1470, `selected_platforms` validated
@@ -311,10 +311,10 @@ download-runner has heartbeated at least once).
 
 ## Cross-links
 
-- Roadmap: [`../roadmap.md`](../roadmap.md#download--depot-parity--open--milestone-design-record-epic-16) — story sequencing,
+- Roadmap: [`../explanation/roadmap.md`](../explanation/roadmap.md#download--depot-parity--open--milestone-design-record-epic-16) — story sequencing,
   Wave 0 status, and implementation progress for the epics this IA proposes screens
   against.
-- Domain model: [`../domain-model.md`](../domain-model.md#depot-catalog-identity-subscriptions-and-presence-sweep-planned) —
+- Domain model: [`../explanation/domain-model.md`](../explanation/domain-model.md#depot-catalog-identity-subscriptions-and-presence-sweep-planned) —
   normative entities for every screen above.
 - ADRs: [0028](../adr/0028-subscription-preset-metadata-indexed-default.md)
   (metadata-indexed-by-default), [0029](../adr/0029-depot-store-volume-topology.md)

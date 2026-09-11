@@ -42,7 +42,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// real run/job pair via the same <see cref="Waypoint.Core.Jobs.IJobControlRepository"/>/
 /// <see cref="RunCreationService"/> surface every controller uses (never claims/executes
 /// -- ADR-0013's control-plane-producer boundary), the run's initiator is recorded as
-/// "scheduled" (docs/domain-model.md Scheduling), next_run_at advances, and a depot-kind
+/// "scheduled" (docs/explanation/domain-model.md Scheduling), next_run_at advances, and a depot-kind
 /// schedule auto-pauses/auto-resumes as the appliance's mode flips. Exercises the
 /// non-scan read-only types (discover/credential-test/catalog-index) end to end;
 /// scheduled `scan`'s per-target fan-out reuses <see cref="RunCreationService.CreateScanRunAsync"/>

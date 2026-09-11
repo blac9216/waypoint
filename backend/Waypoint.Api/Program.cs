@@ -70,7 +70,7 @@ try
 	// The host's own logger — the one with the redaction seam — is unaffected either way.
 	builder.Host.UseSerilog(preserveStaticLogger: true, configureLogger: (context, services, loggerConfiguration) =>
 	{
-		// The seam from docs/security.md control 1: every rendered log line passes
+		// The seam from docs/explanation/security.md control 1: every rendered log line passes
 		// through ISecretRedactor before reaching the console sink. The registered
 		// implementation is InPlaySecretRedactor (epic #6 slice 1) -- it scrubs
 		// whatever secret values are currently Track()ed as in play.

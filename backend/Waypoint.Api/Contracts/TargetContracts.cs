@@ -23,7 +23,7 @@ namespace Waypoint.Api.Contracts;
 /// connection.host, credential_ref, discovery_status, last_refreshed).
 /// <see cref="Connection"/> rides as a raw JSON string -- same convention as
 /// <see cref="SiteResponse.StigmanOverride"/> -- and, per
-/// docs/domain-model.md's "service credential referenced, never embedded" rule, never
+/// docs/explanation/domain-model.md's "service credential referenced, never embedded" rule, never
 /// carries secret material: only <see cref="CredentialId"/>/<see cref="Bindings"/> ever
 /// name a credential.
 ///
@@ -147,7 +147,7 @@ public sealed record TargetUpdateBody(
 	bool ClearCredential);
 
 /// <summary>
-/// Guards docs/domain-model.md's "connection secrets are NEVER embedded in the
+/// Guards docs/explanation/domain-model.md's "connection secrets are NEVER embedded in the
 /// target, only referenced by ID": a <c>connection</c> payload naming any
 /// secret-shaped key is rejected with 400 before it ever reaches storage. This is a
 /// closed-set key-name check (case-insensitive), not a content/entropy scan -- the

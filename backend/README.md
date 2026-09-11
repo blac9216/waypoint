@@ -62,7 +62,7 @@ cd backend
 dotnet build Waypoint.Api
 # Prompts for the password (input hidden) and prints the hash to stdout. Never pass
 # the password as an argument — that would land it in argv, readable via
-# /proc/<pid>/cmdline (docs/security.md control 2). Never commit the plaintext or the hash.
+# /proc/<pid>/cmdline (docs/explanation/security.md control 2). Never commit the plaintext or the hash.
 dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password
 
 export LocalAuth__AdminPasswordHash=<hash from above>
@@ -138,14 +138,14 @@ that shape.
     at all (e.g. a depot artifact name for a `download` job).
   - `sites`/`targets` (migration 0009, issue #19): `targets.kind` is a `CHECK` against
     the closed `vsphere`/`nsx-api`/`ssh` set rather than a lookup table (three
-    hand-authored values, per `docs/domain-model.md` "Target" — a table would be
+    hand-authored values, per `docs/explanation/domain-model.md` "Target" — a table would be
     over-engineering for a set this size and this stable). `targets.connection` is
     JSONB (kind-specific fields, e.g. hostname) for the same "shape is still
     planning-grade" reasoning ADR-0002 already gives `depot_artifacts.metadata`, and
     the API layer (not the schema) enforces that it never carries secret material —
     only `credential_ref` ever names a credential. `discovery_status`'s value set
     (`never_discovered`/`discovering`/`discovered`/`failed`) is invented: neither
-    `docs/domain-model.md` nor `docs/api-contract.md` enumerates it, only the field
+    `docs/explanation/domain-model.md` nor `docs/api-contract.md` enumerates it, only the field
     name.
 - **Queue-claim index**: `idx_jobs_queue_claim` is a partial index on
   `(job_type, priority, created_at) WHERE state = 'queued'`, matching the ADR-0008
@@ -224,7 +224,7 @@ decided in epic #6 slice 1:
   likeliest cause.
 
 Both paths scrub payloads through `ISecretRedactor` (`InPlaySecretRedactor`) before
-the row is written -- `docs/security.md` control 1 at the Postgres sink.
+the row is written -- `docs/explanation/security.md` control 1 at the Postgres sink.
 
 ## Docker
 
@@ -316,7 +316,7 @@ reused, not reinvented, by every future endpoint:
 - **Roles**: decorate an endpoint with `[RequireViewerRole]` / `[RequireCyberRole]` /
   `[RequireOperatorRole]` / `[RequireAdminRole]` (`Waypoint.Core.Authorization`) —
   each requires that role or higher, per the Viewer < Cyber < Operator < Admin hierarchy
-  in `docs/domain-model.md`.
+  in `docs/explanation/domain-model.md`.
 - **Pagination**: accept `Waypoint.Core.Pagination.PageRequest` as a `[FromQuery]`
   parameter and set the `X-Total-Count` response header yourself (see
   `CatalogController.ListArtifacts` for the pattern) — there is no generic list wrapper
@@ -326,7 +326,7 @@ reused, not reinvented, by every future endpoint:
   called by any endpoint; wire it in as connected/disconnected-mode features land
   (ADR-0010).
 - **Logging**: `Waypoint.Core.Logging.ISecretRedactor` is the log-scrubbing hook point
-  `docs/security.md` control 1 requires from the start. `Program.cs` routes every
+  `docs/explanation/security.md` control 1 requires from the start. `Program.cs` routes every
   Serilog console line through it already; the registered implementation is a no-op
   until issue #6 supplies the real scrubber — nothing downstream needs to change when it
   does.

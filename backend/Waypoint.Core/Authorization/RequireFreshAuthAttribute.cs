@@ -21,7 +21,7 @@ namespace Waypoint.Core.Authorization;
 
 /// <summary>
 /// Marks an action as requiring step-up re-authentication (issue #521) — see
-/// <c>docs/security.md</c> "Step-up re-authentication" for the full design. Stacks
+/// <c>docs/explanation/security.md</c> "Step-up re-authentication" for the full design. Stacks
 /// alongside a <c>[Require*Role]</c> attribute on the same action (ASP.NET Core ANDs
 /// multiple <see cref="AuthorizeAttribute"/> policies), and — like
 /// <see cref="RequireRoleAttribute"/> — sets <see cref="AuthorizeAttribute.Policy"/> so

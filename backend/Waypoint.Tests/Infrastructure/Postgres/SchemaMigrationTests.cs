@@ -881,7 +881,7 @@ public sealed class SchemaMigrationTests
 
 	/// <summary>
 	/// Issue #106: <c>audit_log</c> carries the same append-only claim as
-	/// <c>job_events</c>, backed by docs/security.md control 4 (the decrypt audit trail
+	/// <c>job_events</c>, backed by docs/explanation/security.md control 4 (the decrypt audit trail
 	/// that compensates for the service/shared credential exposure tier) -- a trail the
 	/// compromised component can edit compensates for nothing. Direct UPDATE and DELETE
 	/// must both fail.

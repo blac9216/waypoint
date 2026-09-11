@@ -7,8 +7,8 @@ By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you begin
 
-1. Read the [architecture](docs/architecture.md), relevant
-   [architecture decisions](docs/adr/), and [roadmap](docs/roadmap.md). The documents
+1. Read the [architecture](docs/explanation/architecture.md), relevant
+   [architecture decisions](docs/adr/), and [roadmap](docs/explanation/roadmap.md). The documents
    distinguish implemented behavior from the target design.
 2. Search existing [issues](https://github.com/blac9216/waypoint/issues) and pull
    requests before proposing duplicate work.
@@ -42,7 +42,7 @@ development hosts.
   issue when possible.
 - Follow the existing style and keep public contracts aligned with
   [docs/api-contract.md](docs/api-contract.md) and
-  [docs/domain-model.md](docs/domain-model.md).
+  [docs/explanation/domain-model.md](docs/explanation/domain-model.md).
 - Add or update tests for changed behavior. A bug fix should include a regression test
   whenever practical.
 - Update documentation when behavior, configuration, security boundaries, or operator

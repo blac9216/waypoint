@@ -22,7 +22,7 @@ namespace Waypoint.Core.Jobs;
 /// SRG=6"). The catalog's six-valued scheme is finer than <see cref="TargetKinds"/>'
 /// three-valued transport classification -- VCSA-components-vs-vCenter-API and
 /// ESXi-vs-VM are two different *benchmarks against inventory under one target*, not
-/// separate target rows (docs/domain-model.md: "Discovered ESXi hosts and VMs are
+/// separate target rows (docs/explanation/domain-model.md: "Discovered ESXi hosts and VMs are
 /// cached inventory under a `vsphere` target, not standalone targets"). This issue's
 /// scope (#273: run creation + per-**target** fan-out, no InSpec) fans out one job per
 /// target row, so each <c>vsphere</c> target is scored at the vCenter tier (3); a

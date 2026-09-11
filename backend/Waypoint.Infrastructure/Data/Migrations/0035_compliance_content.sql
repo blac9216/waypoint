@@ -1,5 +1,5 @@
 -- Issue #40 (epic #558), backend slice: compliance-content management. Persisted
--- appliance state for the VMware DoD compliance-automation repo (docs/domain-model.md
+-- appliance state for the VMware DoD compliance-automation repo (docs/explanation/domain-model.md
 -- "Compliance content (the profiles repo)": "pinned tag or tracked branch, recorded
 -- commit, last-pull author/time, profile inventory") plus the pull history and profile
 -- inventory the Benchmarks screen (#559) reads. See ADR-0017: content-pull/

@@ -1,5 +1,5 @@
 -- Issue #20 (epic #13, M2): extend the M1 minimal credential store (#8) to the full
--- typed model. docs/domain-model.md "Credential" names four credential types
+-- typed model. docs/explanation/domain-model.md "Credential" names four credential types
 -- (vCenter, NSX, SSH with optional sudo, token); 0001's comment on `credentials`
 -- deliberately left `credential_type` as free TEXT pending this slice, and
 -- `owner` free TEXT pending ADR-0011 -- ADR-0011 settled SHARED ONLY (no personal

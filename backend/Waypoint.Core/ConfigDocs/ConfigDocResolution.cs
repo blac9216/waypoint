@@ -18,7 +18,7 @@ namespace Waypoint.Core.ConfigDocs;
 /// One (kind, profile, target) slot's resolved value -- the EFFECTIVE card
 /// (docs/api-contract.md `/config-docs/resolve`: "resolved value + supplying layer").
 /// <see cref="Layer"/> is the layer that actually supplied <see cref="Body"/> (the
-/// most-specific non-empty layer among global/site/target -- docs/domain-model.md: "most
+/// most-specific non-empty layer among global/site/target -- docs/explanation/domain-model.md: "most
 /// specific wins ... not a tighten-only relationship"), or null when no layer has a doc
 /// for this (kind, profile) at all.
 /// </summary>
@@ -36,7 +36,7 @@ public sealed record ConfigDocResolution(
 
 /// <summary>
 /// Resolves the three-layer Global -> Site -> Target config-doc stack for a single
-/// target, most-specific-wins, per docs/domain-model.md "STIG configuration documents"
+/// target, most-specific-wins, per docs/explanation/domain-model.md "STIG configuration documents"
 /// and the #266 AC. Pure and dependency-free so it is unit-testable without Postgres --
 /// callers (the controller) fetch the up-to-three candidate versions and hand them here.
 /// </summary>
@@ -49,7 +49,7 @@ public static class ConfigDocResolver
 	/// merge field-by-field with a higher layer). For <c>kind == "attestation"</c>, an
 	/// expired waiver (its YAML's top-level <c>expires</c> date is on or before
 	/// <paramref name="now"/>) is treated as if that layer had no doc, and resolution
-	/// falls through to the next-less-specific layer that does -- docs/domain-model.md:
+	/// falls through to the next-less-specific layer that does -- docs/explanation/domain-model.md:
 	/// "Expired attestations are not applied: the control reports Open ... A lapsed waiver
 	/// must never be applied silently." <see cref="ConfigDocResolution.AttestationExpired"/>
 	/// still reports the expiry against whichever layer's doc was actually skipped, even

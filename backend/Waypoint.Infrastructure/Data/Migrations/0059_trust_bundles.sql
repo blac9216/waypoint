@@ -4,7 +4,7 @@
 --
 --   trust_bundles         -- one Admin-uploaded CA certificate/chain, stored as public
 --                             material (never encrypted, never treated as a secret --
---                             docs/security.md "Managed CA trust is public material,
+--                             docs/explanation/security.md "Managed CA trust is public material,
 --                             not a secret"). Immutable once created: a "replacement"
 --                             upload creates a NEW row and supersedes the old one
 --                             (status -> 'superseded'), it never mutates an existing
@@ -15,7 +15,7 @@
 --                             either a trust_bundle (mode='bundle') or an explicit,
 --                             reasoned, audited skip-verification decision
 --                             (mode='bypass', bypass_reason required). Never a
---                             process-global default (ADR-0025, docs/security.md) --
+--                             process-global default (ADR-0025, docs/explanation/security.md) --
 --                             every row is scoped to exactly one (scope_type,
 --                             scope_id) pair, enforced by the partial unique indexes
 --                             below mirroring migration 0052's
@@ -26,7 +26,7 @@
 --                             PlannedComponentItem created under #735-#737 can freeze
 --                             an exact trust_policies.id/version reference that never
 --                             silently changes underneath an in-flight or historical
---                             run (docs/security.md "Planning freezes the policy
+--                             run (docs/explanation/security.md "Planning freezes the policy
 --                             identity/version, not live state").
 --
 -- Scope discipline (this PR's first slice of #753, matching #732/#733/#734/#731's own

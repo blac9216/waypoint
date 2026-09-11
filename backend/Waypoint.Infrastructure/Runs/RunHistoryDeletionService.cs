@@ -45,7 +45,7 @@ public sealed class RunHistoryDeletionService
 	};
 
 	/// <summary>
-	/// Job families whose durable outputs are compliance-owned (docs/domain-model.md's
+	/// Job families whose durable outputs are compliance-owned (docs/explanation/domain-model.md's
 	/// "Durable output owner" table) -- the only two run types <see cref="RunPurgeService"/>
 	/// (issue #594) is scoped to. A run of either type must be purged
 	/// (<c>runs.purged_at IS NOT NULL</c>) before its operational history may be

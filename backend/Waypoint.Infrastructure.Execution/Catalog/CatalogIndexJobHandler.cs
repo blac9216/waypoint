@@ -38,7 +38,7 @@ namespace Waypoint.Infrastructure.Catalog;
 ///
 /// Issue #690 AC: local catalog re-index resolves and decrypts NO credential at all.
 /// The offline indexing walk (<c>Invoke-WaypointCatalogIndex</c> -&gt;
-/// <c>Get-FileManifest</c>, docs/domain-model.md open question 4) is a pure
+/// <c>Get-FileManifest</c>, docs/explanation/domain-model.md open question 4) is a pure
 /// filesystem read of files already present on the offline depot share -- it never
 /// authenticated to anything, so there is no purpose-specific credential (Activation
 /// Code or legacy Download Token) for this handler to declare or consume. The

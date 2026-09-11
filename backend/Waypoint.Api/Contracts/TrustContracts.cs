@@ -17,7 +17,7 @@ using Waypoint.Core.Trust;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// One trust bundle's wire shape (docs/security.md `/trust/bundles`). Never carries
+/// One trust bundle's wire shape (docs/explanation/security.md `/trust/bundles`). Never carries
 /// <c>pem_chain</c> in the LIST projection (issue #753 AC "see subject, issuer,
 /// fingerprint, validity, and usage" -- no requirement to echo the raw PEM text back
 /// on every list row); the detail response below adds it back for the one-bundle GET,
@@ -75,7 +75,7 @@ public sealed record TrustBundleDetailResponse(
 	}
 }
 
-/// <summary>Wire shape for one scoped trust-policy binding (docs/security.md `PUT /connections/{id}/trust-policy`, generalized to this slice's (scope_type, scope_id) pair).</summary>
+/// <summary>Wire shape for one scoped trust-policy binding (docs/explanation/security.md `PUT /connections/{id}/trust-policy`, generalized to this slice's (scope_type, scope_id) pair).</summary>
 public sealed record TrustPolicyResponse(
 	Guid Id,
 	string ScopeType,

@@ -272,7 +272,7 @@ public sealed class RunsController : ControllerBase
 	/// <summary>
 	/// Gates the ADR-0011 ad hoc "my credentials" body: Operator+ (the role nuance is
 	/// "Cyber starts scans with SERVICE credentials; ad hoc PERSONAL credentials are the
-	/// Operator tier" -- docs/domain-model.md), scan runs only (personal credentials
+	/// Operator tier" -- docs/explanation/domain-model.md), scan runs only (personal credentials
 	/// have no scheduling or remediation use -- ADR-0011 "scheduling always uses service
 	/// credentials"), mutually exclusive with <c>credential_id</c>, and only the
 	/// <c>"personal"</c> kind v1 defines.
@@ -369,7 +369,7 @@ public sealed class RunsController : ControllerBase
 	/// <summary>
 	/// Issue #586 shape gates for <c>ad_hoc_credentials</c>: Operator+ (same floor as
 	/// <see cref="Credential"/> -- personal secrets are always the Operator tier,
-	/// docs/domain-model.md), scan runs only, no duplicate (target, purpose) pair within
+	/// docs/explanation/domain-model.md), scan runs only, no duplicate (target, purpose) pair within
 	/// the array itself, no pair also named in <see cref="RunCreateRequest.CredentialOverrides"/>
 	/// (a single (target, purpose) slot has exactly one source of truth -- mixing an ad
 	/// hoc secret and a saved-credential override for the SAME pair has no defined

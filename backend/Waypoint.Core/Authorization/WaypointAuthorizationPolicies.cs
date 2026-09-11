@@ -31,7 +31,7 @@ public static class WaypointAuthorizationPolicies
 	/// The step-up re-authentication policy (issue #521): satisfied when the caller's
 	/// token carries an <c>auth_time</c> claim within the configured freshness window,
 	/// or the request authenticated via the dev-flag local-session scheme (see
-	/// <c>docs/security.md</c> "Step-up re-authentication" for the fail-closed-on-OIDC /
+	/// <c>docs/explanation/security.md</c> "Step-up re-authentication" for the fail-closed-on-OIDC /
 	/// explicit-on-local-auth split).
 	/// </summary>
 	public const string FreshAuth = "FreshAuth";

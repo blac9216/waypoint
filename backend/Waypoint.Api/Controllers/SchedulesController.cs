@@ -204,7 +204,7 @@ public sealed class SchedulesController : ControllerBase
 		{
 			throw ApiException.Forbidden(
 				$"Scheduling a '{jobType}' job requires the {required} role.",
-				$"The '{jobType}' job type is gated to {required}+ at its direct endpoint, so its schedules carry the same floor (docs/domain-model.md Roles).");
+				$"The '{jobType}' job type is gated to {required}+ at its direct endpoint, so its schedules carry the same floor (docs/explanation/domain-model.md Roles).");
 		}
 	}
 
@@ -215,7 +215,7 @@ public sealed class SchedulesController : ControllerBase
 			throw new ApiException(
 				HttpStatusCode.BadRequest, "unsupported_job_type",
 				"job_type is not schedulable.",
-				$"\"job_type\" must be one of: {string.Join(", ", ScheduleJobTypes.All)}. Remediation, downloads, bundle import/apply, and updates are excluded from scheduling by design (docs/domain-model.md Scheduling).");
+				$"\"job_type\" must be one of: {string.Join(", ", ScheduleJobTypes.All)}. Remediation, downloads, bundle import/apply, and updates are excluded from scheduling by design (docs/explanation/domain-model.md Scheduling).");
 		}
 	}
 

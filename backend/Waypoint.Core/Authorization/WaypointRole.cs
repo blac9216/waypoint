@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Authorization;
 
 /// <summary>
-/// Application roles, per <c>docs/domain-model.md</c> "Roles". Each role is a strict
+/// Application roles, per <c>docs/explanation/domain-model.md</c> "Roles". Each role is a strict
 /// superset of the one before it (Cyber = Viewer + scan-initiation, Operator = Cyber +
 /// ad hoc/download, Admin = everything), so the underlying numeric value is an ordinal
 /// used for "this role or higher" checks, not an independent bitmask.

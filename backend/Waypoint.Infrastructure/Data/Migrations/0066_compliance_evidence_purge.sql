@@ -1,4 +1,4 @@
--- Issue #745 remainder (epic #726, ADR-0019 decision 5 / docs/domain-model.md's
+-- Issue #745 remainder (epic #726, ADR-0019 decision 5 / docs/explanation/domain-model.md's
 -- "operational vs. domain retention ownership" classification table): wires
 -- migration 0062's upload_attempts and migration 0063's component_results/
 -- component_result_findings/component_result_artifacts into RunPurgeService's
@@ -6,7 +6,7 @@
 --
 -- ADR-0019 decision 4 names "Compliance Results owns scan/remediation findings,
 -- attestations, waivers, and artifacts"; decision 5 requires "a domain purge
--- enumerates its owned projections and artifacts". docs/domain-model.md's
+-- enumerates its owned projections and artifacts". docs/explanation/domain-model.md's
 -- retention table already lists "findings ... CKL/HDF artifact files" as
 -- Compliance Results domain output retained under RunPurgeService, alongside
 -- attestation_snapshots -- but PR #952/#961 shipped the tables one wave before
@@ -18,7 +18,7 @@
 -- component_result_artifacts/upload_attempts row for a purged run -- these
 -- immutable evidence rows would silently outlive `runs.purged_at`, which is
 -- exactly the "readers never observe retained rows pointing to missing graph
--- members" (docs/domain-model.md's planned ComplianceEvidenceGraph section)
+-- members" (docs/explanation/domain-model.md's planned ComplianceEvidenceGraph section)
 -- failure mode purge exists to prevent, just inverted: here the run is marked
 -- purged while its findings/artifacts/upload-receipts remain, contradicting
 -- "domain purge enumerates its owned projections".

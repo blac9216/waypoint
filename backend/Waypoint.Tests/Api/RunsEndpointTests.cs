@@ -1720,7 +1720,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 
 	// The three run types migration 0042 added to runs_run_type_check
 	// (credential-test, tool-install, purge) are gate=None non-compliance history
-	// (docs/domain-model.md) and MUST be accepted as run_type filter values -- PR #712's
+	// (docs/explanation/domain-model.md) and MUST be accepted as run_type filter values -- PR #712's
 	// review caught them 400ing because RunTypes.All was stale against the constraint.
 	[Theory]
 	[InlineData("credential-test")]

@@ -94,7 +94,7 @@ public sealed record ProfileResponse(
 /// <c>effective_input</c>/<c>effective_input_layer</c>/<c>attest_status</c>/
 /// <c>attest_layer</c> are a documented deviation from the contract's literal
 /// per-control phrasing: config-docs resolve as whole YAML bodies per (kind, profile,
-/// layer) (docs/domain-model.md "the schemas belong to Broadcom/MITRE" -- no per-control
+/// layer) (docs/explanation/domain-model.md "the schemas belong to Broadcom/MITRE" -- no per-control
 /// structured storage exists anywhere in that schema), so these four fields are the
 /// PROFILE's effective <c>input</c>/<c>attestation</c> resolution for the caller's
 /// <c>target</c> (when supplied), identical across every control row in the same

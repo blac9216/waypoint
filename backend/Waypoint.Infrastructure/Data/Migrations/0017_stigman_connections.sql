@@ -1,7 +1,7 @@
 -- Issue #310 (first slice of the #25 split): the global STIG Manager
 -- connection. docs/api-contract.md "STIG Manager": "Global default + per-site
 -- override; endpoint, oidc client, collection, reachability/token TTL (secret
--- write-only)"; docs/domain-model.md "STIG Manager connection": "Global
+-- write-only)"; docs/explanation/domain-model.md "STIG Manager connection": "Global
 -- default connection, optional per-site override". The per-site override
 -- already exists (migration 0009's sites.stigman_override JSONB) -- this
 -- migration adds only the global side the Postgres schema sketch names:

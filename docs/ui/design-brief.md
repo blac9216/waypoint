@@ -9,8 +9,8 @@ source: Postgres table / SSE stream / catalog / computed) into the API contract.
 A high-fidelity interactive prototype covering all nine screens lives in
 [`prototype/`](prototype/) — open `vcf-ops-console.dc.html` in a browser; its
 `README.md` is the design handoff (tokens, layout rules, per-screen specs).
-**Mockups are illustrative; `../domain-model.md` and the ADRs are normative** — on
-conflict, the domain model wins and the discrepancy gets logged. `../domain-model.md`
+**Mockups are illustrative; `../explanation/domain-model.md` and the ADRs are normative** — on
+conflict, the domain model wins and the discrepancy gets logged. `../explanation/domain-model.md`
 and `../api-contract.md` are this document's own source of truth for entities and
 actions; where this brief and the prototype's visuals disagree, this brief wins.
 
@@ -61,7 +61,7 @@ replaces that model with a closed catalog of exact-version baselines, stable
 component identity, immutable plans, component jobs with ordered attempts, and
 per-control settings (ADRs [0022](../adr/0022-compliance-catalog-and-content-lifecycle.md)–
 [0025](../adr/0025-compliance-trust-cleanup-and-evidence.md), reconciled into
-[`../api-contract.md`](../api-contract.md) and [`../security.md`](../security.md) by
+[`../api-contract.md`](../api-contract.md) and [`../explanation/security.md`](../explanation/security.md) by
 issue #785). The subsections below are the reconciled information architecture —
 **domain behavior and entity/action vocabulary, not a pixel spec.** The prototype
 remains useful reference for visual density, tokens, and layout mechanics (see
@@ -69,7 +69,7 @@ remains useful reference for visual density, tokens, and layout mechanics (see
 that assume the old model (a profile picker, one job per target, a single
 mutable config document) are superseded by this section and by the 🚧-marked notes
 inline in the Screens list below. Every 🚧 marker in this document follows the
-convention already used in `../roadmap.md` and `../api-contract.md`: planned,
+convention already used in `../explanation/roadmap.md` and `../api-contract.md`: planned,
 not yet shipped, and never to be conflated with the earlier scan-slice behavior it replaces.
 
 ### Benchmarks — source-of-truth entity/action map
@@ -272,7 +272,7 @@ action with its never-hides-the-condition guarantee — the prototype's alerts h
 no acknowledge action designed at all.
 
 ## RBAC — UI role gates (matches `../api-contract.md`'s RBAC summary and
-`../security.md`'s RBAC reconciliation; narrows/clarifies `../domain-model.md`'s
+`../explanation/security.md`'s RBAC reconciliation; narrows/clarifies `../explanation/domain-model.md`'s
 Roles table, never widens it)
 
 | Action family | Viewer | Cyber | Operator | Admin |
@@ -378,4 +378,4 @@ ESXi 8.0U3 patch bundles).
 - Timebox: reach "I can see the product," extract the data ledger, move on — pixel
   polish comes after data flows.
 - Keep the ledger current; it becomes the API contract in the design phase and foundation story (see
-  [`../roadmap.md`](../roadmap.md)).
+  [`../explanation/roadmap.md`](../explanation/roadmap.md)).

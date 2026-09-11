@@ -130,7 +130,7 @@ public sealed partial class OidcClaimsMappingOptionsSetup : IPostConfigureOption
 		// The realm's waypoint-role protocol mapper (deploy/keycloak/realm/waypoint-realm.json)
 		// puts the member group's name directly on the configured claim -- a single
 		// value, not an array, matching the strictly-one-role-per-user model
-		// (docs/domain-model.md "Roles"). JwtSecurityTokenHandler's default inbound
+		// (docs/explanation/domain-model.md "Roles"). JwtSecurityTokenHandler's default inbound
 		// claim type map (DefaultInboundClaimTypeMap) silently remaps the short JWT
 		// claim name "role" to the long-form ClaimTypes.Role URI while validating, so
 		// both spellings are checked -- a differently-configured RoleClaimType (any

@@ -74,7 +74,7 @@ public sealed class StigManagerController : ControllerBase
 		return Ok(StigManagerConnectionResponse.FromDomain(saved));
 	}
 
-	/// <summary>The resolved connection for a site: its <c>stigman_override</c> when present, else the global default (docs/domain-model.md "STIG configuration documents" three-layer "most specific wins" convention, applied to this two-layer case).</summary>
+	/// <summary>The resolved connection for a site: its <c>stigman_override</c> when present, else the global default (docs/explanation/domain-model.md "STIG configuration documents" three-layer "most specific wins" convention, applied to this two-layer case).</summary>
 	[HttpGet("sites/{siteId:guid}/stigman")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(ResolvedStigManagerConnectionResponse), StatusCodes.Status200OK)]

@@ -23,7 +23,7 @@ namespace Waypoint.Core.Authorization;
 /// ASP.NET Core policy) and <see cref="RequireFreshAuthAttribute.Check"/> (the
 /// imperative controller-facing call that can throw the distinct
 /// <c>step_up_required</c> <c>ApiException</c>), so the two never drift apart. See
-/// <c>docs/security.md</c> "Step-up re-authentication" for the design this implements.
+/// <c>docs/explanation/security.md</c> "Step-up re-authentication" for the design this implements.
 /// </summary>
 public static class FreshAuthEvaluator
 {

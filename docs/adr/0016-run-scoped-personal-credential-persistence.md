@@ -91,8 +91,8 @@ already rejected that shape for claimed-job credentials generally).
   reaches terminal (or whose secret already expired) loses access, which is the
   intended fail-closed behavior, unchanged in spirit from ADR-0011's original
   single-shot cache.
-- docs/security.md's credential-tier table and residual-risk list, and
-  docs/domain-model.md's Credential section, are updated to describe "encrypted,
+- docs/explanation/security.md's credential-tier table and residual-risk list, and
+  docs/explanation/domain-model.md's Credential section, are updated to describe "encrypted,
   run-scoped, terminal/expiry bounded" rather than "not stored" (issue #434).
 - [ADR-0021](0021-credential-purpose-matrix.md) §5/§7 (epic #582) extends Decision #1's
   "one `run_secrets` row per run" particular to one row per `(run, target, purpose)`

@@ -48,7 +48,7 @@ public static class PasswordHashCli
 	/// self-describing PBKDF2 stored hash to stdout for the operator to paste into
 	/// <c>LocalAuth__AdminPasswordHash</c> / <c>WAYPOINT_ADMIN_PASSWORD_HASH</c>. Never
 	/// accepts the password as an argument — that would land it in <c>argv</c>, readable
-	/// via <c>/proc/&lt;pid&gt;/cmdline</c> (docs/security.md control 2).
+	/// via <c>/proc/&lt;pid&gt;/cmdline</c> (docs/explanation/security.md control 2).
 	/// </summary>
 	public static int Run()
 	{

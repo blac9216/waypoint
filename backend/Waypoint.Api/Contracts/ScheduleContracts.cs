@@ -57,7 +57,7 @@ public sealed record ScheduleUpdateRequest(
 
 /// <summary>
 /// Wire shape for a schedule, including the initiator/attribution fields
-/// docs/domain-model.md's Scheduling section requires ("scheduled" as initiator
+/// docs/explanation/domain-model.md's Scheduling section requires ("scheduled" as initiator
 /// alongside the schedule's creator) -- <see cref="CreatedBy"/> is the creator;
 /// "scheduled" itself is the fixed initiator recorded on every dispatched RUN, not a
 /// per-schedule field (see <c>ScheduleDispatchService.ScheduledInitiator</c>).
@@ -100,7 +100,7 @@ public sealed record ScheduleResponse(
 	[property: JsonPropertyName("last_result")]
 	string? LastResult,
 
-	/// <summary>The schedule's creator -- docs/domain-model.md Scheduling: "record 'scheduled' as the initiator alongside the schedule's creator".</summary>
+	/// <summary>The schedule's creator -- docs/explanation/domain-model.md Scheduling: "record 'scheduled' as the initiator alongside the schedule's creator".</summary>
 	[property: JsonPropertyName("created_by")]
 	string CreatedBy,
 
