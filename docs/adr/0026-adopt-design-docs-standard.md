@@ -56,9 +56,10 @@ wiring — is recorded in `docs/doc-manifest.md`, which this ADR authorises as t
 repository-specific record the audit reads first. Existing design docs move under the
 Diátaxis directories as remediation, not in this adoption PR; the 25 existing ADRs are
 normalised to the MADR frame under ADR-0027 in the same PR. `docs/adr/README.md` carries
-the generated status index from `scripts/adr-index.sh`; `AGENTS.md` is updated to send
-agents to that index before opening individual ADRs, and to name the design path
-(interrogate → plan-work → design-docs author mode; specs and plans are never committed).
+the generated status index from `.claude/skills/design-docs/scripts/adr-index.sh`;
+`AGENTS.md` is updated to send agents to that index before opening individual ADRs, and
+to name the design path (interrogate → plan-work → design-docs author mode; specs and
+plans are never committed).
 
 ## Consequences
 

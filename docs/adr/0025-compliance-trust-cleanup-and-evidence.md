@@ -148,6 +148,13 @@ authorization, and transition wire shapes remain #785.
   remains #15. API/security/RBAC wire contracts are #785; UI/roadmap contracts are
   #786. This ADR defines neither endpoints nor screen behavior.
 
+- **2026-09-11 update**: Managed trust delivered (#753); artifacts, uploads, findings,
+  receipts, and retention delivered (#744, #745); API/security/RBAC wire contracts
+  delivered (#785); UI/roadmap contracts delivered (#786). Still open: severity-aggregate
+  dashboard query (#514), real-wrapper coverage (#607), noninteractive enforcement
+  (#608), path-containment fix (#652), #784, separate-run concurrency policy (#649),
+  and remediation execution (#15).
+
 ## Alternatives rejected
 
 - Process-wide certificate bypass or trust mutation: concurrent jobs could inherit a
