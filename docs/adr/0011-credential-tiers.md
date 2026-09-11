@@ -21,7 +21,7 @@ Two credential tiers with different storage models:
 
 1. **Service/shared credentials** — envelope-encrypted in Postgres per ADR-0005.
    Decryptable autonomously; compensated by decrypt auditing, gating, and containment
-   (see [`../security.md`](../security.md)).
+   (see [`../explanation/security.md`](../explanation/security.md)).
 2. **Personal credentials are not stored in v1.** An ad hoc run using "my credentials"
    prompts the user at run initiation; the value is held in memory for that run only
    and never persisted. Scheduling always uses service credentials (already decided),
