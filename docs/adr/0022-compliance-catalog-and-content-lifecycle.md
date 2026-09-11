@@ -27,7 +27,7 @@ Each baseline binds one exact product version to one exact immutable profile ver
 There are no ranges, nearest-version fallback, or cross-version test equivalence. A
 compatible component has at most one active baseline, selected deterministically by
 the catalog; scan callers do not select profiles. The normalized initial coverage is
-the [parity contract](../compliance-parity.md).
+the [parity contract](../explanation/compliance-parity.md).
 
 Sibling product-family keys and paths are retained only as source provenance. They
 are not product versions, catalog compatibility claims, baseline candidates, or

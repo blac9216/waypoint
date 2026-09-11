@@ -1,6 +1,6 @@
 -- Issue #728 (epic #726, Wave 1): the persistent normalized compliance catalog.
 -- ADR-0022 ("Closed compliance catalog and atomic content lifecycle") is the
--- governing decision; docs/compliance-parity.md's "Closed capability vocabulary"
+-- governing decision; docs/explanation/compliance-parity.md's "Closed capability vocabulary"
 -- table and sibling source-capability matrix are the shape this schema must
 -- faithfully represent without lossy target-kind inference.
 --
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS catalog_products (
 -- Exactly one row per exact product version (ADR-0022: "one exact product version to
 -- one exact immutable profile version. There are no ranges"). `version_key` is the
 -- exact identity discovery/Admin-configuration must match byte-for-byte (e.g.
--- "8.0.3", "9.0.0") -- never a family key like sibling "8-0" (docs/compliance-parity.md
+-- "8.0.3", "9.0.0") -- never a family key like sibling "8-0" (docs/explanation/compliance-parity.md
 -- "A source key marked family ... is never a product version").
 CREATE TABLE IF NOT EXISTS catalog_product_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -130,10 +130,10 @@ CREATE TABLE IF NOT EXISTS catalog_content_releases (
 -- parents (issue #728 AC "repeated leaf names") are distinguished by
 -- (product_version_id, parent_component_id, component_key), not by name alone.
 -- `selector_kind`/`transport` are the closed capability vocabulary
--- (docs/compliance-parity.md table); `selector_name` carries the named-service value
+-- (docs/explanation/compliance-parity.md table); `selector_name` carries the named-service value
 -- when selector_kind = 'service' (e.g. "eam", "lookup", "sddc-manager-nginx") and is
 -- NULL for every other selector: the three generic vSphere object-kind selectors
--- (vcenter|esxi|vm) AND the whole-appliance 'target' selector (docs/compliance-parity.md's
+-- (vcenter|esxi|vm) AND the whole-appliance 'target' selector (docs/explanation/compliance-parity.md's
 -- `ssh / target` rows -- Aria Operations/Automation/Suite Lifecycle, Workspace ONE Access,
 -- Photon OS -- where the component IS the appliance and no sub-service name is invented).
 CREATE TABLE IF NOT EXISTS catalog_components (
@@ -159,7 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_catalog_components_product_version_id ON catalog_
 CREATE INDEX IF NOT EXISTS idx_catalog_components_parent_component_id ON catalog_components (parent_component_id);
 
 -- catalog_report_groups ---------------------------------------------------------------
--- Closed priority/report-group vocabulary (docs/compliance-parity.md "Priority" row):
+-- Closed priority/report-group vocabulary (docs/explanation/compliance-parity.md "Priority" row):
 -- NSX STIG 1, VCSA STIG 2, vCenter STIG 3, ESXi STIG 4, VM STIG 5, every SRG 6. Stored
 -- as data (not a C#-only enum) so a future appliance update can add a report group
 -- for a new product family without a schema change -- only new ROWS, matching

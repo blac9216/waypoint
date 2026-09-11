@@ -397,7 +397,7 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 	/// documented preference. This is the exact shape the round-8 live evidence
 	/// describes: the imported profile happened to have the lower id and won, so every
 	/// scan job fanned out with no credential. The fix orders by
-	/// docs/compliance-parity.md's documented report-group Priority column first (STIG
+	/// docs/explanation/compliance-parity.md's documented report-group Priority column first (STIG
 	/// priorities 1-5 all sort below every SRG's priority 6), so the STIG profile wins
 	/// regardless of which one was inserted first -- this seeds the STIG profile with
 	/// the HIGHER id specifically to prove the ordering is priority-driven, not an
@@ -562,7 +562,7 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 			productVersion.Id, new CatalogComponentDefinition("esxi-1021", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
 
 		// Coexisting, perfectly runnable SRG baseline (priority 6, per
-		// docs/compliance-parity.md -- every SRG report group sorts below every STIG one).
+		// docs/explanation/compliance-parity.md -- every SRG report group sorts below every STIG one).
 		CatalogContentRelease srgRelease = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, "release-srg-1021", "Test SRG Release", CancellationToken.None);
 		CatalogReportGroup srgGroup = await _catalog.UpsertReportGroupAsync("srg-1021", "SRG", 6, CancellationToken.None);
 		CatalogExecutionProfile srgProfile = await _catalog.CreateExecutionProfileAsync(component.Id, srgRelease.Id, srgGroup.Id, "1.0.0", CatalogOutputKinds.Hdf, CancellationToken.None);

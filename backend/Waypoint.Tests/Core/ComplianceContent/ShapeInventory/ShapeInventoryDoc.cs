@@ -18,7 +18,7 @@ using Xunit;
 namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 
 /// <summary>
-/// Shared reader for <c>docs/compliance-content-shape-inventory.md</c> (issue #1077),
+/// Shared reader for <c>docs/explanation/compliance-content-shape-inventory.md</c> (issue #1077),
 /// generalizing <c>LayoutTableParityTests</c>' "parse the authoritative doc table and
 /// assert it against the code" pattern (issue #959) to every vendor-content parser's
 /// shape inventory. The doc is the authority: a <c>*ShapeInventoryTests</c> class
@@ -30,7 +30,7 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 /// can gain a branch with no row and no fixture and this assertion stays green (PR
 /// #1098 round-1 review demonstrated it). Keeping the inventory in step with the
 /// parsers is review-enforced; see the "What this guard does and does not cover"
-/// section of <c>docs/compliance-content-shape-inventory.md</c>.
+/// section of <c>docs/explanation/compliance-content-shape-inventory.md</c>.
 /// </summary>
 public static class ShapeInventoryDoc
 {
@@ -223,14 +223,14 @@ public static class ShapeInventoryDoc
 		string doc = ReadDocFile();
 		string headingLine = $"## {sectionHeading}";
 		int sectionStart = doc.IndexOf(headingLine, StringComparison.Ordinal);
-		Assert.True(sectionStart >= 0, $"docs/compliance-content-shape-inventory.md is missing the '{sectionHeading}' section this guard parses.");
+		Assert.True(sectionStart >= 0, $"docs/explanation/compliance-content-shape-inventory.md is missing the '{sectionHeading}' section this guard parses.");
 		int sectionEnd = doc.IndexOf("\n## ", sectionStart + 1, StringComparison.Ordinal);
 		return sectionEnd >= 0 ? doc[sectionStart..sectionEnd] : doc[sectionStart..];
 	}
 
 	private static string ReadDocFile()
 	{
-		const string repoRelativePath = "docs/compliance-content-shape-inventory.md";
+		const string repoRelativePath = "docs/explanation/compliance-content-shape-inventory.md";
 		DirectoryInfo? dir = new(AppContext.BaseDirectory);
 		while (dir is not null)
 		{

@@ -298,7 +298,7 @@ public sealed class CatalogApiTests : IAsyncLifetime
 
 	/// <summary>
 	/// Issue #728 (epic #726 Wave 1 remainder): the execution-catalog read surface.
-	/// Fixture is INVENTED and shaped only like docs/compliance-parity.md's sibling
+	/// Fixture is INVENTED and shaped only like docs/explanation/compliance-parity.md's sibling
 	/// provenance-matrix rows -- not exported from any real system (CLAUDE.md
 	/// sanitization policy). Covers the queryable-fields AC (transport, selector,
 	/// required purposes, priority/report group, benchmark, remediation capability).
@@ -379,7 +379,7 @@ public sealed class CatalogApiTests : IAsyncLifetime
 
 	/// <summary>
 	/// Invented fixture: one vSphere 8.0 STIG vCenter execution profile, shaped like
-	/// docs/compliance-parity.md's "vSphere 8-0 / STIG" row (vmware-transport,
+	/// docs/explanation/compliance-parity.md's "vSphere 8-0 / STIG" row (vmware-transport,
 	/// vcenter-selector component). Not exported from any real system.
 	/// </summary>
 	private async Task<Guid> SeedOneExecutionProfileAsync()

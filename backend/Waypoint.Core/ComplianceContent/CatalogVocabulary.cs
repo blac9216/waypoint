@@ -57,7 +57,7 @@ public static class CatalogKinds
 
 /// <summary>
 /// The closed transport vocabulary (migration 0050's <c>catalog_components</c> CHECK
-/// constraint; docs/compliance-parity.md "Closed capability vocabulary" table).
+/// constraint; docs/explanation/compliance-parity.md "Closed capability vocabulary" table).
 /// </summary>
 public static class CatalogTransports
 {
@@ -76,7 +76,7 @@ public static class CatalogTransports
 /// CHECK constraint). <c>Service</c> is the named-sub-service selector (VCSA EAM,
 /// SDDC Manager nginx, NSX Manager, ...) and requires a non-null
 /// <see cref="CatalogComponent.SelectorName"/>. <c>Target</c> is the whole-appliance
-/// selector: the component IS the appliance reached over SSH (docs/compliance-parity.md's
+/// selector: the component IS the appliance reached over SSH (docs/explanation/compliance-parity.md's
 /// <c>ssh / target</c> rows -- Aria Operations/Automation/Suite Lifecycle, Workspace ONE
 /// Access, Photon OS) with no fabricated sub-service identity, so it never carries a
 /// selector name. The remaining three are the generic vSphere object-kind selectors and
@@ -97,7 +97,7 @@ public static class CatalogSelectorKinds
 
 /// <summary>
 /// The closed execution-profile output-semantics vocabulary (migration 0050's
-/// <c>catalog_execution_profiles</c> CHECK constraint; docs/compliance-parity.md
+/// <c>catalog_execution_profiles</c> CHECK constraint; docs/explanation/compliance-parity.md
 /// "Output" row): STIG profiles produce complete HDF + CKL (upload-eligible); SRG
 /// profiles produce HDF only and are never CKL/upload-eligible.
 /// </summary>

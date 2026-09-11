@@ -1,5 +1,5 @@
 -- Issue #959 (epic #726), Option C: ships the hand-curated execution-catalog seed
--- docs/compliance-parity.md's "Sibling source-capability provenance matrix" describes
+-- docs/explanation/compliance-parity.md's "Sibling source-capability provenance matrix" describes
 -- but no prior migration ever populated. Before this migration, catalog_products/
 -- catalog_components/catalog_execution_profiles are empty on a fresh stack, so a
 -- discovered component can never link to a catalog component and every component
@@ -9,7 +9,7 @@
 -- This is INVENTED-FROM-DOCUMENTATION data authored directly from the parity doc's
 -- provenance matrix rows -- never exported vendor content, never a byte copied from
 -- any sibling repository. Every literal below (version keys, release keys, component
--- names) mirrors ONLY what docs/compliance-parity.md already documents in this
+-- names) mirrors ONLY what docs/explanation/compliance-parity.md already documents in this
 -- repository.
 --
 -- Scope: this migration seeds a representative slice of the provenance matrix's
@@ -29,10 +29,10 @@
 
 -- One provenance record for every row this migration inserts.
 INSERT INTO catalog_source_revisions (revision_key, description)
-VALUES ('issue-959-seed', 'Hand-curated execution-catalog seed authored from docs/compliance-parity.md (issue #959)')
+VALUES ('issue-959-seed', 'Hand-curated execution-catalog seed authored from docs/explanation/compliance-parity.md (issue #959)')
 ON CONFLICT (revision_key) DO NOTHING;
 
--- catalog_report_groups: the closed priority vocabulary docs/compliance-parity.md's
+-- catalog_report_groups: the closed priority vocabulary docs/explanation/compliance-parity.md's
 -- "Priority" row defines verbatim (NSX STIG 1; VCSA STIG 2; vCenter STIG 3; ESXi STIG
 -- 4; VM STIG 5; every SRG 6).
 INSERT INTO catalog_report_groups (group_key, display_name, priority) VALUES
@@ -45,7 +45,7 @@ INSERT INTO catalog_report_groups (group_key, display_name, priority) VALUES
 ON CONFLICT (group_key) DO NOTHING;
 
 -- catalog_products / catalog_product_versions: exact product versions only (never a
--- family key) -- docs/compliance-parity.md "A source key marked family ... is never a
+-- family key) -- docs/explanation/compliance-parity.md "A source key marked family ... is never a
 -- product version"; vSphere 8-0 and NSX 4-x are both marked `exact`/`family` in the
 -- matrix respectively, but the CATALOG version key here is the exact identity
 -- discovery must match byte-for-byte, distinct from the sibling's own family/exact
@@ -72,7 +72,7 @@ CROSS JOIN (VALUES
 WHERE p.product_key = pv.product_key
 ON CONFLICT (product_id, version_key) DO NOTHING;
 
--- catalog_content_releases: exact vendor content revisions (docs/compliance-parity.md
+-- catalog_content_releases: exact vendor content revisions (docs/explanation/compliance-parity.md
 -- provenance matrix's "Kind / source profile revision" column).
 INSERT INTO catalog_content_releases (source_revision_id, kind, release_key, display_name)
 SELECT sr.id, r.kind, r.release_key, r.display_name
@@ -86,7 +86,7 @@ WHERE sr.revision_key = 'issue-959-seed'
 ON CONFLICT (kind, release_key) DO NOTHING;
 
 -- catalog_components: vSphere object-kind split (vmware transport, no selector_name)
--- -- docs/compliance-parity.md's "vSphere `8-0` | exact | STIG ... | vCenter; ESXi;
+-- -- docs/explanation/compliance-parity.md's "vSphere `8-0` | exact | STIG ... | vCenter; ESXi;
 -- VM | `vmware` / object kind" row.
 INSERT INTO catalog_components (product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name)
 SELECT pv.id, NULL, c.component_key, c.display_name, 'vmware', c.selector_kind, NULL
@@ -101,7 +101,7 @@ WHERE p.product_key = 'vsphere' AND pv.version_key = '8.0.3'
 ON CONFLICT (product_version_id, component_key) WHERE parent_component_id IS NULL DO NOTHING;
 
 -- catalog_components: VCSA named-service split (ssh transport, selector_name required)
--- -- docs/compliance-parity.md's "VCSA EAM, Lookup, PerfCharts, Photon, PostgreSQL,
+-- -- docs/explanation/compliance-parity.md's "VCSA EAM, Lookup, PerfCharts, Photon, PostgreSQL,
 -- STS, UI, VAMI, Envoy | `ssh` / named VCSA service" row. Nested under the same vSphere
 -- 8.0.3 product version (parent_component_id NULL -- these are top-level named
 -- services, not children of the vcenter object-kind component).
@@ -143,7 +143,7 @@ ON CONFLICT (product_version_id, component_key) WHERE parent_component_id IS NUL
 
 -- catalog_execution_profiles: binds each component above to its content release +
 -- report group. output_kind is 'hdf_ckl' for STIG (complete exact-baseline HDF and
--- CKL, docs/compliance-parity.md "Output" row) and 'hdf' for SRG (HDF only, never
+-- CKL, docs/explanation/compliance-parity.md "Output" row) and 'hdf' for SRG (HDF only, never
 -- CKL/upload).
 INSERT INTO catalog_execution_profiles (component_id, content_release_id, report_group_id, profile_version, output_kind)
 SELECT cc.id, cr.id, rg.id, ep.profile_version, ep.output_kind
@@ -167,7 +167,7 @@ JOIN catalog_content_releases cr ON cr.release_key = ep.release_key
 JOIN catalog_report_groups rg ON rg.group_key = ep.report_group_key
 ON CONFLICT (component_id, content_release_id) DO NOTHING;
 
--- catalog_credential_requirements: docs/compliance-parity.md "Purpose" column --
+-- catalog_credential_requirements: docs/explanation/compliance-parity.md "Purpose" column --
 -- vmware-transport components require vsphere-api; VCSA named services require BOTH
 -- vsphere-api (the enrollment/session context) and vcsa-ssh (the named-service
 -- transport itself); NSX named functions require nsx-api; Photon (ssh/target,

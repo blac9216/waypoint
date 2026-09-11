@@ -24,7 +24,7 @@ using Xunit;
 namespace Waypoint.Tests.Parity;
 
 /// <summary>
-/// Issue #749 (epic #726), first slice: converts docs/compliance-parity.md's
+/// Issue #749 (epic #726), first slice: converts docs/explanation/compliance-parity.md's
 /// CATALOG-DERIVATION provenance-matrix rows into parameterized contract tests. Each
 /// <see cref="MatrixCase"/> runs the REAL import pipeline built by PRs #822 (catalog
 /// schema/repository), #823 (semantic parser/interpreter/reconciler), and #831
@@ -39,7 +39,7 @@ namespace Waypoint.Tests.Parity;
 ///
 /// <see cref="ICatalogRepository.PromoteCandidateAsync"/> only derives product/version/
 /// kind/component/transport/selector identity from the importer's own evidence
-/// (docs/compliance-parity.md's "catalog-shaped EVIDENCE, not catalog authority" boundary
+/// (docs/explanation/compliance-parity.md's "catalog-shaped EVIDENCE, not catalog authority" boundary
 /// -- see <see cref="SemanticCandidate"/>'s doc comment). Credential purposes, benchmark
 /// identity, and remediation capability are catalog-AUTHORED facts that
 /// <c>ContentPullJobHandler</c> does not yet wire onto a promoted candidate (confirmed:
@@ -109,7 +109,7 @@ public sealed class CatalogParityContractTests : IAsyncLifetime
 		foreach (SemanticCandidate candidate in interpretation.Candidates.Where(c => c.IsExecutableLeaf))
 		{
 			// Interpreter-level assertions: product-version/kind/transport/selector/component
-			// classification (docs/compliance-parity.md provenance-matrix columns).
+			// classification (docs/explanation/compliance-parity.md provenance-matrix columns).
 			Assert.Equal(row.ProductVersionKey, candidate.ProductVersionKey);
 			Assert.Equal(row.Kind, candidate.Kind);
 			Assert.Equal(row.Transport, candidate.Transport);
@@ -171,7 +171,7 @@ public sealed class CatalogParityContractTests : IAsyncLifetime
 				CancellationToken.None);
 
 			// 5. Assert the FULL derived tuple against the documented row -- this is the
-			//    contract: every one of docs/compliance-parity.md's columns for this
+			//    contract: every one of docs/explanation/compliance-parity.md's columns for this
 			//    component, read back from what promotion actually persisted.
 			CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
 			Assert.NotNull(detail);
