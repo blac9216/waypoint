@@ -21,7 +21,7 @@ initiation and kept only as a terminal/expiry-bounded, run-scoped secret.
 **Component** — a durable inventory entity beneath a target, identified by an
 authoritative vendor identity rather than by hostname, IP, display name, or tree
 position; tracks configured and discovered facts and a lifecycle of active, absent, or
-retired.
+retired. Not: asset.
 
 **Component Observation** — immutable provenance from one discovery pass: the source
 target, the observed identity and facts, the observed time, and the outcome.
