@@ -2,13 +2,13 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * Live-stack Playwright coverage (issue #468, closing the disclosed gap in
- * docs/testing.md's "Fresh-stack M1/M2 parity matrix", issue #444). These
+ * docs/how-to/testing.md's "Fresh-stack M1/M2 parity matrix", issue #444). These
  * tests do NOT start their own server — they assume a fully brought-up
  * Waypoint stack (nginx + backend + both runners + postgres, per
  * deploy/compose.yaml) is already reachable at `E2E_BASE_URL`.
  * `deploy/scripts/e2e-playwright.sh` brings that stack up in isolation,
  * seeds it, runs this suite, and tears it down — see that script and
- * docs/testing.md before running these tests directly.
+ * docs/how-to/testing.md before running these tests directly.
  *
  * Browser binaries are a devDependency-managed local install
  * (`npx playwright install chromium`), never committed and never fetched at

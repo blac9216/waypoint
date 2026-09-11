@@ -132,5 +132,5 @@ resume decision logic is covered; its production size-discovery entry path is no
 
 Fixtures backing the concrete tests in #1411/#1428/#1449/#1463 are invented,
 never exported from the lab. Real-tool (`vcf-download-tool`) invocation paths
-remain live-lab-validated only, per `docs/testing.md`'s VCFDT policy — no
+remain live-lab-validated only, per `docs/how-to/testing.md`'s VCFDT policy — no
 vendor tool bytes in CI, ever.

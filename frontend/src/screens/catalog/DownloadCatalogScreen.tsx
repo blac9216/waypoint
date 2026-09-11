@@ -1,5 +1,5 @@
 /**
- * Download Catalog — docs/ui/prototype/README.md screen 6, against
+ * Download Catalog — docs/how-to/ui-prototype.md screen 6, against
  * docs/api-contract.md's "Download Catalog" ledger row
  * (`/catalog/artifacts`, `/catalog/sync`, `/downloads`, `/system`).
  *

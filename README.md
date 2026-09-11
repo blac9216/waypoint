@@ -129,7 +129,7 @@ designed this way:
 - [Roadmap](docs/explanation/roadmap.md) — build sequencing
 - [UI design brief](docs/explanation/ui-design-brief.md) — screen inventory and prototype reconciliation
 - [API contract](docs/api-contract.md) — REST/SSE contract, state machines, and data ledger
-- [Testing](docs/testing.md) — required reading before running the Compose stack
+- [Testing](docs/how-to/testing.md) — required reading before running the Compose stack
 
 ## License
 

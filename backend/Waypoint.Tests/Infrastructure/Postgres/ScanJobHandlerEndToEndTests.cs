@@ -1153,7 +1153,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// <c>BuildPlanItemJobSpec</c>, unchanged from #915 -- but no NSX-transport fixture
 	/// exercised it, so an nsx-api-specific regression (e.g. a branch that never threads
 	/// <c>benchmark_revision_id</c> into the stamp for this transport) would not have been
-	/// caught by the ssh/vmware tests alone (docs/testing.md's fixture-monoculture
+	/// caught by the ssh/vmware tests alone (docs/how-to/testing.md's fixture-monoculture
 	/// guidance). Seeds a real (invented) migration-0052 <c>benchmark_revisions</c> row via
 	/// <see cref="_benchmarks"/> with an identity distinct from the static NSX-kind
 	/// fallback stamp, freezes it onto a narrowed nsx-api/service (NSX 4.x STIG) component

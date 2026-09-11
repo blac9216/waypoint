@@ -1,5 +1,5 @@
 /**
- * Dashboard — docs/ui/prototype/README.md screen 2 (issue #513, consolidating
+ * Dashboard — docs/how-to/ui-prototype.md screen 2 (issue #513, consolidating
  * #31's SCHEDULES card and #32's ATTENTION card). Four KPI tiles, a SITE
  * POSTURE table, RECENT RUNS, and an APPLIANCE / SCHEDULES / ATTENTION
  * sidebar. Replaces the `PlaceholderScreen` that stood in for this screen

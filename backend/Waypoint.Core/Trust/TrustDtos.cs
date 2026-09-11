@@ -37,7 +37,7 @@ public static class TrustPolicyStatuses
 
 /// <summary>
 /// Migration 0059's <c>trust_policies.scope_type</c> vocabulary -- deliberately the
-/// narrow set THIS slice's controller accepts (docs/testing.md derive-the-axis
+/// narrow set THIS slice's controller accepts (docs/how-to/testing.md derive-the-axis
 /// idiom applied to a closed enum rather than a free string): a top-level target, or
 /// this repo's two already-shipped STIG Manager connection shapes
 /// (<c>StigManagerController</c>'s global/per-site connections). Widening this list is

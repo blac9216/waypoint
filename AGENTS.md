@@ -86,10 +86,10 @@ issue-driven via the `github-workflow` skill.
 
 ## Running & Testing — read before `docker compose`
 
-**[`docs/testing.md`](docs/testing.md) is required reading before you run the stack.**
+**[`docs/how-to/testing.md`](docs/how-to/testing.md) is required reading before you run the stack.**
 
 Multiple agents run this stack on the same Docker host concurrently, so every
-bring-up needs its own Compose project name and host port — `docs/testing.md` is the
+bring-up needs its own Compose project name and host port — `docs/how-to/testing.md` is the
 single source of truth for the current isolation recipe (issue #68 removed the
 compose file's fixed `container_name:` values, so `-p <name>` alone now isolates
 containers/networks/volumes together), how to verify isolation *before* trusting a

@@ -1322,7 +1322,7 @@ public sealed class SchemaMigrationTests
 	/// copies -- the C# <c>Catalog*</c>/<c>CredentialPurposes</c> constants and migration
 	/// 0050's CHECK constraint value lists. This repo's convention is a class-killing drift
 	/// guard (cf. <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>
-	/// mirroring <c>CredentialTypes</c>, and docs/testing.md's "read it off the detector"
+	/// mirroring <c>CredentialTypes</c>, and docs/how-to/testing.md's "read it off the detector"
 	/// derivation). This parses each closed set's value list OUT OF the authoritative 0050
 	/// migration text (embedded resource) and asserts set-equality with the C# constants, so
 	/// adding/removing a value on either side without the other fails here -- drift in either

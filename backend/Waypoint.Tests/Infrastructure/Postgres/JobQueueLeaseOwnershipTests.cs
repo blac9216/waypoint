@@ -43,7 +43,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// showing the same call succeeds when ownership does hold, so a method that always
 /// returned <c>false</c> could not pass this file.
 ///
-/// **Round 1 review found a fixture monoculture in this very file** (docs/testing.md,
+/// **Round 1 review found a fixture monoculture in this very file** (docs/how-to/testing.md,
 /// "Fixture monoculture" -- the fifth instance in this repo, and the most embarrassing
 /// one, since the file exists specifically so these three methods stop being untested).
 /// Every fixture above renews while <c>running</c>, so narrowing
@@ -276,7 +276,7 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 
 	// ---- monoculture sweep ------------------------------------------------
 	//
-	// What every fixture above has in common, asked deliberately per docs/testing.md
+	// What every fixture above has in common, asked deliberately per docs/how-to/testing.md
 	// rather than discovered by a reviewer a second time:
 	//
 	//   1. state at renew is always 'running'          -> LOAD-BEARING. Closed below by
@@ -309,7 +309,7 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 	/// from <c>running</c> in either shape, and still has an outgoing transition. Today
 	/// that resolves to running/attesting/converting, but a pipeline stage added to
 	/// <see cref="JobStateMachine"/> later joins this set on its own -- which is the point.
-	/// A hand-written list is a monoculture with extra steps (docs/testing.md).
+	/// A hand-written list is a monoculture with extra steps (docs/how-to/testing.md).
 	/// </summary>
 	private static readonly HashSet<string> ExecutingStates = DeriveExecutingStates();
 

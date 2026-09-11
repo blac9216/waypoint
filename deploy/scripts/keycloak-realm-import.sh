@@ -14,7 +14,7 @@
 # Usage:
 #   deploy/scripts/keycloak-realm-import.sh <project-name> [realm-file]
 #
-# <project-name> is the `docker compose -p` project (docs/testing.md). If
+# <project-name> is the `docker compose -p` project (docs/how-to/testing.md). If
 # [realm-file] is omitted, imports the committed waypoint-realm.json (with a
 # real secret substituted into the scratch copy). Requires
 # KEYCLOAK_BACKEND_CLIENT_SECRET to be set -- refuses to run with an

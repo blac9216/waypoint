@@ -139,7 +139,7 @@ CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN, CHECK_IPV6})
 #
 # One path per entry — never a directory or a glob, so a new file alongside an
 # exempted one is still fully scanned. Empty is the correct steady state, and
-# a non-empty ALLOWLIST_FINDINGS must also be disclosed in docs/testing.md
+# a non-empty ALLOWLIST_FINDINGS must also be disclosed in docs/how-to/testing.md
 # under "What CI covers — and does not".
 ALLOWLIST_FINDINGS: dict[str, dict[str, str]] = {
 	# module.transport.vmware.ps1:111 uses VMware's factory-default SSO domain
@@ -277,7 +277,7 @@ def _unescape_separators(line: str) -> str:
 # one unacceptable direction, so #113 falls back to its own documented Option
 # B: NO syntactic extension guard here. A keyless four-part version glued to an
 # extension is now a disclosed false POSITIVE (a spurious CI fail, renamed
-# away), pinned in VersionExtensionTests and docs/testing.md; the only
+# away), pinned in VersionExtensionTests and docs/how-to/testing.md; the only
 # structural exemption that survives is a PRECEDING version key, applied
 # downstream by is_version_string(), not here. Do NOT reintroduce a lookahead
 # that encodes an extension list — that shape has failed open before. The
@@ -339,7 +339,7 @@ def _unescape_separators(line: str) -> str:
 # lookahead of the shape `(?!\.[A-Za-z]{1,8}...)` so a bare version quad glued
 # to a file extension would not match as an address; it was removed because it
 # opened a FALSE NEGATIVE on the hard secret gate. See the block above IPV4_RE
-# and docs/testing.md for the full rationale; the short version is that a
+# and docs/how-to/testing.md for the full rationale; the short version is that a
 # version quad and an IPv4 literal are byte-for-byte identical, so any such
 # lookahead also suppresses a real, non-doc address glued to an extension. The
 # only surviving version exemption is a PRECEDING version key, applied by
@@ -915,7 +915,7 @@ ALLOWED_IPV6_EXACT = frozenset(
 # colon-separated run whose first eight groups parse and whose every remaining
 # group is all-digit — so the disclosed #118 false-positive class becomes
 # unbounded in RECORD LENGTH, not merely a group or two wider. That is a class
-# no test can enumerate and no sentence in docs/testing.md can state truthfully,
+# no test can enumerate and no sentence in docs/how-to/testing.md can state truthfully,
 # which is exactly how three separate places in this repo came to assert a
 # bound of "exactly one group" that the loop no longer had. A pin named
 # `..._are_still_only_these` cannot bound what it claims to bound unless the
@@ -1070,7 +1070,7 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	    the bound. Pinned by MultiGroupPortRetryTests.test_four_trailing_
 	    all_digit_groups_are_a_disclosed_residual.
 
-	Both are in docs/testing.md as well.
+	Both are in docs/how-to/testing.md as well.
 
 	One more normalization happens before any of the above: a trailing
 	IPv4-mapped dotted quad has its zero-padding stripped first

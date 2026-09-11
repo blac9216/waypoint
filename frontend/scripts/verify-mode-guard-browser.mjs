@@ -16,7 +16,7 @@
  * marker text is present during any mutation, and every assertion reads the
  * latch, never a snapshot. Keeping it in the repo also means the evidence a
  * reviewer runs is the evidence under review, rather than a block of shell that
- * GitHub may have mangled on its way into a stored body (docs/testing.md,
+ * GitHub may have mangled on its way into a stored body (docs/how-to/testing.md,
  * "Honest verification" rule 3).
  *
  * WHAT THE LATCH CAN AND CANNOT SEE — stated so no scenario here implies
@@ -50,7 +50,7 @@
  *   BASE_URL=http://localhost:5411 node scripts/verify-mode-guard-browser.mjs
  *
  * CHROME_PATH overrides the browser (defaults to the sandbox-provisioned
- * /opt/pw-browsers/chromium, see docs/testing.md). ONLY runs one scenario by
+ * /opt/pw-browsers/chromium, see docs/how-to/testing.md). ONLY runs one scenario by
  * its leading number. Point BASE_URL at a second dev server running another
  * revision for a before/after comparison: every scenario prints raw
  * observations and asserts nothing, so the output stays meaningful on a

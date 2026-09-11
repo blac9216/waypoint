@@ -63,7 +63,7 @@ export interface DashboardData {
 
 /** Compliance-owned `run_type` values — same closed set `useRunList.ts`'s
  * `COMPLIANCE_RUN_TYPES` filters the Results screen to (issue #591). RECENT
- * RUNS is a compliance summary per the prototype (docs/ui/prototype/README.md
+ * RUNS is a compliance summary per the prototype (docs/how-to/ui-prototype.md
  * screen 2: kind pills are scan/remediate) and every row links into Results,
  * so it must show the same domain-ownership set Results does (issue #717).
  *
@@ -128,7 +128,7 @@ export function runStateTone(state: string): "ok" | "warn" | "bad" | "accent" | 
 }
 
 /** SITE POSTURE compliance bar/percentage color token per the prototype spec
- * (docs/ui/prototype/README.md screen 2): `--ok` >=90, `--warn` >=82, else
+ * (docs/how-to/ui-prototype.md screen 2): `--ok` >=90, `--warn` >=82, else
  * `--bad`. `null` means no scan data yet — callers render the "no scan data"
  * label instead of a bar, so this never needs a tone for that case, but is
  * typed to accept it defensively. */

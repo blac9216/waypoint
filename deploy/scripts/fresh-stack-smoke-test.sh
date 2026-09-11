@@ -6,7 +6,7 @@
 # failure, site/target/credential setup, scan enqueue/claim/honest-failure,
 # cancellation, SSE, runner stop/scale-out, and a secret canary sweep.
 #
-# Follows docs/testing.md's isolation recipe: unique -p project name, unique
+# Follows docs/how-to/testing.md's isolation recipe: unique -p project name, unique
 # host port, full `down -v` teardown on exit (trap-based).
 #
 # HTTP checks run through a helper container on the stack's own `edge`
@@ -31,7 +31,7 @@ PORT="${2:-19443}"
 PROJECT="wp-${SLUG}"
 # WAYPOINT_SMOKE_OVERRIDE_FILE: rare manual escape hatch, uncommitted extra
 # compose override. WAYPOINT_SMOKE_SUBNET: reroutes around an `edge`-subnet
-# collision with a concurrent stack (docs/testing.md). `DC` is finalized
+# collision with a concurrent stack (docs/how-to/testing.md). `DC` is finalized
 # further down. $PORT/$BASE are also used for operator-facing examples and a
 # best-effort direct probe.
 BASE="https://127.0.0.1:${PORT}"
@@ -50,7 +50,7 @@ bad() { FAIL_COUNT=$((FAIL_COUNT + 1)); FAILURES+=("$*"); printf '[FAIL] %s\n' "
 
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap cleanup EXIT`
 cleanup() {
-	log "Tearing down ${PROJECT} (docs/testing.md: always your own project, always -v)"
+	log "Tearing down ${PROJECT} (docs/how-to/testing.md: always your own project, always -v)"
 	if [[ -n "${HELPER_STARTED}" ]]; then
 		docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
 	fi
@@ -74,7 +74,7 @@ cd "${DEPLOY_DIR}"
 # here; deploy/config/tls/ (the persistent-mode location) is never touched.
 
 if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
-	log "frontend/dist missing (Node 22 required, sandbox has Node ${NODE_VER:-unknown}) -- writing an accepted placeholder per docs/testing.md's disclosed workaround"
+	log "frontend/dist missing (Node 22 required, sandbox has Node ${NODE_VER:-unknown}) -- writing an accepted placeholder per docs/how-to/testing.md's disclosed workaround"
 	mkdir -p "${REPO_ROOT}/frontend/dist"
 	cat > "${REPO_ROOT}/frontend/dist/index.html" <<-'EOF'
 	<!doctype html><html><head><title>waypoint placeholder</title></head>
@@ -110,7 +110,7 @@ fi
 # WAYPOINT_SMOKE_SUBNET: optional, mirrors e2e-playwright.sh's
 # WAYPOINT_E2E_SUBNET -- override the generated stack's `edge` subnet when
 # the agent-mode default (203.0.113.0/24) collides with a concurrent stack on
-# this host (docs/testing.md). Never commit a run with this set.
+# this host (docs/how-to/testing.md). Never commit a run with this set.
 GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" "${LOCAL_AUTH_ARGS[@]}")
 if [[ -n "${WAYPOINT_SMOKE_SUBNET:-}" ]]; then
 	log "WAYPOINT_SMOKE_SUBNET=${WAYPOINT_SMOKE_SUBNET} -- overriding the generated edge subnet"
@@ -290,7 +290,7 @@ done
 if curl -k -sS -o /dev/null --max-time 2 "${BASE}/api/v1/health" 2>/dev/null; then
 	echo "(also confirmed reachable directly at ${BASE})"
 else
-	echo "(${BASE} not reachable from this script's own network namespace -- using the in-network helper for every check below; this is expected in a devcontainer/remote-daemon environment, see docs/testing.md)"
+	echo "(${BASE} not reachable from this script's own network namespace -- using the in-network helper for every check below; this is expected in a devcontainer/remote-daemon environment, see docs/how-to/testing.md)"
 fi
 
 # --- 2. Login ---------------------------------------------------------

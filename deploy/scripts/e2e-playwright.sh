@@ -81,7 +81,7 @@ log() { printf '\n=== %s ===\n' "$*"; }
 
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap cleanup EXIT`
 cleanup() {
-	log "Tearing down ${PROJECT} (docs/testing.md: always your own project, always -v)"
+	log "Tearing down ${PROJECT} (docs/how-to/testing.md: always your own project, always -v)"
 	if [[ -n "${HELPER_STARTED}" ]]; then
 		docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
 	fi
@@ -193,7 +193,7 @@ else
 fi
 
 # WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet on a
-# collision with a concurrent stack (docs/testing.md). Never commit with this set.
+# collision with a concurrent stack (docs/how-to/testing.md). Never commit with this set.
 #
 # --keycloak-dev-admin: the LOGIN spec drives the real Keycloak PKCE flow, so
 # it needs a real Keycloak-realm user; other specs still use the local-auth

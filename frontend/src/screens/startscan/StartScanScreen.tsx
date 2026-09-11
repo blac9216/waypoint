@@ -1,5 +1,5 @@
 /**
- * Start a Scan — five-step wizard (docs/ui/prototype/README.md screen 3;
+ * Start a Scan — five-step wizard (docs/how-to/ui-prototype.md screen 3;
  * issue #284, second sub-issue of the #26 split; PR #288's Live Run view is
  * the destination after confirm, PR #285's run controls are out of scope
  * here).

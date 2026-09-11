@@ -133,7 +133,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	const [scopeOmissionErrors, setScopeOmissionErrors] = useState<ScopeOmission[]>([]);
 
 	// Issue #639: the InSpec profile a scan executes against, fed by GET
-	// /profiles (docs/ui/prototype/README.md screen 3 step 2: "the list of
+	// /profiles (docs/how-to/ui-prototype.md screen 3 step 2: "the list of
 	// InSpec profiles that will apply"). Fetched once the wizard becomes
 	// usable, same lazy-on-relevant-step convention the credential step below
 	// uses for fetchCredentialOptions — loaded here (not gated to the scope

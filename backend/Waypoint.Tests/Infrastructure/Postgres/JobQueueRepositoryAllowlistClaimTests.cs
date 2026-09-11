@@ -199,7 +199,7 @@ public sealed class JobQueueRepositoryAllowlistClaimTests : IAsyncLifetime
 	/// jobCount matches <c>JobQueueRepositoryClaimTests.ManyConcurrentClaimers_...</c>'s
 	/// 64-way concurrency rather than going higher: each claimer here opens its own
 	/// connection for the whole test, and the shared test-container Postgres
-	/// (docs/testing.md) runs many other test classes' connections concurrently within
+	/// (docs/how-to/testing.md) runs many other test classes' connections concurrently within
 	/// the same default <c>max_connections</c> budget.
 	/// </summary>
 	[Fact]

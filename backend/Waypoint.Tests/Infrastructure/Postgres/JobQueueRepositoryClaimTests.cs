@@ -259,7 +259,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 	/// <summary>
 	/// Every other fixture in this class -- and in <c>JobsQueueClaimTests</c> -- claims a
 	/// job that has never been attempted, so <c>attempt_count</c> is 0 at claim time in all
-	/// of them. That shared property is load-bearing (docs/testing.md, "Fixture
+	/// of them. That shared property is load-bearing (docs/how-to/testing.md, "Fixture
 	/// monoculture"): a predicate narrowing the claim to first attempts only, such as the
 	/// <c>AND attempt_count = 0</c> in #140's worked example, passes every other test in the
 	/// repository while quietly making a retry unclaimable forever. A job that failed once

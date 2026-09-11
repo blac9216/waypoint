@@ -74,7 +74,7 @@ public sealed class DashboardAggregateService
 	private const int RecentRunsReturned = 8;
 
 	/// <summary>
-	/// The RECENT RUNS card is a compliance summary (docs/ui/prototype/README.md screen
+	/// The RECENT RUNS card is a compliance summary (docs/how-to/ui-prototype.md screen
 	/// 2) and every row deep-links into Results, which itself shows only these
 	/// compliance-owned <c>run_type</c> values (frontend <c>useRunList.ts</c>'s
 	/// <c>COMPLIANCE_RUN_TYPES</c>). Issue #717: filter to these BEFORE the cap so the

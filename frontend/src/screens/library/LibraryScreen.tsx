@@ -1,5 +1,5 @@
 /**
- * Library — Repository tab (issue #36, docs/ui/prototype screen 7): mode-aware
+ * Library — Repository tab (issue #36, docs/how-to/ui-prototype.md screen 7): mode-aware
  * presence over the depot catalog, a product-family rail, and the air-gapped
  * "Export request manifest" action. Connected-mode-only affordances (queue
  * missing in the download catalog) degrade to hidden/disabled per mode rather

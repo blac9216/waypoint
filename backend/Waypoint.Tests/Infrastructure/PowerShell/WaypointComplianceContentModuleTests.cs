@@ -30,7 +30,7 @@ namespace Waypoint.Tests.Infrastructure.PowerShell;
 /// tree built in <see cref="CreateNestedFixture"/> is INVENTED -- it mirrors the real
 /// vmware/dod-compliance-and-automation repo's reported nesting depth and leaf-name
 /// collisions (e.g. multiple "postgresql"-named profile directories under different
-/// baselines) without copying any real file content, per docs/testing.md's
+/// baselines) without copying any real file content, per docs/how-to/testing.md's
 /// fixture-monoculture guidance and this repo's sanitization rules.
 /// </summary>
 public sealed class WaypointComplianceContentModuleTests : IDisposable

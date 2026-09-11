@@ -27,7 +27,7 @@ namespace Waypoint.Tests.Runner;
 /// The fixtures the publisher suites did not have. Round 1 asked what every fixture in
 /// <c>JobEngineLoggingTests</c> and <c>JobEventPublisherTests</c> shares, and the answer
 /// was: all of them talk to a live, reachable Postgres container. That shared property was
-/// load-bearing (docs/testing.md, "Fixture monoculture"). With the server simply
+/// load-bearing (docs/how-to/testing.md, "Fixture monoculture"). With the server simply
 /// unreachable, <see cref="JobEventPublisher.EmitAsync"/> reported
 /// <c>"timed out after 5s -- likely lock contention on trg_job_events_assign_seq"</c>: it
 /// had never reached the server, nothing was contended, and no 5s had elapsed.

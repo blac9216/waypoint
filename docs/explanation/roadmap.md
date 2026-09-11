@@ -151,7 +151,7 @@ domain/ADRs (merged: [ADR-0022](../adr/0022-compliance-catalog-and-content-lifec
 RBAC contracts ([api-contract.md](../api-contract.md), [security.md](security.md)) →
 [#786](https://github.com/blac9216/waypoint/issues/786) (this document plus
 [`ui-design-brief.md`](ui-design-brief.md) and
-[`ui/prototype/README.md`](../ui/prototype/README.md)) reconciles roadmap sequencing and
+[`how-to/ui-prototype.md`](../how-to/ui-prototype.md)) reconciles roadmap sequencing and
 UI/domain vocabulary. No implementation child begins before all three merge.
 
 **Waves 1–5 — implementation, dependency-ordered.** Content foundation (catalog,

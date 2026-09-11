@@ -46,7 +46,7 @@ const BUNDLE_BUF = Buffer.from(REALISTIC_BUNDLE);
 // node:zlib gained zstd support in Node 22.15; the `.xz` fixture shells out to
 // the system `xz` binary (universal on Linux) because Node has no built-in xz
 // encoder. Both are probed once and dependent tests are skipped — not failed —
-// with a clear reason when absent, per docs/testing.md's "never claim a check
+// with a clear reason when absent, per docs/how-to/testing.md's "never claim a check
 // you did not execute": an honest skip beats a flaky failure. Neither
 // capability is load-bearing for the model itself, only for two of the
 // fixtures that illustrate it.

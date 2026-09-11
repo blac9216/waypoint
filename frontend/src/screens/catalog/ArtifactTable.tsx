@@ -1,5 +1,5 @@
 /**
- * Fixed-layout artifact table — docs/ui/prototype/README.md screen 6:
+ * Fixed-layout artifact table — docs/how-to/ui-prototype.md screen 6:
  *
  *   "Table `table-layout:fixed`: checkbox 7% (`7px 6px 7px 14px` padding —
  *   a 5% column cannot hold a 13px box plus 26px of padding) / ARTIFACT 30%

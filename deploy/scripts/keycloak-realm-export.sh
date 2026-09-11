@@ -8,7 +8,7 @@
 #   deploy/scripts/keycloak-realm-export.sh <project-name> <out-file>
 #
 # <project-name> is the `docker compose -p` project your stack was brought
-# up with (docs/testing.md), e.g. `wp-issue28`. <out-file> is where the
+# up with (docs/how-to/testing.md), e.g. `wp-issue28`. <out-file> is where the
 # exported realm JSON lands on the host.
 set -euo pipefail
 

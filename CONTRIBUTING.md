@@ -32,7 +32,7 @@ Waypoint uses:
 
 Follow the component-specific setup instructions in [backend/README.md](backend/README.md),
 [frontend/README.md](frontend/README.md), and [deploy/README.md](deploy/README.md).
-Before starting containers or integration tests, read [docs/testing.md](docs/testing.md)
+Before starting containers or integration tests, read [docs/how-to/testing.md](docs/how-to/testing.md)
 in full. Its Compose isolation and remote-Docker guidance is mandatory on shared
 development hosts.
 
@@ -62,7 +62,7 @@ environment requirements live with each component:
 - Frontend build, lint, unit tests, coverage, and air-gap asset checks:
   [frontend/README.md](frontend/README.md)
 - Compose and live-stack validation: [deploy/README.md](deploy/README.md) and
-  [docs/testing.md](docs/testing.md)
+  [docs/how-to/testing.md](docs/how-to/testing.md)
 - Public-repository sanitization: [CLAUDE.md](CLAUDE.md) and the scanner under
   [`.github/sanitize/`](.github/sanitize/)
 
