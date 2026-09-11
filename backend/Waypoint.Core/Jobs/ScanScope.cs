@@ -19,7 +19,7 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// The parsed shape of <c>RunCreateRequest.Scope</c> for <c>run_type: "scan"</c>
-/// (docs/api-contract.md <c>/runs</c>: "POST body: site_id, scope (products/components
+/// (docs/reference/api-contract.md <c>/runs</c>: "POST body: site_id, scope (products/components
 /// + inventory selection)..."). <see cref="TargetIds"/> null or empty means "every
 /// target under the site" -- the common case for a full-site scan; a non-empty list
 /// scopes the fan-out to exactly those targets (the Start-a-Scan checkbox tree, #23's
@@ -36,7 +36,7 @@ namespace Waypoint.Core.Jobs;
 /// needs a content-store-relative directory name, not a database surrogate key.
 ///
 /// <see cref="TargetScope"/> is issue #733's additive component-scope field (epic
-/// #726 Wave 2, docs/api-contract.md's planned end-state <c>{ site_id, target_scope
+/// #726 Wave 2, docs/reference/api-contract.md's planned end-state <c>{ site_id, target_scope
 /// }</c> shape): when present, <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
 /// additionally resolves it via <see cref="Waypoint.Infrastructure.Runs.ScopeResolutionService"/>
 /// and freezes a <see cref="Waypoint.Core.Components.ResolvedTargetScope"/> audit

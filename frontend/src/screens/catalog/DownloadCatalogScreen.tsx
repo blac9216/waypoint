@@ -1,6 +1,6 @@
 /**
  * Download Catalog — docs/ui/prototype/README.md screen 6, against
- * docs/api-contract.md's "Download Catalog" ledger row
+ * docs/reference/api-contract.md's "Download Catalog" ledger row
  * (`/catalog/artifacts`, `/catalog/sync`, `/downloads`, `/system`).
  *
  * The screen itself is only reachable in connected mode already (the
@@ -67,14 +67,14 @@ const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	})),
 ];
 
-// Run-level terminal states (docs/api-contract.md's `run.progress` `state`
+// Run-level terminal states (docs/reference/api-contract.md's `run.progress` `state`
 // field, mirroring HistoryPanel.tsx's TERMINAL_STATES) — used only to know
 // when to drop this screen's own `queuedByArtifact` bookkeeping below, never
 // to fabricate a per-artifact status.
 const RUN_TERMINAL_STATES = new Set(["completed", "completed_with_failures", "aborted"]);
 
 // `DownloadQueueItem.state` values that mean an artifact is genuinely in
-// flight on the legacy `download` path (docs/api-contract.md's queue-item
+// flight on the legacy `download` path (docs/reference/api-contract.md's queue-item
 // states) — used only to decide whether a fresh binaries-download enqueue's
 // "queued" placeholder should yield to an existing `byArtifact` entry
 // (review round 2 finding C: a TERMINAL legacy entry — `verified`/`failed` —
@@ -126,7 +126,7 @@ export function DownloadCatalogScreen() {
 	// Drops `queuedByArtifact`/`binariesRunNotice` bookkeeping for a run once
 	// it reaches a terminal state — the only "clear" trigger besides a reload
 	// (this state is in-memory only, so a reload already starts empty). Fed
-	// as `useDownloadQueue`'s `onEvent` sink below (docs/api-contract.md
+	// as `useDownloadQueue`'s `onEvent` sink below (docs/reference/api-contract.md
 	// "Event streams (SSE)": `run.progress` is run-scoped and carries the
 	// run's lifecycle `state`) rather than a second `connectEventStream` call
 	// on the same `/api/v1/events` URL — two independent readers of one

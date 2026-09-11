@@ -1,5 +1,5 @@
 /**
- * Thin REST client for `/api/v1` (docs/api-contract.md "Conventions").
+ * Thin REST client for `/api/v1` (docs/reference/api-contract.md "Conventions").
  *
  * - JSON bodies, snake_case fields on the wire (kept snake_case in the TS
  *   types too, deliberately — translating to camelCase would just be a
@@ -302,7 +302,7 @@ export async function apiFetch<T = unknown>(path: string, options: ApiRequestOpt
 		}
 
 		// NOTE: no `X-Total-Count` handling here on purpose. No list endpoint
-		// exists in docs/api-contract.md yet, so there is nothing to shape the
+		// exists in docs/reference/api-contract.md yet, so there is nothing to shape the
 		// pagination result against; the half-written branch that used to live
 		// here returned the same value from both arms and was removed (PR #65
 		// review, finding #4). Add it with a real endpoint, not before.

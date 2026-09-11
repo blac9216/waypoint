@@ -18,7 +18,7 @@ convention for each screen (**Entities**, **Actions** with an RBAC tier, then
 normative from [`../explanation/domain-model.md`](../explanation/domain-model.md)'s "Depot, catalog identity,
 subscriptions, and presence sweep" section and the ADRs it cites (0028–0034); wire
 facts (endpoints, shipped-vs-planned, RBAC-as-implemented) are cited from
-[`../api-contract.md`](../api-contract.md)'s "Depot catalog & downloads" and "Library
+[`../reference/api-contract.md`](../reference/api-contract.md)'s "Depot catalog & downloads" and "Library
 & content library" sections and its "RBAC map — download domain" table, reconciled by
 issue #1034 via PR [#1747](https://github.com/blac9216/waypoint/pull/1747) (merged
 2026-09-06). Where
@@ -327,7 +327,7 @@ download-runner has heartbeated at least once).
   decision record — R2-10 RBAC, R2-11 IA-deferred-to-this-doc).
 - API/security reconciliation: [PR #1747](https://github.com/blac9216/waypoint/pull/1747)
   (issue #1034, merged) — the wire-facing source for every ✅/🚧/⏳ marker above, now
-  folded into [`../api-contract.md`](../api-contract.md).
+  folded into [`../reference/api-contract.md`](../reference/api-contract.md).
 - Prototype: [`prototype/README.md`](prototype/README.md) screens 6 (Download
   Catalog), 7 (Library), 9 (Configuration) — visual/interaction reference only; this
   document is normative for the download domain per the same rule

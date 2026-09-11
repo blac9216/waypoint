@@ -51,7 +51,7 @@ public interface IJobControlRepository
 
 	/// <summary>
 	/// Paginated run summaries for GET /runs, newest-first (<c>ORDER BY created_at
-	/// DESC</c>) per docs/api-contract.md Conventions' <c>?limit/offset</c> pagination.
+	/// DESC</c>) per docs/reference/api-contract.md Conventions' <c>?limit/offset</c> pagination.
 	/// Reuses the same per-job <c>FILTER</c> aggregation as <see cref="GetRunAsync"/>,
 	/// grouped per run, plus the full collection's total row count for the caller's
 	/// <c>X-Total-Count</c> response header.
@@ -216,7 +216,7 @@ public interface IJobControlRepository
 	Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken);
 
 	/// <summary>
-	/// <c>POST /runs/{id}/resume-blocked</c> (docs/api-contract.md, ADR-0008): unlike
+	/// <c>POST /runs/{id}/resume-blocked</c> (docs/reference/api-contract.md, ADR-0008): unlike
 	/// <see cref="UnblockCredentialAsync"/>'s same-credential retry, this reassigns the
 	/// run's halted job set onto a <b>different, caller-supplied replacement
 	/// credential</b> -- a true swap, not a retry. Scoped to exactly one run: only that

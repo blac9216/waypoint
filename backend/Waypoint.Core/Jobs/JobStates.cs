@@ -61,7 +61,7 @@ public static class JobStates
 /// them); <see cref="JobStates.Failed"/>, <see cref="JobStates.AuthFailed"/> and
 /// <see cref="JobStates.Cancelled"/> are the "failure" terminals (any one of them among
 /// a run's jobs maps the run to <c>completed_with_failures</c> per
-/// docs/api-contract.md's state machine).
+/// docs/reference/api-contract.md's state machine).
 /// </summary>
 public static class JobTerminalStates
 {
@@ -116,7 +116,7 @@ public static class JobTerminalStates
 
 /// <summary>
 /// The <c>job_count_*</c> bucket (issue #970) that <c>GET /runs</c> and
-/// <c>GET /runs/{id}</c> sort a job into, per docs/api-contract.md's run row. Every
+/// <c>GET /runs/{id}</c> sort a job into, per docs/reference/api-contract.md's run row. Every
 /// value in <see cref="JobStates"/> resolves to exactly one bucket so
 /// <c>sum(job_count_queued, job_count_running, job_count_completed, job_count_failed,
 /// job_count_blocked) == job_count</c> always holds.

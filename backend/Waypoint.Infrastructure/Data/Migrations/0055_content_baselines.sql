@@ -1,6 +1,6 @@
 -- Issue #731 (epic #726 Wave 1 capstone: "Stage, diff, activate, and retain
 -- compliance content revisions atomically"). ADR-0022 is the governing decision;
--- docs/api-contract.md's planned "Catalog, content sources, and exact-version
+-- docs/reference/api-contract.md's planned "Catalog, content sources, and exact-version
 -- baselines" section already sketches this exact `baselines` shape:
 -- "(product_version, profile_version, xccdf_version, status, activated_at/by)".
 --

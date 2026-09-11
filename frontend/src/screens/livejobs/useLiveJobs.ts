@@ -11,7 +11,7 @@
  * Re-seeds on reconnect: `connectEventStream`'s `onStateChange` fires
  * `"open"` both on first connect and every successful reconnect. A
  * reconnect can only replay events the server buffered since
- * `Last-Event-ID` (docs/api-contract.md's replay guarantee is bounded, not
+ * `Last-Event-ID` (docs/reference/api-contract.md's replay guarantee is bounded, not
  * infinite retention) — a run or job that changed state entirely during a
  * long disconnect would otherwise never reach this snapshot. Re-fetching
  * `GET /runs` on every reconnect (not just mount) is what "reconciles with

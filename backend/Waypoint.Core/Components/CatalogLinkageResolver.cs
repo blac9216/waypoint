@@ -118,7 +118,7 @@ public static class CatalogLinkageReasons
 	/// closed set -- the drift guard <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.All"/>
 	/// and <see cref="ScopeOmissionReasons.All"/> already carry for their vocabularies.
 	/// Tests assert both that no other reason can reach a caller and that
-	/// <c>docs/api-contract.md</c> publishes exactly these values, so a fifth reason
+	/// <c>docs/reference/api-contract.md</c> publishes exactly these values, so a fifth reason
 	/// cannot reach <c>discover.progress</c> without the contract being updated.
 	/// </summary>
 	public static readonly IReadOnlyCollection<string> All =

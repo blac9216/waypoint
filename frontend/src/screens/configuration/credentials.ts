@@ -1,5 +1,5 @@
 /**
- * Credentials data layer (docs/api-contract.md "Credentials (service/shared
+ * Credentials data layer (docs/reference/api-contract.md "Credentials (service/shared
  * only — ADR-0011)"), against the #20 backend
  * (`CredentialsController`/`CredentialDtos.cs`):
  *

@@ -37,7 +37,7 @@ export function isTerminalRunState(state: string): boolean {
 }
 
 /** Job states with no further transition — the same closed set the former
- * `liverun.ts` `TERMINAL_JOB_STATES` used (docs/api-contract.md job states). */
+ * `liverun.ts` `TERMINAL_JOB_STATES` used (docs/reference/api-contract.md job states). */
 const TERMINAL_JOB_STATES: ReadonlySet<string> = new Set(["uploaded", "done", "failed", "auth-failed", "cancelled"]);
 
 export function isTerminalJobState(state: string): boolean {

@@ -16,7 +16,7 @@ using System.Text.Json.Serialization;
 
 namespace Waypoint.Api.Contracts;
 
-/// <summary>Wire shape for one <c>audit_log</c> row (docs/api-contract.md `/audit`).</summary>
+/// <summary>Wire shape for one <c>audit_log</c> row (docs/reference/api-contract.md `/audit`).</summary>
 public sealed record AuditEntryResponse(
 	[property: JsonPropertyName("id")]
 	string Id,

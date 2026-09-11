@@ -144,7 +144,7 @@ public sealed class RunCreationService
 
 	/// <summary>
 	/// Validates a scan run's <c>scope</c> (site + optional target selection, all must
-	/// resolve to existing rows -- docs/api-contract.md `/runs`: "POST body: site_id,
+	/// resolve to existing rows -- docs/reference/api-contract.md `/runs`: "POST body: site_id,
 	/// scope... credential"), then creates the run and fans out one <c>scan</c>
 	/// <see cref="JobSpec"/> per target, ordered by <see cref="ScanTargetPriority"/>.
 	/// Every target's job is created up front in one <see cref="IJobControlRepository.FanOutJobsAsync"/>
@@ -186,7 +186,7 @@ public sealed class RunCreationService
 		// component's own active baseline) -- never a run-level `profile_id`. This is
 		// the SAME request-shape rule `RunPlanPreviewService.PreviewAsync` already
 		// enforces (ADR-0022 section 7 "Start a Scan ... never selects a profile") and
-		// docs/api-contract.md's `/runs` row states as the target end-state: create must
+		// docs/reference/api-contract.md's `/runs` row states as the target end-state: create must
 		// reject `profile_id` here too, or the wizard's preview-then-create handoff
 		// cannot reuse one `scope` payload (issue #895's repro). A legacy request with
 		// no `target_scope` is completely unaffected: it still requires `profile_id`,

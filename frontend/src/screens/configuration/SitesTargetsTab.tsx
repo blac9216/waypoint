@@ -21,7 +21,7 @@ export function SitesTargetsTab() {
 	// listing; it's fetched here (once) rather than in the panel because this
 	// level already loads it for the sidebar's count-refresh path.
 	const [credentials, setCredentials] = useState<CredentialOption[]>([]);
-	// The `/sites` resource has no target-count field (docs/api-contract.md
+	// The `/sites` resource has no target-count field (docs/reference/api-contract.md
 	// "Site: name, description, stigman_override?" — no count), so the
 	// sidebar's per-site count (docs/ui/prototype/README.md "Sidebar lists
 	// sites with target counts") is derived client-side: one

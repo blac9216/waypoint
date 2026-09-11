@@ -23,7 +23,7 @@ namespace Waypoint.Api.Validation;
 
 /// <summary>
 /// Turns MVC's model-state failures into the documented error envelope
-/// (<c>docs/api-contract.md</c> Conventions: <c>{ "error": { code, message, detail? } }</c>,
+/// (<c>docs/reference/api-contract.md</c> Conventions: <c>{ "error": { code, message, detail? } }</c>,
 /// snake_case).
 ///
 /// <para>

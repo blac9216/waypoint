@@ -1,6 +1,6 @@
 /**
  * Audit data layer (issue #531, epic #14), against the `/audit` backend
- * (PR #529/#512, `AuditController`, `docs/api-contract.md` `/audit`:
+ * (PR #529/#512, `AuditController`, `docs/reference/api-contract.md` `/audit`:
  * "Cyber+; decrypt events, config versions, run initiations,
  * imports/updates.").
  *

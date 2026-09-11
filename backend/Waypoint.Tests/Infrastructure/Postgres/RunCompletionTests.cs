@@ -24,7 +24,7 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Issue #406: docs/api-contract.md's run state machine names two terminal states
+/// Issue #406: docs/reference/api-contract.md's run state machine names two terminal states
 /// (<c>completed</c>, <c>completed_with_failures</c>) that, before this, no code path
 /// ever wrote -- <c>AdvanceStateAsync</c> only ever set <c>jobs.state</c>, leaving
 /// <c>runs.state</c> stuck at <c>running</c> forever. These tests exercise the

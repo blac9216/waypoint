@@ -11,7 +11,7 @@ A high-fidelity interactive prototype covering all nine screens lives in
 `README.md` is the design handoff (tokens, layout rules, per-screen specs).
 **Mockups are illustrative; `../explanation/domain-model.md` and the ADRs are normative** — on
 conflict, the domain model wins and the discrepancy gets logged. `../explanation/domain-model.md`
-and `../api-contract.md` are this document's own source of truth for entities and
+and `../reference/api-contract.md` are this document's own source of truth for entities and
 actions; where this brief and the prototype's visuals disagree, this brief wins.
 
 The reconciliation pass adopted the prototype's inventions into the domain model
@@ -61,7 +61,7 @@ replaces that model with a closed catalog of exact-version baselines, stable
 component identity, immutable plans, component jobs with ordered attempts, and
 per-control settings (ADRs [0022](../adr/0022-compliance-catalog-and-content-lifecycle.md)–
 [0025](../adr/0025-compliance-trust-cleanup-and-evidence.md), reconciled into
-[`../api-contract.md`](../api-contract.md) and [`../explanation/security.md`](../explanation/security.md) by
+[`../reference/api-contract.md`](../reference/api-contract.md) and [`../explanation/security.md`](../explanation/security.md) by
 issue #785). The subsections below are the reconciled information architecture —
 **domain behavior and entity/action vocabulary, not a pixel spec.** The prototype
 remains useful reference for visual density, tokens, and layout mechanics (see
@@ -69,7 +69,7 @@ remains useful reference for visual density, tokens, and layout mechanics (see
 that assume the old model (a profile picker, one job per target, a single
 mutable config document) are superseded by this section and by the 🚧-marked notes
 inline in the Screens list below. Every 🚧 marker in this document follows the
-convention already used in `../explanation/roadmap.md` and `../api-contract.md`: planned,
+convention already used in `../explanation/roadmap.md` and `../reference/api-contract.md`: planned,
 not yet shipped, and never to be conflated with the earlier scan-slice behavior it replaces.
 
 ### Benchmarks — source-of-truth entity/action map
@@ -271,7 +271,7 @@ what's new is the two-family distinction above and the Admin-only acknowledge
 action with its never-hides-the-condition guarantee — the prototype's alerts had
 no acknowledge action designed at all.
 
-## RBAC — UI role gates (matches `../api-contract.md`'s RBAC summary and
+## RBAC — UI role gates (matches `../reference/api-contract.md`'s RBAC summary and
 `../explanation/security.md`'s RBAC reconciliation; narrows/clarifies `../explanation/domain-model.md`'s
 Roles table, never widens it)
 

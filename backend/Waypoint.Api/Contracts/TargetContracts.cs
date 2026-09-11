@@ -19,7 +19,7 @@ using Waypoint.Core.Sites;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// Response body for a target (docs/api-contract.md `/sites/{id}/targets`: kind,
+/// Response body for a target (docs/reference/api-contract.md `/sites/{id}/targets`: kind,
 /// connection.host, credential_ref, discovery_status, last_refreshed).
 /// <see cref="Connection"/> rides as a raw JSON string -- same convention as
 /// <see cref="SiteResponse.StigmanOverride"/> -- and, per

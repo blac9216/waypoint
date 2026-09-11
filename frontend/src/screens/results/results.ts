@@ -2,7 +2,7 @@
  * Compliance Scan Results data layer (issue #27; renamed from "Results &
  * History" and filtered to compliance-owned run types by issue #591 — see
  * `useRunList.ts`'s `COMPLIANCE_RUN_TYPES`) — docs/ui/prototype/README.md
- * screen 4, against docs/api-contract.md's "Runs & jobs" and "Config
+ * screen 4, against docs/reference/api-contract.md's "Runs & jobs" and "Config
  * documents" rows. Two sub-surfaces:
  *
  *   1. Run list + detail: `GET /runs` (paginated, newest-first — merged per

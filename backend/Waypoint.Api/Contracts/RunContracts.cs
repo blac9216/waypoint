@@ -57,7 +57,7 @@ public sealed record RunCreateRequest(
 
 	/// <summary>
 	/// Required for <c>run_type</c> "remediate": must be the literal
-	/// <c>"REMEDIATE"</c> (docs/api-contract.md `/runs`). Ignored for other run
+	/// <c>"REMEDIATE"</c> (docs/reference/api-contract.md `/runs`). Ignored for other run
 	/// types. The initiator is always taken from the authenticated identity, never
 	/// from the request.
 	/// </summary>
@@ -282,7 +282,7 @@ public sealed record RunCreatedResponse(
 
 /// <summary>
 /// Request body for <c>POST /api/v1/runs/plan-preview</c> (issues #733/#734 remainder,
-/// docs/api-contract.md's planned <c>/runs/plan-preview</c>): the same <c>scope</c>
+/// docs/reference/api-contract.md's planned <c>/runs/plan-preview</c>): the same <c>scope</c>
 /// shape <c>POST /runs</c> accepts for a scan, restricted at this endpoint to the
 /// <c>target_scope</c> form -- preview never selects a profile (ADR-0022 §7), so
 /// <c>scope.profile_id</c> is rejected here rather than silently ignored.
@@ -469,7 +469,7 @@ public sealed record ResumeBlockedResponse(
 	int ResumedJobCount);
 
 /// <summary>
-/// One target row of <c>GET /api/v1/runs/{id}/artifacts</c> (issue #299, docs/api-contract.md
+/// One target row of <c>GET /api/v1/runs/{id}/artifacts</c> (issue #299, docs/reference/api-contract.md
 /// "CKL/HDF download"). Matches <c>frontend/src/screens/results/results.ts</c>'s
 /// <c>RunArtifactRow</c> field-for-field -- that module was built against this documented
 /// shape ahead of the backend landing it (issue #27/#300). Only <c>scan</c>-type jobs
@@ -1167,7 +1167,7 @@ public sealed record ComponentResultFindingResponse(
 /// offset paged -- a single attempt's finding count is bounded by one benchmark's
 /// control count (never an unboundedly growing history), so this endpoint uses the
 /// same <c>?limit&amp;offset</c> + <c>X-Total-Count</c> HEADER idiom as
-/// <c>GET /runs</c> (docs/api-contract.md Conventions; see
+/// <c>GET /runs</c> (docs/reference/api-contract.md Conventions; see
 /// <see cref="Waypoint.Core.Pagination.PageRequest"/>'s doc comment) rather than the
 /// cursor idiom `/runs/{id}/events/history` uses for genuinely unbounded history. The
 /// total matching-finding count travels ONLY in the <c>X-Total-Count</c> response
@@ -1216,7 +1216,7 @@ public sealed record ComponentResultFindingsResponse(
 /// (issue #745). Metadata only -- digest/size as recorded at write time; this endpoint
 /// never streams the artifact's bytes (that stays on the existing
 /// <c>GET /jobs/{id}/artifacts/{kind}</c> route, which serves only the two byte-
-/// downloadable kinds `hdf`/`ckl` documented in docs/api-contract.md today).
+/// downloadable kinds `hdf`/`ckl` documented in docs/reference/api-contract.md today).
 /// </summary>
 public sealed record ComponentResultArtifactResponse(
 	[property: JsonPropertyName("kind")]

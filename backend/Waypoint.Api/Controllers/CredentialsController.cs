@@ -229,7 +229,7 @@ public sealed class CredentialsController : ControllerBase
 
 	/// <summary>
 	/// Issue #245: queues a real <c>credential-test</c> connectivity job (replacing
-	/// issue #20's synchronous decrypt-only 200) -- per docs/api-contract.md
+	/// issue #20's synchronous decrypt-only 200) -- per docs/reference/api-contract.md
 	/// ("Connectivity check; 202 → job"). One run containing one job, the same
 	/// one-run-per-initiation shape <see cref="DiscoveryController.Discover"/> uses.
 	/// The job's terminal outcome, not this method, flips <c>credentials.health</c>

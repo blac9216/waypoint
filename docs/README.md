@@ -16,7 +16,7 @@ remediation from the baseline audit, not done here.
 - [testing.md](testing.md) — bring-up, isolation, and the test commands this repo runs
 
 ## Reference — facts and contracts
-- [api-contract.md](api-contract.md) — REST resources, SSE events, state machines, schema, data ledger
+- [reference/api-contract.md](reference/api-contract.md) — REST resources, SSE events, state machines, schema, data ledger
 
 ## Explanation — why things are the way they are
 - [explanation/architecture.md](explanation/architecture.md) — system architecture: components, job engine, modes, update flow

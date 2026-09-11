@@ -189,7 +189,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 
 	/// <summary>
 	/// Issue #757's "Cyber controls owned live scans" owner decision lowered this
-	/// floor from Operator+ to Cyber+ (docs/api-contract.md's role matrix, PR #819) --
+	/// floor from Operator+ to Cyber+ (docs/reference/api-contract.md's role matrix, PR #819) --
 	/// a Cyber caller on their OWN run now succeeds where it previously 403'd.
 	/// </summary>
 	[Fact]
@@ -207,7 +207,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 
 	// -- issue #294: job-cancel ownership -------------------------------------
 	// Mirrors RunsController.EnforceRunOwnership's "Operator+ (own runs), Admin
-	// any" scope (docs/api-contract.md). TestAuthHandler always authenticates as
+	// any" scope (docs/reference/api-contract.md). TestAuthHandler always authenticates as
 	// "test-user"; SeedRunAsyncWithInitiator lets these tests control the run's
 	// recorded initiator to exercise the owner/non-owner/ownerless branches.
 

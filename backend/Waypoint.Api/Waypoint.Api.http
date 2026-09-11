@@ -25,7 +25,7 @@ Accept: application/json
 Authorization: Bearer {{login.response.body.$.token}}
 
 ### Catalog — paginated list, Viewer role or higher — demonstrates the X-Total-Count
-### convention (docs/api-contract.md Conventions: "Pagination").
+### convention (docs/reference/api-contract.md Conventions: "Pagination").
 GET {{Waypoint.Api_HostAddress}}/api/v1/catalog/artifacts?limit=1&offset=0
 Accept: application/json
 Authorization: Bearer {{login.response.body.$.token}}

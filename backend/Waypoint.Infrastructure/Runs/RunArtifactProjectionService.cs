@@ -42,7 +42,7 @@ public sealed record RunArtifactRow(
 
 /// <summary>
 /// Issue #414: control-plane projection of a run's per-target scan artifacts
-/// (docs/api-contract.md `/runs/{id}/artifacts`, issue #299), extracted out of
+/// (docs/reference/api-contract.md `/runs/{id}/artifacts`, issue #299), extracted out of
 /// <see cref="Waypoint.Api.Controllers.RunsController"/>. Reads only job rows
 /// (<see cref="IJobControlRepository"/>) and filesystem artifact presence -- no
 /// claim/lease/execution responsibility.

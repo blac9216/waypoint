@@ -21,7 +21,7 @@ using Waypoint.Tests.Support;
 namespace Waypoint.Tests.Api;
 
 /// <summary>
-/// The 400 path of the error contract (<c>docs/api-contract.md</c> Conventions). These go
+/// The 400 path of the error contract (<c>docs/reference/api-contract.md</c> Conventions). These go
 /// over real HTTP through the full MVC pipeline on purpose: the defect they cover was
 /// <c>[ApiController]</c>'s automatic model-state response short-circuiting the envelope
 /// with RFC 7807 <c>ProblemDetails</c> in camelCase — something no unit test of the error

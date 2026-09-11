@@ -15,7 +15,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * local mock" (issue #11's brief) means in practice: it's the thing that
  * makes login, the STIG Manager pill, the mode badge, and the job log
  * drawer's live stream demonstrable today, in the shape the documented
- * contract (`docs/api-contract.md`'s Auth section) describes — `POST
+ * contract (`docs/reference/api-contract.md`'s Auth section) describes — `POST
  * /auth/login` returns `{token, role, expires_at}` (no `user` object) and
  * `GET /auth/me` returns `{username, role}`, matching the backend's
  * `Contracts/AuthContracts.cs` field-for-field.

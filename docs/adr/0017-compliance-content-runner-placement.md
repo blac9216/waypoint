@@ -49,7 +49,7 @@ content-library/bundle/update types (ADR-0013 §2 otherwise unchanged).
 - The compliance-content working tree and any future content-import bundle staging
   path are compliance-runner mounts and DB grants (migration pattern of
   `0025_runner_db_roles.sql`), not download-runner ones.
-- `docs/explanation/domain-model.md`, `docs/explanation/architecture.md`, and `docs/api-contract.md` prose
+- `docs/explanation/domain-model.md`, `docs/explanation/architecture.md`, and `docs/reference/api-contract.md` prose
   describing runner job-type assignment must read "compliance-runner: discover,
   credential-test, scan, remediate, content-pull, content-import" going forward.
 - Issue #639: `scan` reading from the compliance-content working tree was originally

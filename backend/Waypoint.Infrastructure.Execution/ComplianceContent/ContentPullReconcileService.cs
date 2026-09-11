@@ -49,7 +49,7 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// ran" path, now reached via a failed sibling job instead of a chunk invocation that
 /// itself returned no entries. The content-pull's own run reaches
 /// <c>completed_with_failures</c> through the ordinary run-completion mechanism (any
-/// terminal-failure job in a run does that, docs/api-contract.md), which already reports
+/// terminal-failure job in a run does that, docs/reference/api-contract.md), which already reports
 /// the honest overall outcome -- reconcile does not need its own separate "some checks
 /// failed" run-state fork.
 /// </summary>

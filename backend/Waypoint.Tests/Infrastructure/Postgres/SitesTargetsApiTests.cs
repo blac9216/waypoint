@@ -30,7 +30,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #19 (epic #13) end to end against real Postgres: the /sites and
 /// /sites/{id}/targets · /targets/{id} REST surface backed by the real repositories --
-/// role gates (Viewer reads, Admin writes, per docs/api-contract.md "Admin writes"),
+/// role gates (Viewer reads, Admin writes, per docs/reference/api-contract.md "Admin writes"),
 /// the closed target-kind set, the "no secret in connection" 400 guard, and the
 /// issue's headline acceptance criterion: a site with two vCenters + one NSX manager +
 /// SRG/ssh boxes round-trips through the full API. Fixtures use only fictional

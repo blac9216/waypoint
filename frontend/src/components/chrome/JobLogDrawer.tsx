@@ -45,7 +45,7 @@ export function JobLogDrawer() {
 	const logRef = useRef<HTMLDivElement>(null);
 	const resizeState = useRef<{ startY: number; startH: number } | null>(null);
 
-	// --- Global SSE subscription (docs/api-contract.md "Event streams (SSE)") ---
+	// --- Global SSE subscription (docs/reference/api-contract.md "Event streams (SSE)") ---
 	useEffect(() => {
 		if (status !== "signed-in" || !token) {
 			return;

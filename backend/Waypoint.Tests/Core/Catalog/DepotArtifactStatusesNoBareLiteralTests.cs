@@ -134,7 +134,7 @@ public sealed class DepotArtifactStatusesNoBareLiteralTests
 		DirectoryInfo? directory = new(AppContext.BaseDirectory);
 		while (directory is not null)
 		{
-			if (File.Exists(Path.Combine(directory.FullName, "docs", "api-contract.md")))
+			if (File.Exists(Path.Combine(directory.FullName, "docs", "reference", "api-contract.md")))
 			{
 				return directory.FullName;
 			}
@@ -142,6 +142,6 @@ public sealed class DepotArtifactStatusesNoBareLiteralTests
 			directory = directory.Parent;
 		}
 
-		throw new InvalidOperationException("Could not locate repository root (docs/api-contract.md not found in any ancestor directory).");
+		throw new InvalidOperationException("Could not locate repository root (docs/reference/api-contract.md not found in any ancestor directory).");
 	}
 }

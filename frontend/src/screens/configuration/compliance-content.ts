@@ -1,6 +1,6 @@
 /**
  * Config → Compliance Content data layer (issue #40, frontend slice 2 of 2 —
- * backend landed in PR #566). Wraps `docs/api-contract.md`'s
+ * backend landed in PR #566). Wraps `docs/reference/api-contract.md`'s
  * `/compliance-content` surface:
  *
  *   GET  /compliance-content        — singleton repo/ref config + last pull

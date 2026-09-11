@@ -16,7 +16,7 @@ namespace Waypoint.Core.StigManager;
 
 /// <summary>
 /// The global STIG Manager connection (docs/explanation/domain-model.md "STIG Manager connection",
-/// docs/api-contract.md "STIG Manager": "Global default + per-site override; endpoint,
+/// docs/reference/api-contract.md "STIG Manager": "Global default + per-site override; endpoint,
 /// oidc client, collection, reachability/token TTL (secret write-only)"). Shape mirrors
 /// the sibling <c>vmware-stig-docker</c> module.benchmarks.ps1's
 /// <c>Get-StigManagerConnection</c>: endpoint (ApiBase), authority (OIDC issuer),

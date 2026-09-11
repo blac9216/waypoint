@@ -18,7 +18,7 @@ namespace Waypoint.Infrastructure.Runs;
 /// Issue #784: the terminal <c>runs.state</c> set was previously private to
 /// <see cref="RunPurgeService"/> alone; promoted here (unchanged values/semantics)
 /// so <see cref="RunRetentionHoldService"/> can require the same "completed" floor
-/// (docs/api-contract.md's run state machine) for placing a hold without a second,
+/// (docs/reference/api-contract.md's run state machine) for placing a hold without a second,
 /// driftable copy of this list.
 /// </summary>
 internal static class RunLifecycle
@@ -32,7 +32,7 @@ internal static class RunLifecycle
 	/// <summary>
 	/// Compliance-owned run types -- the only ones that can carry the evidence graph
 	/// a retention hold protects. Matches <c>RunHistoryDeletionService</c>'s existing
-	/// <c>requires_domain_purge_first</c> classification (docs/api-contract.md's
+	/// <c>requires_domain_purge_first</c> classification (docs/reference/api-contract.md's
 	/// "/runs/{id}/history" note).
 	/// </summary>
 	public static readonly HashSet<string> ComplianceRunTypes = new(StringComparer.Ordinal)

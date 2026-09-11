@@ -15,7 +15,7 @@
 namespace Waypoint.Core.Catalog;
 
 /// <summary>
-/// One indexed depot artifact (docs/api-contract.md "Depot catalog": artifact,
+/// One indexed depot artifact (docs/reference/api-contract.md "Depot catalog": artifact,
 /// sha256, product, version, size, status). <see cref="Metadata"/> is the raw vendor
 /// JSON exactly as the depot tool describes it (ADR-0002 -- vendor catalog shapes are
 /// not ours to normalise); <see cref="Product"/>/<see cref="Version"/> are the two

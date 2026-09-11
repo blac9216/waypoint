@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS catalog_report_groups (
 -- The row callers actually query: one component bound to one exact content release,
 -- i.e. "STIG and SRG content are distinct first-class kinds" made concrete (issue
 -- #728 AC). This is catalog identity/capability data ONLY -- it is deliberately NOT
--- an activated baseline (#731's `baselines` table, sketch in docs/api-contract.md,
+-- an activated baseline (#731's `baselines` table, sketch in docs/reference/api-contract.md,
 -- binds product_version+profile_version+xccdf_version with an activation
 -- status/audit trail on top of this row). Distinguishing vendor-derived vs.
 -- operator-override vs. activation-state (issue #728 AC) means: every row in this

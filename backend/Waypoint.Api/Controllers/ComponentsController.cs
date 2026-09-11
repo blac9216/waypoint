@@ -25,11 +25,11 @@ using Waypoint.Infrastructure.Sites;
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
-/// The docs/api-contract.md planned <c>/targets/{id}/components</c> ·
+/// The docs/reference/api-contract.md planned <c>/targets/{id}/components</c> ·
 /// <c>/components/{id}</c> surface (issue #732, epic #726, ADR-0023): the stable
 /// endpoint/component identity layer beneath a top-level <see cref="Target"/>. Reads
 /// are Viewer+; the only mutation this slice ships is the Admin-only configured-fact
-/// write and retired-component purge (docs/api-contract.md: "never lifecycle or
+/// write and retired-component purge (docs/reference/api-contract.md: "never lifecycle or
 /// identity, which are discovery/refresh-owned").
 ///
 /// Component materialization now runs: <see cref="IComponentRepository.UpsertDiscoveredAsync"/>
@@ -196,7 +196,7 @@ public sealed class ComponentsController : ControllerBase
 	/// <summary>
 	/// Admin-only: sets <c>configured_fact</c> (the exact product version/capability
 	/// Waypoint cannot discover) -- never lifecycle or identity, which stay discovery/
-	/// refresh-owned (docs/api-contract.md). Issue #1000: a null/whitespace/omitted
+	/// refresh-owned (docs/reference/api-contract.md). Issue #1000: a null/whitespace/omitted
 	/// <c>exact_version</c> is an explicit CLEAR, not a validation error -- ADR-0023's
 	/// requirement that clearing the configured fact "honestly unlinks" needs a real
 	/// way to clear it, which this endpoint never had before (every prior body had to
@@ -247,7 +247,7 @@ public sealed class ComponentsController : ControllerBase
 		return outcome == ComponentWriteOutcome.Ok ? NoContent() : throw NotFoundError(id);
 	}
 
-	/// <summary>Immutable discovery/configuration provenance -- audit/troubleshooting read, Cyber+ per docs/api-contract.md.</summary>
+	/// <summary>Immutable discovery/configuration provenance -- audit/troubleshooting read, Cyber+ per docs/reference/api-contract.md.</summary>
 	[HttpGet("api/v1/components/{id:guid}/observations")]
 	[RequireCyberRole]
 	[ProducesResponseType(typeof(ComponentObservationResponse[]), StatusCodes.Status200OK)]

@@ -87,7 +87,7 @@ function createDriveableSse() {
 	};
 }
 
-/** One SSE frame carrying a Waypoint event envelope (docs/api-contract.md). */
+/** One SSE frame carrying a Waypoint event envelope (docs/reference/api-contract.md). */
 function frame(event: WaypointEvent): string {
 	return `id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`;
 }

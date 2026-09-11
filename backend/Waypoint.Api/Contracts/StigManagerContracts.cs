@@ -17,7 +17,7 @@ using Waypoint.Core.StigManager;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// Response body for the global/resolved STIG Manager connection (docs/api-contract.md
+/// Response body for the global/resolved STIG Manager connection (docs/reference/api-contract.md
 /// `/stigman`, `/sites/{id}/stigman`). Field names rely on the process-wide
 /// <c>JsonNamingPolicy.SnakeCaseLower</c> (<c>WaypointJsonOptions</c>), the same
 /// convention <c>CredentialResponse</c> uses -- no per-property

@@ -165,7 +165,7 @@ under the existing obligation; it does not block independent siblings and never 
 into sibling obligations. Only an originally disabled service is restored to disabled;
 an originally enabled service is never disabled. This obligation is the audited
 access-state exception to otherwise read-only scan effects, not remediation execution.
-Wire shape: `docs/api-contract.md`'s "Trust and temporary SSH cleanup"; security
+Wire shape: `docs/reference/api-contract.md`'s "Trust and temporary SSH cleanup"; security
 posture and residual-risk framing: `docs/explanation/security.md`'s corresponding sections.
 
 ### Compliance evidence graph (planned)
@@ -200,7 +200,7 @@ allowlisted sanitized response metadata/body fields and receipt identifiers. Sec
 identifier redaction is fail-closed; authorization/session headers and unbounded raw
 responses are never retained. The allowed evidence remains sufficient for retry,
 conflict/idempotency audit, and diagnosis; exact wire fields are
-`docs/api-contract.md`'s `/jobs/{id}/artifacts/receipts`. Failure leaves the artifact
+`docs/reference/api-contract.md`'s `/jobs/{id}/artifacts/receipts`. Failure leaves the artifact
 retryable without a scan; there is no watched-directory lifecycle.
 
 `ComplianceRetentionPolicy` is one appliance-wide Admin setting, default six months.
@@ -213,7 +213,7 @@ fragments: while active on a `scan`/`remediate` run, `POST /runs/{id}/purge` ref
 the run outright, so the same one-call purge path both future automated sweeps
 (issue #1062) and today's manual purge already share is the single enforcement point
 for the exclusion — no separate hold-aware deletion path exists. Wire shape:
-`docs/api-contract.md`'s `/system/compliance-retention`,
+`docs/reference/api-contract.md`'s `/system/compliance-retention`,
 `/compliance-retention/sweep-status`, and `/runs/{id}/retention-hold`.
 
 The one legacy transition preserves historical runs as legacy evidence and includes
@@ -221,7 +221,7 @@ configured schedules/saved intent. It deterministically translates one only when
 exact requested scope is preserved; otherwise it disables or blocks the record as
 action-required and audits that disposition before legacy fallback removal. Scope is
 never silently widened or narrowed. Endpoint, RBAC, and transition wire shapes:
-`docs/api-contract.md`'s "Legacy scan migration"; no permanent adapter or dual
+`docs/reference/api-contract.md`'s "Legacy scan migration"; no permanent adapter or dual
 representation remains.
 
 **Credential purposes and bindings (end state planned —
@@ -615,7 +615,7 @@ Rationale notes:
 🚧 **Endpoint-level reconciliation lives elsewhere, not this table.** This table states
 capabilities; it does not enumerate wire endpoints or RBAC edge cases for the
 catalog/content/inventory/execution surfaces ADRs 0022–0025 introduce. The
-authoritative per-action-family table is `docs/api-contract.md`'s "RBAC summary,"
+authoritative per-action-family table is `docs/reference/api-contract.md`'s "RBAC summary,"
 and the security rationale for where it narrows or clarifies this table (scan-scoped
 Cyber+/Operator+ control-of-own-work, Admin-only schedules/activation/rollback/
 trust/bypass/purge/alert-acknowledgement) is `docs/explanation/security.md`'s "RBAC

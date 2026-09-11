@@ -1,5 +1,5 @@
 /**
- * Sites & Targets data layer (docs/api-contract.md "Sites, targets,
+ * Sites & Targets data layer (docs/reference/api-contract.md "Sites, targets,
  * inventory" + the "Configuration" ledger row), against the #19 backend
  * (PR #238):
  *
@@ -10,7 +10,7 @@
  *   GET           /credentials           — id/name only (never secret material)
  *
  * `connection` rides as a small JSON object; the only field either the
- * backend or the prototype names is `host` (docs/api-contract.md:
+ * backend or the prototype names is `host` (docs/reference/api-contract.md:
  * "connection.host"; backend's `TargetConnectionValidator` additionally
  * rejects any secret-shaped key such as `password`/`token`/`credential`
  * before it ever reaches storage). The UI only ever collects `host` — never
@@ -203,7 +203,7 @@ export function isTerminalRunState(state: string): boolean {
 	return state === "completed" || state === "completed_with_failures" || state === "aborted";
 }
 
-/** `/credentials` — id/name/type, per docs/api-contract.md's data ledger
+/** `/credentials` — id/name/type, per docs/reference/api-contract.md's data ledger
  * ("`/credentials` (names only)"). The full response carries more (health,
  * ...) but the picker only ever reads `id`/`name`/`credential_type` (the
  * last purely to filter purpose-compatible options, issue #584); it must

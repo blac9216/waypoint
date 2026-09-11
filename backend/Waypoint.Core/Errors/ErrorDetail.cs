@@ -16,7 +16,7 @@ namespace Waypoint.Core.Errors;
 
 /// <summary>
 /// The <c>error</c> object of the documented envelope
-/// (<c>docs/api-contract.md</c> Conventions): <c>{ "error": { code, message, detail?,
+/// (<c>docs/reference/api-contract.md</c> Conventions): <c>{ "error": { code, message, detail?,
 /// blockers? } }</c>. Serialized snake_case by the API's global JSON options.
 /// </summary>
 /// <param name="Code">Stable, machine-readable error code (e.g. <c>mode_unavailable</c>).</param>

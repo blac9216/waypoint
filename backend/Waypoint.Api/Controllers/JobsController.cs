@@ -41,7 +41,7 @@ public sealed class JobsController : ControllerBase
 	private const string ScanJobType = "scan";
 
 	/// <summary>
-	/// The closed set of artifact kinds this route serves (docs/api-contract.md
+	/// The closed set of artifact kinds this route serves (docs/reference/api-contract.md
 	/// `/jobs/{id}/artifacts/{kind}`). <c>kind</c> is validated against this set BEFORE it
 	/// ever reaches a file path -- it is never interpolated into
 	/// <see cref="ScanArtifactPaths"/> as a raw user-supplied path segment, only used to
@@ -90,7 +90,7 @@ public sealed class JobsController : ControllerBase
 	/// <summary>
 	/// Cancels a single job, independent of its run's other jobs -- the same primitive
 	/// <c>DownloadsController.CancelDownload</c> uses (#10/#277). Cyber+ per
-	/// docs/api-contract.md's role matrix ("Control (pause/resume/abort/cancel/retry/
+	/// docs/reference/api-contract.md's role matrix ("Control (pause/resume/abort/cancel/retry/
 	/// repair-credential) a scan the caller initiated" -- PR #819's reconciliation,
 	/// carried forward by issue #757's "Cyber controls owned live scans" owner
 	/// decision): job-level cancel is the same tier as the run-level controls it sits
@@ -140,7 +140,7 @@ public sealed class JobsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Streams one artifact file for a job (docs/api-contract.md `/jobs/{id}/artifacts/{kind}`:
+	/// Streams one artifact file for a job (docs/reference/api-contract.md `/jobs/{id}/artifacts/{kind}`:
 	/// "CKL/HDF download"). Viewer+, matching every other run/job read. <paramref name="kind"/>
 	/// is validated against the closed <see cref="ContentTypesByKind"/> set and used only to
 	/// select which fixed, server-computed path (<see cref="ScanArtifactPaths"/>) to serve --
@@ -297,7 +297,7 @@ public sealed class JobsController : ControllerBase
 	/// honest-empty, never a 404 -- because only the job's own existence is this
 	/// endpoint's precondition, matching <see cref="GetUploadAttempts"/> and
 	/// <see cref="RunsController.GetComponentResultsSummary"/>. The total matching-row
-	/// count travels in the <c>X-Total-Count</c> response header per docs/api-contract.md
+	/// count travels in the <c>X-Total-Count</c> response header per docs/reference/api-contract.md
 	/// Conventions (the <see cref="RunsController.ListRuns"/> precedent) -- never in
 	/// the body.
 	/// </summary>

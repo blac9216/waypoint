@@ -3,7 +3,7 @@
 -- concrete executable compliance endpoints/components beneath them (a discovered
 -- ESXi host, a discovered VM, a named VCSA sub-service, a whole-appliance SSH
 -- component). ADR-0023 ("Stable compliance inventory and immutable component plans")
--- is the governing decision; docs/api-contract.md's planned `/targets/{id}/components`
+-- is the governing decision; docs/reference/api-contract.md's planned `/targets/{id}/components`
 -- section is the wire shape this schema must support without inventing fields the
 -- contract does not already describe.
 --
@@ -44,7 +44,7 @@
 -- timestamp; shape owned by the application layer, not constrained here beyond
 -- "valid JSON or NULL") -- both, one, or neither may be present. `fact_conflict` is a
 -- generated readiness signal only when BOTH are present and disagree; the API never
--- collapses them into one winning value at this layer (docs/api-contract.md: "the
+-- collapses them into one winning value at this layer (docs/reference/api-contract.md: "the
 -- choice mutates neither source").
 --
 -- Historical-retention protection, matching migrations 0050/0052's convention: the
@@ -106,7 +106,7 @@ CREATE OR REPLACE TRIGGER trg_components_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- component_observations --------------------------------------------------------------
--- Immutable discovery/configuration provenance (docs/api-contract.md
+-- Immutable discovery/configuration provenance (docs/reference/api-contract.md
 -- `/components/{id}/observations`, ADR-0023 "Discovery and Admin configuration supply
 -- catalog-declared facts as independent, timestamped provenance"). Every write to
 -- components.configured_fact or components.discovered_fact -- whether from a

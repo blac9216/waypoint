@@ -1,5 +1,5 @@
 /**
- * Library "Repository" tab data layer (docs/api-contract.md "Library & content
+ * Library "Repository" tab data layer (docs/reference/api-contract.md "Library & content
  * library" + prototype screen 7):
  *
  *   GET /library/items             — mode-aware presence over the depot catalog
@@ -69,7 +69,7 @@ export function matchesPresenceFilter(item: LibraryItem, filter: LibraryPresence
 	return item.presence === "in_depot" || item.presence === "missing";
 }
 
-/** Builds the downloadable `Blob` for the "Export request manifest" action — a plain JSON file, machine-readable by a connected instance (docs/api-contract.md). */
+/** Builds the downloadable `Blob` for the "Export request manifest" action — a plain JSON file, machine-readable by a connected instance (docs/reference/api-contract.md). */
 export function requestManifestToBlob(manifest: LibraryRequestManifestResponse): Blob {
 	return new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" });
 }

@@ -35,7 +35,7 @@ interface OidcSessionClaims {
 
 /**
  * Local-auth login/session client — the confirmed contract (issue #64,
- * settled against the real backend, `docs/api-contract.md`'s Auth
+ * settled against the real backend, `docs/reference/api-contract.md`'s Auth
  * section): `POST /api/v1/auth/login` returns `{token, role, expires_at}`
  * — there is **no `user` object** on the login response, `role` is a flat
  * PascalCase string (`Role.ToString()` server-side; see `./roles`'s closed
@@ -450,7 +450,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	 * whenever some authenticated request happened to 401 — until then the
 	 * app kept rendering full chrome on a token the server had already
 	 * invalidated. There is no refresh endpoint in M1
-	 * (docs/api-contract.md's Auth section): expiry means sign out, not renew.
+	 * (docs/reference/api-contract.md's Auth section): expiry means sign out, not renew.
 	 *
 	 * Two mechanisms, because neither alone is sufficient:
 	 *

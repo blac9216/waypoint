@@ -41,7 +41,7 @@ public static class ComponentLifecycleStates
 /// The closed set of <see cref="ComponentObservation"/> sources (migration 0054's
 /// <c>component_observations_source_check</c>): a <see cref="Discovered"/> fact comes
 /// from a discovery refresh boundary; a <see cref="Configured"/> fact comes from an
-/// explicit Admin <c>PUT /components/{id}</c> (docs/api-contract.md). ADR-0023: "Exact
+/// explicit Admin <c>PUT /components/{id}</c> (docs/reference/api-contract.md). ADR-0023: "Exact
 /// product version is mandatory... [Waypoint] never guesses a winner" -- the two
 /// sources are independent and both retained rather than one overwriting the other.
 /// </summary>
@@ -157,7 +157,7 @@ public sealed record ComponentUpsertOutcome(int Upserted, int MarkedAbsent, int 
 
 /// <summary>
 /// One immutable provenance row (migration 0054's <c>component_observations</c> table;
-/// docs/api-contract.md <c>/components/{id}/observations</c>).
+/// docs/reference/api-contract.md <c>/components/{id}/observations</c>).
 /// </summary>
 public sealed record ComponentObservation(
 	Guid Id,
@@ -167,7 +167,7 @@ public sealed record ComponentObservation(
 	string Outcome,
 	DateTimeOffset ObservedAt);
 
-/// <summary>Admin configured-fact update request (docs/api-contract.md <c>PUT /components/{id}</c>: "configured_fact only ... never lifecycle or identity").</summary>
+/// <summary>Admin configured-fact update request (docs/reference/api-contract.md <c>PUT /components/{id}</c>: "configured_fact only ... never lifecycle or identity").</summary>
 public sealed record ComponentConfiguredFactUpdateRequest(string ExactVersion);
 
 public enum ComponentWriteOutcome

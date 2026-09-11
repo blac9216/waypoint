@@ -27,7 +27,7 @@ namespace Waypoint.Infrastructure.ComplianceContent;
 /// vocabulary. No HTTP endpoint calls this yet in this slice (issue #731's own AC
 /// allows "API exposure may be a stated remainder if size demands" -- see this PR's
 /// body); a future <c>POST /candidate-content/{id}/activate</c>/<c>POST
-/// /baselines/{id}/rollback</c> (docs/api-contract.md's planned shape) would call this
+/// /baselines/{id}/rollback</c> (docs/reference/api-contract.md's planned shape) would call this
 /// service directly rather than the repository.
 ///
 /// ADR-0022 "the activation boundary is exclusive": this service, like the repository

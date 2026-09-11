@@ -49,7 +49,7 @@ public interface IUserDirectory
 	/// <summary>
 	/// Pre-provisions a row for an <paramref name="oidcSub"/> that has not yet
 	/// authenticated -- e.g. an Admin setting <paramref name="siteScopeJson"/> ahead of
-	/// a new hire's first login, per <c>docs/api-contract.md</c> `/users` listing POST
+	/// a new hire's first login, per <c>docs/reference/api-contract.md</c> `/users` listing POST
 	/// alongside GET/PUT. <paramref name="role"/> only seeds the mirror; the first real
 	/// login's <see cref="RecordSeenAsync"/> call immediately overwrites it from the
 	/// IdP's own claim, exactly as it would for any other row (see

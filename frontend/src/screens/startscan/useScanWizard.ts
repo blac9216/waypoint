@@ -310,7 +310,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	 * deliberately partial/empty selection instead contributes its resolved
 	 * component ids to one combined `{ mode: "explicit", component_ids }`
 	 * request — the two never mix within a single submitted `target_scope`
-	 * (docs/api-contract.md's `target_scope` is one mode for the whole
+	 * (docs/reference/api-contract.md's `target_scope` is one mode for the whole
 	 * request). Mixed usage (some targets "all", others explicit) is resolved
 	 * conservatively to `explicit`: an `all`-mode target's *currently known*
 	 * selectable components are included by id rather than silently

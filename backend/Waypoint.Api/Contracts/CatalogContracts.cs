@@ -19,7 +19,7 @@ namespace Waypoint.Api.Contracts;
 
 /// <summary>
 /// Response body for one row of <c>GET /api/v1/catalog/artifacts</c>
-/// (docs/api-contract.md "Depot catalog": artifact, sha256, product, version, size,
+/// (docs/reference/api-contract.md "Depot catalog": artifact, sha256, product, version, size,
 /// status). <see cref="Metadata"/> carries the raw vendor JSON verbatim (ADR-0002) --
 /// same "JSON string, not a nested object" convention <c>RunResponse.Scope</c>
 /// already uses for a JSONB column on the wire.

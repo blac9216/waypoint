@@ -140,7 +140,7 @@ public interface ICatalogRepository
 	/// <summary>Single execution profile detail by id, or null when unknown.</summary>
 	Task<CatalogExecutionProfileDetail?> GetExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken);
 
-	/// <summary>Every execution profile in the catalog, fully joined -- the backing read for <c>GET /catalog/products</c> (docs/api-contract.md).</summary>
+	/// <summary>Every execution profile in the catalog, fully joined -- the backing read for <c>GET /catalog/products</c> (docs/reference/api-contract.md).</summary>
 	Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListAllExecutionProfilesAsync(CancellationToken cancellationToken);
 
 	/// <summary>

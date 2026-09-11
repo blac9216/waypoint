@@ -120,7 +120,7 @@ public sealed class RunsController : ControllerBase
 		Enum.TryParse(User.FindFirstValue(WaypointClaimTypes.Role), out WaypointRole role) && role >= minimum;
 
 	/// <summary>
-	/// Enforces docs/api-contract.md's pause/resume/abort scope: "Cyber+ (own
+	/// Enforces docs/reference/api-contract.md's pause/resume/abort scope: "Cyber+ (own
 	/// runs), Admin any" (PR #819's role-matrix reconciliation; issue #757's "Cyber
 	/// controls owned live scans" owner decision). Admin bypasses the check entirely.
 	/// A non-Admin caller must match the run's recorded initiator; a run with no
@@ -160,7 +160,7 @@ public sealed class RunsController : ControllerBase
 	/// <summary>
 	/// Create a new run. Cyber+ for scan runs; remediation requires Admin plus the
 	/// explicit <c>confirmation: "REMEDIATE"</c> body field — remediation is never
-	/// implicit (docs/api-contract.md `/runs`, CLAUDE.md key constraints). The
+	/// implicit (docs/reference/api-contract.md `/runs`, CLAUDE.md key constraints). The
 	/// initiator is recorded from the authenticated identity, never from the body.
 	/// A <c>scan</c> run additionally validates its scope and fans out one <c>scan</c>
 	/// job per target (issue #273) before the run is created; every other run type
@@ -229,12 +229,12 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Issues #733/#734 remainder (docs/api-contract.md's planned <c>/runs/plan-preview</c>,
+	/// Issues #733/#734 remainder (docs/reference/api-contract.md's planned <c>/runs/plan-preview</c>,
 	/// PR #819): previews the would-be plan for a scan's <c>target_scope</c> without
 	/// creating anything -- same Cyber+ floor as <c>POST /runs</c> (ADR-0023's
 	/// mandatory-refresh-before-planning UX is this endpoint's whole purpose: the
 	/// Start-a-Scan wizard calls this before the caller confirms). Zero-runnable-component
-	/// previews are still 200 (an honest empty plan, docs/api-contract.md) -- unlike
+	/// previews are still 200 (an honest empty plan, docs/reference/api-contract.md) -- unlike
 	/// create, preview never rejects on <c>no_runnable_component</c>, since the caller has
 	/// not committed to anything yet and showing the empty result IS the point.
 	/// </summary>
@@ -443,7 +443,7 @@ public sealed class RunsController : ControllerBase
 
 	/// <summary>
 	/// List run summaries, newest-first. Viewer+ — any authenticated user can inspect
-	/// runs. Paginated per docs/api-contract.md Conventions' <c>?limit/offset</c> +
+	/// runs. Paginated per docs/reference/api-contract.md Conventions' <c>?limit/offset</c> +
 	/// <c>X-Total-Count</c> idiom (see <see cref="PageRequest"/>).
 	/// </summary>
 	[HttpGet]
@@ -805,7 +805,7 @@ public sealed class RunsController : ControllerBase
 	/// <see cref="IJobControlRepository.RetryJobAsync"/>. <c>jobs.stage</c> is preserved
 	/// untouched, so the next claim resumes the pipeline at the marker rather than
 	/// restarting it (ADR-0012 §5), and the action is recorded to <c>audit_log</c>
-	/// (<c>event_type = 'job.retried'</c>). Cyber+ per docs/api-contract.md's role
+	/// (<c>event_type = 'job.retried'</c>). Cyber+ per docs/reference/api-contract.md's role
 	/// matrix (PR #819; issue #757's "Cyber controls owned live scans" decision) --
 	/// same floor as <see cref="PauseRun"/>/<see cref="JobsController.CancelJob"/>.
 	/// </summary>
@@ -985,7 +985,7 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Per-target artifact rows for a run (docs/api-contract.md `/runs/{id}/artifacts`,
+	/// Per-target artifact rows for a run (docs/reference/api-contract.md `/runs/{id}/artifacts`,
 	/// issue #299). Viewer+, matching every other run read. Only <c>scan</c> jobs produce
 	/// artifacts (issue #275's attest/convert stages) -- other job types in the run are
 	/// simply absent from the list, not represented as an empty/zeroed row. CAT I/II/III
@@ -1079,7 +1079,7 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// The full attestations-applied ledger for a run (docs/api-contract.md
+	/// The full attestations-applied ledger for a run (docs/reference/api-contract.md
 	/// `/runs/{id}/attestations-applied`: "Waivers that fired: control, scope,
 	/// justification, author/version, expired-skips"). Viewer+.
 	///
@@ -1128,7 +1128,7 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>Pause dispatch for a run. Cyber+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// <see cref="EnforceRunOwnership"/> and docs/reference/api-contract.md's role matrix
 	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/pause")]
@@ -1150,7 +1150,7 @@ public sealed class RunsController : ControllerBase
 
 	/// <summary>
 	/// Resume dispatch for a paused run. Cyber+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// <see cref="EnforceRunOwnership"/> and docs/reference/api-contract.md's role matrix
 	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/resume")]
@@ -1172,7 +1172,7 @@ public sealed class RunsController : ControllerBase
 
 	/// <summary>
 	/// Abort a run. Cyber+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// <see cref="EnforceRunOwnership"/> and docs/reference/api-contract.md's role matrix
 	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/abort")]
@@ -1197,7 +1197,7 @@ public sealed class RunsController : ControllerBase
 
 	/// <summary>
 	/// Swap a replacement credential onto a run's halted (credential queue-halted)
-	/// jobs and resume them -- docs/api-contract.md "resume-blocked", ADR-0008.
+	/// jobs and resume them -- docs/reference/api-contract.md "resume-blocked", ADR-0008.
 	/// Admin-only (unlike pause/resume/abort's Operator+-own-runs gate): a credential
 	/// swap changes which service account authenticates future work against a target,
 	/// which is a stronger action than pausing/resuming dispatch. <c>credential_id</c>

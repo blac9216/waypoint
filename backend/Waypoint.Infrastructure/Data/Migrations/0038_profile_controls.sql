@@ -1,5 +1,5 @@
 -- Issue #598 (epic #558): the per-control inventory `GET /profiles/{id}/controls`
--- (docs/api-contract.md) reads. Slot 0038 -- 0036/0037 are claimed by other in-flight
+-- (docs/reference/api-contract.md) reads. Slot 0038 -- 0036/0037 are claimed by other in-flight
 -- PRs (#569, #39) at the time this migration was authored; ordering vs. either is not
 -- assumed (neither touches profiles/compliance-content tables).
 --

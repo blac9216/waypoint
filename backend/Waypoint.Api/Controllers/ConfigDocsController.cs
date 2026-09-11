@@ -96,7 +96,7 @@ public sealed partial class ConfigDocsController : ControllerBase
 	/// Site -> Target for <paramref name="target"/> across all three doc kinds (or just
 	/// <paramref name="kind"/> when given), most specific wins per
 	/// <see cref="ConfigDocResolver.Resolve"/>. <paramref name="control"/> matches the
-	/// documented query shape (docs/api-contract.md: `resolve?profile&amp;control&amp;target`)
+	/// documented query shape (docs/reference/api-contract.md: `resolve?profile&amp;control&amp;target`)
 	/// but does not change resolution -- config-docs resolve as whole YAML bodies per
 	/// (kind, profile, layer), never parsed per-control (docs/explanation/domain-model.md: "the schemas
 	/// belong to Broadcom/MITRE"); it is accepted for parity with the documented signature
@@ -157,7 +157,7 @@ public sealed partial class ConfigDocsController : ControllerBase
 	/// atomic-write fix makes new orphans unreachable, but does not retroactively clean up
 	/// any that already exist) -- treated the same as "no such config-doc" since, from the
 	/// caller's perspective, a slot with nothing ever successfully saved to it is
-	/// indistinguishable from one that was never created (docs/api-contract.md does not
+	/// indistinguishable from one that was never created (docs/reference/api-contract.md does not
 	/// document a partial-creation state).
 	/// </summary>
 	[HttpGet("{id:guid}")]
@@ -301,7 +301,7 @@ public sealed partial class ConfigDocsController : ControllerBase
 
 	/// <summary>
 	/// Parses the <c>global|site:{id}|target:{id}</c> wire format
-	/// (docs/api-contract.md `/config-docs` filter) for the list endpoint, where a
+	/// (docs/reference/api-contract.md `/config-docs` filter) for the list endpoint, where a
 	/// missing <c>layer</c> query param means "no filter".
 	/// </summary>
 	private static (string? LayerType, Guid? LayerRef) ParseOptionalLayerOrThrow(string? layer)

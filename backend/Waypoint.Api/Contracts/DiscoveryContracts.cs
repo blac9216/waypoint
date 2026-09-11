@@ -18,7 +18,7 @@ using Waypoint.Core.Discovery;
 namespace Waypoint.Api.Contracts;
 
 /// <summary>
-/// One node of the <c>GET /targets/{id}/inventory</c> tree (docs/api-contract.md:
+/// One node of the <c>GET /targets/{id}/inventory</c> tree (docs/reference/api-contract.md:
 /// "Cached hosts/VMs tree (cluster -&gt; host -&gt; vm), build info, maintenance_mode").
 /// <see cref="Children"/> nests the tree directly rather than returning a flat list
 /// with parent ids, so the start-a-scan checkbox tree can render straight off the

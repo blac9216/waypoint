@@ -1,5 +1,5 @@
 /**
- * Live download-queue state, driven only by SSE (docs/api-contract.md
+ * Live download-queue state, driven only by SSE (docs/reference/api-contract.md
  * "Event streams (SSE)": `download.progress` is job-scoped without
  * exception, and every progress bar in the prototype binds to one of the
  * six event types — never a poll). Seeded once from `GET /downloads` so a
