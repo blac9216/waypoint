@@ -117,6 +117,10 @@ implementation/UI cleanup is reconciled by the owning work.
 - Callers select assets, not profiles. Exact baselines are deterministic catalog
   results, and profile/version drift requires a new plan.
 
+- **2026-09-11 update**: Component identity, requested/resolved scope, and plan
+  compilation delivered (#732, #733, #734). No open successor issues remain against
+  this ADR.
+
 ## Alternatives rejected
 
 - Use the cache after a failed refresh: it cannot prove current existence or complete

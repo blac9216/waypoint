@@ -149,7 +149,7 @@ credential coverage) → `CompliancePlan` (the frozen result of `POST /runs`).
 
 **Superseded from the prototype:** the "product filters + InSpec profiles that will
 apply" panel and the profile-implied scope in step 2 are removed entirely —
-scope selection is asset-only. The plan-preview step (new) sits where the
+scope selection is component-only. The plan-preview step (new) sits where the
 prototype's step-2 checkbox tree lived, but the checkbox tree itself (cached
 inventory → component selection) is still the right interaction shape; what
 changes is that confirming now shows a plan preview with per-component readiness
