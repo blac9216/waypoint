@@ -100,7 +100,7 @@ container" is "which component owns this responsibility."
 **backend (ASP.NET Core API).** A plain OIDC relying party performing JWT bearer
 validation with canonical-issuer pinning ([ADR-0004](../adr/0004-identity-keycloak.md),
 issue #842) and fail-closed role-claim mapping, enforced on every `[Http*]`-decorated
-action across all 18 controllers, closed out by a reflection-driven endpoint × role
+action across all 34 controllers, closed out by a reflection-driven endpoint × role
 matrix test. It owns the durable job queue/state/event contracts — enqueue, control,
 query, migrations, and the SSE feed the UI reads from persisted events — but hosts no
 dispatcher, no PowerShell, and no domain handler: execution ownership belongs entirely to
@@ -131,7 +131,7 @@ overwriting a stored credential's secret.
 flowchart TB
     subgraph backend_c["backend"]
         oidc_rp["OIDC relying party\nJWT validation · role-claim mapping"]
-        controllers["18 [Http*] controllers\nRBAC-enforced"]
+        controllers["34 [Http*] controllers\nRBAC-enforced"]
         queue_api["queue/state/event contracts\nenqueue · control · query · SSE"]
     end
     subgraph runner_c["compliance-runner / download-runner"]
