@@ -22,6 +22,7 @@ export type ScreenKey =
 	| "content-library"
 	| "retention"
 	| "presets"
+	| "subscription-editor"
 	| "transfer"
 	| "configuration"
 	| "audit";
@@ -91,6 +92,17 @@ export const ROUTES: RouteDef[] = [
 	// RBAC), the same read-visible-but-action-gated shape `retention` above
 	// uses. Adopt navigates to the still-open subscription editor (#1473).
 	{ key: "presets", path: "/presets", title: "Presets", requiredRole: "Viewer" },
+	// Issue #1473 (epic #1182, split from design record #1048): the
+	// subscription create/edit editor, reachable standalone
+	// (`/subscriptions/new`), from the presets screen's adopt action
+	// (`/subscriptions/new?preset=<id>`), or in edit mode
+	// (`/subscriptions/new?id=<id>`) — see `SubscriptionEditorScreen.tsx`'s
+	// own doc comment. No nav entry (not in the issue's own Affected Files
+	// table) — reached via the presets screen's Adopt action or a direct
+	// link today; a subscriptions list screen is a future issue's slice.
+	// Viewer+ can read (edit mode's GET); save is Admin-only, gated in-screen
+	// the same way `presets`'s write actions are.
+	{ key: "subscription-editor", path: "/subscriptions/new", title: "Subscription Editor", requiredRole: "Viewer" },
 	{ key: "transfer", path: "/transfer", title: "Transfer", requiredRole: "Viewer" },
 	{ key: "configuration", path: "/config", title: "Configuration", requiredRole: "Admin" },
 	// Top-level, not nested under /config (requiredRole: "Admin" at the route

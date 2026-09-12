@@ -23,6 +23,7 @@ import {
 	ResultsScreen,
 	RetentionScreen,
 	StartScanScreen,
+	SubscriptionEditorScreen,
 	TransferScreen,
 } from "./screens/screens";
 
@@ -41,6 +42,7 @@ const SCREENS: Record<string, ComponentType> = {
 	"content-library": ContentLibraryScreen,
 	retention: RetentionScreen,
 	presets: PresetsScreen,
+	"subscription-editor": SubscriptionEditorScreen,
 	transfer: TransferScreen,
 	configuration: ConfigurationScreen,
 	audit: AuditScreen,

@@ -1,0 +1,74 @@
+.subscription-editor-screen {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	height: 100%;
+	padding: 14px 20px;
+	overflow-y: auto;
+}
+
+.subscription-editor-screen__header h1 {
+	margin: 0 0 4px;
+	font-size: 18px;
+}
+
+.subscription-editor-screen__subtitle {
+	margin: 0;
+	color: var(--muted, #7a8290);
+	font-size: 13px;
+}
+
+.subscription-editor-screen__error {
+	background: var(--danger-bg, #3a1c1c);
+	border: 1px solid var(--danger, #c0392b);
+	border-radius: var(--radius-card, 6px);
+	padding: 8px 12px;
+	font-size: 13px;
+}
+
+.subscription-editor-screen__success {
+	background: #2b4a2f;
+	border-radius: var(--radius-card, 6px);
+	padding: 8px 12px;
+	font-size: 13px;
+}
+
+.subscription-editor-form {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	max-width: 480px;
+}
+
+.subscription-editor-form label {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 12px;
+	color: var(--muted, #7a8290);
+}
+
+.subscription-editor-form__enabled {
+	flex-direction: row !important;
+	align-items: center;
+	gap: 8px !important;
+}
+
+.subscription-editor-form__line-picker {
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card, 6px);
+	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.subscription-editor-form__line-picker h2 {
+	margin: 0;
+	font-size: 13px;
+}
+
+.subscription-editor-form__projected-size {
+	font-size: 13px;
+	font-weight: 600;
+}
