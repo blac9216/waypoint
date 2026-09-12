@@ -61,6 +61,25 @@ public sealed class PresetRepository : IPresetRepository
 		return (Guid)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 	}
 
+	public async Task UpdateAsync(Preset preset, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(preset);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE presets
+			SET name = $2, line_granularity = $3, anchor_version = $4
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(preset.Id);
+		command.Parameters.AddWithValue(preset.Name);
+		command.Parameters.AddWithValue(SubscriptionLineGranularityValues.ToDbValue(preset.LineGranularity));
+		command.Parameters.AddWithValue((object?)preset.AnchorVersion ?? DBNull.Value);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	public async Task<Preset?> GetAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

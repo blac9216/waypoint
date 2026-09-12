@@ -62,6 +62,30 @@ public sealed class SubscriptionRepository : ISubscriptionRepository
 		return (Guid)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 	}
 
+	public async Task UpdateAsync(Subscription subscription, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(subscription);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE subscriptions
+			SET product = $2, lane = $3, line_granularity = $4, anchor_version = $5,
+			    refresh_window_days = $6, retention_override_days = $7, is_enabled = $8
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(subscription.Id);
+		command.Parameters.AddWithValue(subscription.Product);
+		command.Parameters.AddWithValue(subscription.Lane);
+		command.Parameters.AddWithValue(SubscriptionLineGranularityValues.ToDbValue(subscription.LineGranularity));
+		command.Parameters.AddWithValue(subscription.AnchorVersion);
+		command.Parameters.AddWithValue((object?)subscription.RefreshWindowDays ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)subscription.RetentionOverrideDays ?? DBNull.Value);
+		command.Parameters.AddWithValue(subscription.IsEnabled);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	public async Task<Subscription?> GetAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

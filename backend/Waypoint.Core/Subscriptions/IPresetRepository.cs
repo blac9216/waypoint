@@ -24,6 +24,9 @@ public interface IPresetRepository
 	/// <summary>Inserts a new preset (shipped or custom) and returns its assigned id.</summary>
 	Task<Guid> CreateAsync(Preset preset, CancellationToken cancellationToken);
 
+	/// <summary>Updates an existing preset's mutable fields (issue #1450: <c>name</c>/<c>line_granularity</c>/<c>anchor_version</c> on a custom clone). <c>Id</c>/<c>Stack</c>/<c>Generation</c>/<c>IsCustom</c>/<c>SourcePresetId</c> are never changed by this call. Caller (<see cref="PresetService"/>) enforces the "never write a shipped preset" rule and resolves existence first; a missing row is a silent no-op here.</summary>
+	Task UpdateAsync(Preset preset, CancellationToken cancellationToken);
+
 	/// <summary>Fetches one preset by id, or <c>null</c> when no such row exists.</summary>
 	Task<Preset?> GetAsync(Guid id, CancellationToken cancellationToken);
 
