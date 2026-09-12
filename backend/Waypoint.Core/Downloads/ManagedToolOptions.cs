@@ -289,6 +289,15 @@ public sealed class ManagedToolOptions
 	public TimeSpan BinariesDownloadTimeout { get; set; } = TimeSpan.FromHours(4);
 
 	/// <summary>
+	/// Issue #1041: how often <c>BinariesDownloadJobHandler</c> samples the tool's
+	/// destination path (depot-store-relative <c>external_id</c>) while
+	/// <c>binaries download</c> runs, to compute byte progress/rate/ETA the same way
+	/// as the direct-fetch <c>download</c> lane -- never by parsing the tool's stdout
+	/// (issue #719), which is unreliable without a TTY.
+	/// </summary>
+	public TimeSpan ProgressSampleInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+	/// <summary>
 	/// Directory, under <see cref="ToolStatePath"/> (same persistent volume), that a
 	/// <c>binaries-download</c> job's job-scoped identity home is created under (issue
 	/// #1482: "job-scoped isolated identity home per invocation" -- the grill decision's
