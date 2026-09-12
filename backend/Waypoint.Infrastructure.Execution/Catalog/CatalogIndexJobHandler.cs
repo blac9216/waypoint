@@ -284,7 +284,7 @@ public sealed partial class CatalogIndexJobHandler : IJobHandler
 			.ConfigureAwait(false);
 	}
 
-	private DepotArtifactUpsert? TryParseArtifact(System.Management.Automation.PSObject psObject)
+	internal DepotArtifactUpsert? TryParseArtifact(System.Management.Automation.PSObject psObject)
 	{
 		string? externalId = GetProperty<string>(psObject, "ExternalId");
 		string? status = GetProperty<string>(psObject, "Status");
@@ -355,7 +355,7 @@ public sealed partial class CatalogIndexJobHandler : IJobHandler
 	/// through to null. A non-null input that still yields null is logged at debug
 	/// level so a systematically dropped size is discoverable.
 	/// </summary>
-	private long? TryToInt64(object? value)
+	internal long? TryToInt64(object? value)
 	{
 		long? result = value switch
 		{

@@ -428,6 +428,54 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.False(Directory.Exists(Path.Combine(_toolStatePath, "catalog-pull-staging", $"job-{job.Id:N}")));
 	}
 
+	/// <summary>
+	/// Issue #1887: when the pull excludes one or more ambiguous legacy identities
+	/// (<see cref="CatalogPullJobHandler.BuildLegacyRenames"/>'s own exclusion), the
+	/// operator-facing terminal <c>Succeeded</c> note -- the surface an operator
+	/// actually reads, unlike <c>run.progress.message</c>, which no frontend screen
+	/// renders -- says so, rather than reporting a plain "Pulled and indexed N" note
+	/// that mentions nothing about the exclusion.
+	/// </summary>
+	[Fact]
+	public async Task AmbiguousBareFileName_IsReportedOnTheTerminalSucceededNote()
+	{
+		const string catalogWithSharedFileName = """
+			{
+			  "patches": {
+			    "VCENTER": [
+			      {
+			        "productVersion": "8.0.3.00900-25413364",
+			        "artifacts": { "bundles": [ { "id": "bundle-1", "binaries": [
+			          { "fileName": "shared.iso", "checksum": "aa11", "size": 1024 }
+			        ] } ] }
+			      }
+			    ],
+			    "NSX": [
+			      {
+			        "productVersion": "4.2.1",
+			        "artifacts": { "bundles": [ { "id": "bundle-2", "binaries": [
+			          { "fileName": "shared.iso", "checksum": "bb22", "size": 2048 }
+			        ] } ] }
+			      }
+			    ]
+			  }
+			}
+			""";
+		await SeedActivationCodeCredentialAsync(InventedCode);
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), catalogWithSharedFileName, signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
+		ClaimedJob job = await EnqueuePullJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Contains("2 artifact", outcome.Note);
+		Assert.Contains("ambiguous", outcome.Note, StringComparison.OrdinalIgnoreCase);
+		Assert.Contains("shared.iso", outcome.Note, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task ZeroItemAuthenticatedCatalog_IsRecordedAsAGenuineSuccess()
 	{
