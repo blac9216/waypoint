@@ -22,7 +22,11 @@ Board: assign #<N> to yourself (`gh issue edit <N> --add-assignee @me`) and set 
 Claim: this work is under claim <claim id>. [Other live claims / parallel agents:
 <claim id> owns area:<x> (#…) — do not touch <files/areas>; keep shared-file edits
 additive.] [Shared sequence resource: <migration numbers etc.> — verify at branch
-time against the tree AND open PRs; state the assumption in the PR body.]
+time against the tree AND open PRs; state the assumption in the PR body. New SQL
+migrations use a UTC timestamp prefix (`YYYYMMDDHHMMSS_<slug>.sql`, from
+`date -u +%Y%m%d%H%M%S`), never a hand-picked sequential number; the
+`SchemaMigrationTests` set-equality + duplicate-prefix guard replaces the old
+`ExpectedMigrationCount` — nothing to bump. See `docs/reference/schema-migrations.md`.]
 
 Task: `gh issue view <N>` for the full body and acceptance criteria. Read <epic #E,
 design docs, merged PRs and code this builds on — enumerate them>. Scope boundaries:

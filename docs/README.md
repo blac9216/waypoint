@@ -19,6 +19,7 @@ remediation from the baseline audit, not done here.
 ## Reference — facts and contracts
 - [reference/api-contract.md](reference/api-contract.md) — REST resources, SSE events, state machines, schema, data ledger
 - [reference/download-parity-matrix.md](reference/download-parity-matrix.md) — download-lane parity fixture matrix mapping the sibling `vcf-docker-download` runbook's cases to Waypoint contracts
+- [reference/schema-migrations.md](reference/schema-migrations.md) — SQL migration filename scheme (timestamp prefixes), the set-equality/duplicate-prefix guard, and the per-file migration ledger
 
 ## Explanation — why things are the way they are
 - [explanation/architecture.md](explanation/architecture.md) — system architecture: components, job engine, modes, update flow
