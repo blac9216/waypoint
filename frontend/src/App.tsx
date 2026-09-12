@@ -19,6 +19,7 @@ import {
 	LiveJobsScreen,
 	LiveRunScreen,
 	ResultsScreen,
+	RetentionScreen,
 	StartScanScreen,
 	TransferScreen,
 } from "./screens/screens";
@@ -35,6 +36,7 @@ const SCREENS: Record<string, ComponentType> = {
 	benchmarks: BenchmarksScreen,
 	catalog: CatalogScreen,
 	library: LibraryScreen,
+	retention: RetentionScreen,
 	transfer: TransferScreen,
 	configuration: ConfigurationScreen,
 	audit: AuditScreen,

@@ -111,6 +111,17 @@ export function LibraryIcon(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
+/** Retention Review nav icon (issue #1481) — a clock face, evoking the grace-period countdown this screen surfaces. */
+export function RetentionIcon(props: SVGProps<SVGSVGElement>) {
+	return (
+		<Icon {...props}>
+			<circle cx="8" cy="8" r="6.5" />
+			<line x1="8" y1="8" x2="8" y2="4" />
+			<line x1="8" y1="8" x2="11" y2="9.5" />
+		</Icon>
+	);
+}
+
 export function TransferIcon(props: SVGProps<SVGSVGElement>) {
 	return (
 		<Icon {...props}>

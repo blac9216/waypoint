@@ -1,0 +1,134 @@
+.retention-screen {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	height: 100%;
+	padding: 14px 20px;
+	overflow-y: auto;
+}
+
+.retention-screen__header h1 {
+	margin: 0 0 4px;
+	font-size: 18px;
+}
+
+.retention-screen__subtitle {
+	margin: 0;
+	color: var(--muted, #7a8290);
+	font-size: 13px;
+}
+
+.retention-screen__error {
+	background: var(--danger-bg, #3a1c1c);
+	border: 1px solid var(--danger, #c0392b);
+	border-radius: var(--radius-card, 6px);
+	padding: 8px 12px;
+	font-size: 13px;
+}
+
+.retention-section {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	padding: 12px 14px;
+}
+
+.retention-section h2 {
+	margin: 0 0 8px;
+	font-size: 14px;
+}
+
+.retention-section__note {
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: var(--muted, #7a8290);
+}
+
+.retention-empty {
+	font-size: 13px;
+	color: var(--muted, #7a8290);
+}
+
+.retention-alert-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.retention-alert {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	padding: 6px 8px;
+	border-left: 2px solid var(--line);
+	border-radius: 4px;
+}
+
+.retention-alert--grace-entry {
+	border-left-color: #e0a800;
+}
+
+.retention-alert--review-list-addition {
+	border-left-color: #6a8fd6;
+}
+
+.retention-alert__badge {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	opacity: 0.75;
+}
+
+.retention-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+}
+
+.retention-table th {
+	text-align: left;
+	font-size: 11px;
+	letter-spacing: 0.03em;
+	color: var(--muted, #7a8290);
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--line);
+}
+
+.retention-table td {
+	padding: 8px;
+	border-bottom: 1px solid var(--line);
+}
+
+.retention-table__empty {
+	text-align: center;
+	color: var(--muted, #7a8290);
+	padding: 16px 8px;
+}
+
+.retention-col-actions {
+	white-space: nowrap;
+	text-align: right;
+}
+
+.retention-col-actions button {
+	margin-left: 6px;
+}
+
+.retention-badge {
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 10px;
+	background: var(--chip-bg, #2b2f36);
+}
+
+.retention-badge--grace {
+	background: #4a3a10;
+}
+
+.retention-badge--pending-purge {
+	background: #4a1a1a;
+}

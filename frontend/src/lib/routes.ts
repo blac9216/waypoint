@@ -19,6 +19,7 @@ export type ScreenKey =
 	| "benchmarks"
 	| "catalog"
 	| "library"
+	| "retention"
 	| "transfer"
 	| "configuration"
 	| "audit";
@@ -65,6 +66,12 @@ export const ROUTES: RouteDef[] = [
 	{ key: "benchmarks", path: "/benchmarks", title: "Benchmarks", requiredRole: "Viewer" },
 	{ key: "catalog", path: "/catalog", title: "Download Catalog", requiredRole: "Operator", connectedOnly: true },
 	{ key: "library", path: "/library", title: "Library", requiredRole: "Viewer" },
+	// Issue #1481 (epic #1182): grace/pending-purge review, pin/purge-now, and
+	// the orphan/out-of-scope review list, wired against #1453's retention API.
+	// Viewer+ can read this screen; pin/purge-now/delete are Admin-only gates
+	// applied in-screen (RetentionController's own RBAC), the same
+	// read-visible-but-action-gated shape `library` above already uses.
+	{ key: "retention", path: "/retention", title: "Retention Review", requiredRole: "Viewer" },
 	{ key: "transfer", path: "/transfer", title: "Transfer", requiredRole: "Viewer" },
 	{ key: "configuration", path: "/config", title: "Configuration", requiredRole: "Admin" },
 	// Top-level, not nested under /config (requiredRole: "Admin" at the route
