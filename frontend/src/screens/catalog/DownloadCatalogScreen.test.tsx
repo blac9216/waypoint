@@ -799,6 +799,26 @@ describe("DownloadCatalogScreen", () => {
 		expect(screen.queryByText("VKR (Kubernetes Release)")).not.toBeInTheDocument();
 	});
 
+	it("issue #1802: status filter offers exactly the ArtifactStatus members, each with a non-coerced label", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		const statusFilter = screen.getByLabelText("Filter by status") as HTMLSelectElement;
+		const optionValues = Array.from(statusFilter.options).map((o) => o.value);
+		// Exhaustive against catalog.ts's own union (mirrors artifactStatus.test.ts's
+		// backend-parity pin) — a member added there without STATUS_ORDER
+		// picking it up would leave it missing here.
+		expect(optionValues).toEqual(["", "indexed", "downloading", "present", "failed", "missing"]);
+
+		// "indexed" is a real, mapped member (-> "not_downloaded" display) — its
+		// label must be the honest mapped label, not present because of the
+		// `?? "not_downloaded"` coercion this issue removed (which would have
+		// given every *unmapped* value this exact same label, masking the bug).
+		expect(within(statusFilter).getByRole("option", { name: "Not downloaded" }).getAttribute("value")).toBe(
+			"indexed",
+		);
+	});
+
 	it("dominant-product case: collapses the 433-strong VKR group by default without hiding core products", async () => {
 		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(40));
 		render(
