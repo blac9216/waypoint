@@ -19,6 +19,51 @@ Job lifecycle data is common, but outputs are not. Inventory, downloaded content
 compliance findings, profiles, and transfer bundles have different ownership,
 authorization, retention, and destructive actions.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #588, #589._
+
+- ADR-0008 already gives every job family — scans, discovery, credential tests,
+  downloads, content operations, transfers, remediation, updates — a common Run/Job
+  execution model with global and per-run event streams; ADRs 0013, 0014, 0017, and
+  0018 assign execution ownership and capacity without changing that common model, so
+  the UI projection had to be layered on top of it rather than duplicating it (#588
+  Design/Approach).
+- The original UI design reused the scan-oriented Live Run/Results screens' generic
+  `/runs` query for every job family, which made downloads and discovery look like
+  scans (#589 Motivation/Current Behavior; Context above).
+- A single selected run in that scan-fan-out presentation appeared to be an execution
+  limit even though runners may execute several runs and jobs concurrently, so the
+  projection needed to make concurrent selection visible rather than implied-serial
+  (Context above).
+- Job lifecycle data (status, timing, actor/target attribution, logs, diagnostics) is
+  common across job families, but their durable outputs are not: inventory, downloaded
+  content, compliance findings, profiles, and transfer bundles have different
+  ownership, authorization, retention, and destructive actions (#589
+  Motivation/Current Behavior; Context above).
+- Deleting operational history must never implicitly delete domain state, and
+  visibility into a job's metadata/logs must stay separable from authorization to
+  perform that job type's domain actions (#589 Proposed Changes: security/lifecycle
+  documentation update).
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #588, #589. The sources do not record a named
+alternative architecture evaluated against the chosen one — #589 proposes the global
+Live Jobs model directly — so the option rejected below is the status quo the Context
+above describes as already failing, not an invented alternative design._
+
+1. **Global Live Jobs operational workspace with domain-owned durable results —
+   chosen.** One global, cross-domain projection groups jobs by run and lets an
+   operator select among concurrent work, delegating output ownership (findings,
+   inventory, downloaded content, profiles, bundles) to each domain's own screens.
+2. **Continue reusing the scan-oriented Live Run/Results screens' generic `/runs`
+   query for every job family (status quo) — rejected.** Per Context above and #589's
+   Current Behavior, this made downloads and discovery look like scans, conflated a
+   single selected run with an execution limit despite concurrent runner execution,
+   and gave operational history and domain-owned outputs (findings, inventory,
+   content, bundles) no separate lifecycle or authorization boundary.
+
 ## Decision
 
 1. **Live Jobs is global operational observability.** A top-level workspace lists
