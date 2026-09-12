@@ -8,6 +8,7 @@ import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/Dashboa
 import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
 import { LiveJobsRoute } from "./livejobs/LiveJobsScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
+import { PresetsScreen as PresetsAdoptCloneEditScreen } from "./presets/PresetsScreen";
 import { RetentionReviewScreen as RetentionReviewRoute } from "./retention/RetentionReviewScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
@@ -50,6 +51,10 @@ export function ContentLibraryScreen() {
 
 export function RetentionScreen() {
 	return <RetentionReviewRoute />;
+}
+
+export function PresetsScreen() {
+	return <PresetsAdoptCloneEditScreen />;
 }
 
 export function TransferScreen() {

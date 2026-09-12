@@ -132,6 +132,19 @@ export function RetentionIcon(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
+/** Presets nav icon (issue #1469) — a stamp/template glyph, evoking a
+ * preset used as a starting point for a subscription. */
+export function PresetsIcon(props: SVGProps<SVGSVGElement>) {
+	return (
+		<Icon {...props}>
+			<rect x="3" y="3" width="10" height="10" rx="1.5" />
+			<line x1="5.5" y1="6" x2="10.5" y2="6" />
+			<line x1="5.5" y1="8.5" x2="10.5" y2="8.5" />
+			<line x1="5.5" y1="11" x2="8.5" y2="11" />
+		</Icon>
+	);
+}
+
 export function TransferIcon(props: SVGProps<SVGSVGElement>) {
 	return (
 		<Icon {...props}>
