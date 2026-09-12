@@ -57,4 +57,19 @@ describe("useContentLibraryViewFromQuery", () => {
 		act(() => result.current.setView({ sort: "name" }));
 		expect(new URLSearchParams(window.location.search).has("sort")).toBe(false);
 	});
+
+	it("carries a selected folder id across reload (issue #1422 AC2)", () => {
+		window.history.pushState(null, "", "/content-library?library=lib-1&folder=folder-1");
+		const { result } = renderHook(() => useContentLibraryViewFromQuery());
+		expect(result.current.folderId).toBe("folder-1");
+	});
+
+	it("setView writes/clears the folder id in the URL", () => {
+		const { result } = renderHook(() => useContentLibraryViewFromQuery());
+		act(() => result.current.setView({ folderId: "folder-2" }));
+		expect(new URLSearchParams(window.location.search).get("folder")).toBe("folder-2");
+
+		act(() => result.current.setView({ folderId: undefined }));
+		expect(new URLSearchParams(window.location.search).has("folder")).toBe(false);
+	});
 });

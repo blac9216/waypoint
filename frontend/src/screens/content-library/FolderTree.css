@@ -1,0 +1,90 @@
+.folder-tree {
+	min-width: 200px;
+	max-width: 260px;
+	flex-shrink: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	font-size: 13px;
+}
+
+.folder-tree__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.folder-tree__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.folder-tree__node {
+	display: flex;
+	flex-direction: column;
+}
+
+.folder-tree__row-wrap {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.folder-tree__row {
+	flex: 1;
+	text-align: left;
+	background: none;
+	border: none;
+	padding: 4px 6px;
+	border-radius: var(--radius-card, 6px);
+	cursor: pointer;
+	color: inherit;
+}
+
+.folder-tree__row.is-selected {
+	background: var(--accent-bg, #1c2a3a);
+	font-weight: 600;
+}
+
+.folder-tree__count {
+	color: var(--muted, #7a8290);
+	font-size: 11px;
+}
+
+.folder-tree__action {
+	font-size: 11px;
+	background: none;
+	border: 1px solid transparent;
+	cursor: pointer;
+	color: var(--muted, #7a8290);
+	padding: 2px 4px;
+}
+
+.folder-tree__action--delete {
+	color: var(--danger, #c0392b);
+}
+
+.folder-tree__new-button {
+	font-size: 11px;
+	background: none;
+	border: none;
+	cursor: pointer;
+	color: var(--accent, #4a90d9);
+}
+
+.folder-tree__create-form,
+.folder-tree__rename-form {
+	display: flex;
+	gap: 4px;
+	margin: 4px 0;
+}
+
+.folder-tree__error {
+	color: var(--danger, #c0392b);
+	font-size: 12px;
+}

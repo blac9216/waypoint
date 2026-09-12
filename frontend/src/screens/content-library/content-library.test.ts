@@ -4,11 +4,14 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+	buildItemFolderMap,
+	flattenFolderTree,
 	formatBytes,
 	itemTotalSize,
 	matchesSearch,
 	matchesTypeFilter,
 	sortItems,
+	type ContentLibraryFolderNode,
 	type ContentLibraryItem,
 } from "./content-library";
 
@@ -87,6 +90,58 @@ describe("sortItems", () => {
 		const copy = [...items];
 		sortItems(items, "name");
 		expect(items).toEqual(copy);
+	});
+});
+
+const FOLDER_TREE: ContentLibraryFolderNode[] = [
+	{
+		id: "folder-1",
+		name: "Appliances",
+		created_at: "2026-09-01T00:00:00Z",
+		item_ids: ["item-1"],
+		children: [
+			{
+				id: "folder-1a",
+				name: "vCenter",
+				created_at: "2026-09-01T00:00:00Z",
+				item_ids: ["item-2"],
+				children: [],
+			},
+		],
+	},
+	{
+		id: "folder-2",
+		name: "Installers",
+		created_at: "2026-09-01T00:00:00Z",
+		item_ids: [],
+		children: [],
+	},
+];
+
+describe("flattenFolderTree", () => {
+	it("flattens depth-first with each node's depth", () => {
+		expect(flattenFolderTree(FOLDER_TREE)).toEqual([
+			{ id: "folder-1", name: "Appliances", depth: 0 },
+			{ id: "folder-1a", name: "vCenter", depth: 1 },
+			{ id: "folder-2", name: "Installers", depth: 0 },
+		]);
+	});
+
+	it("returns an empty list for an empty tree", () => {
+		expect(flattenFolderTree([])).toEqual([]);
+	});
+});
+
+describe("buildItemFolderMap", () => {
+	it("maps each directly-assigned item to its folder id, at any depth", () => {
+		const map = buildItemFolderMap(FOLDER_TREE);
+		expect(map.get("item-1")).toBe("folder-1");
+		expect(map.get("item-2")).toBe("folder-1a");
+	});
+
+	it("omits items with no folder assignment", () => {
+		const map = buildItemFolderMap(FOLDER_TREE);
+		expect(map.has("item-3")).toBe(false);
 	});
 });
 
