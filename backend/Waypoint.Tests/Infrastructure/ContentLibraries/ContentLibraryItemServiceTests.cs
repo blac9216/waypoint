@@ -360,6 +360,80 @@ public sealed class ContentLibraryItemServiceTests : IAsyncLifetime
 		await AssertIndexAgreesWithDiskAsync(library);
 	}
 
+	// ---- the name-length bound, UTF-8 byte count vs. character count (issue #1873) --
+	//
+	// The four cases above are pure ASCII, where Encoding.UTF8.GetByteCount(s) and
+	// s.Length are numerically identical for every input -- so none of them can tell
+	// the deliberate byte-count measurement in ValidateFileName apart from a plain
+	// character count. These two build a name from U+00E9 (2 UTF-8 bytes, 1 char) so
+	// the two measurements diverge: 108 copies is 216 bytes (inside the 217-byte
+	// writable bound) and 109 copies is 218 bytes (one byte over). A character count
+	// would admit both -- 108 and 109 chars are both under 217 -- so only the byte
+	// count rejects the second.
+
+	private static string MultiByteFileNameOfCharCount(int count) => new string('é', count);
+
+	[Fact]
+	public async Task AddAsync_AtTheLongestWritableMultiByteFileName_StoresItAndRoundTripsThroughTheIndex()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-multibyte-add");
+		string fileName = MultiByteFileNameOfCharCount(108);
+
+		(ContentLibraryItemOperationOutcome outcome, ContentLibraryItem? item) =
+			await _service.AddAsync(library.Id, fileName, ContentStream("bytes"), null, CancellationToken.None);
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.Equal(fileName, item!.Name);
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, item.DirectoryName, fileName)));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
+	[Fact]
+	public async Task AddAsync_OneMultiByteCharacterBeyondTheLongestWritableFileName_IsRejected()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-multibyte-add-over");
+		int directoriesBefore = Directory.GetDirectories(library.DiskPath).Length;
+
+		// 109 chars is only 109 bytes under a character count -- well inside 217 -- but
+		// 218 UTF-8 bytes, one over. A character-count regression would admit this and
+		// then throw PathTooLongException out of the FileStream constructor instead.
+		await Assert.ThrowsAsync<ArgumentException>(() => _service.AddAsync(
+			library.Id, MultiByteFileNameOfCharCount(109), ContentStream("bytes"), null, CancellationToken.None));
+
+		Assert.Equal(directoriesBefore, Directory.GetDirectories(library.DiskPath).Length);
+	}
+
+	[Fact]
+	public async Task UpdateAsync_AtTheLongestWritableMultiByteFileName_StoresIt()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-multibyte-update");
+		(_, ContentLibraryItem? added) = await _service.AddAsync(library.Id, "disk.iso", ContentStream("v1"), null, CancellationToken.None);
+		string fileName = MultiByteFileNameOfCharCount(108);
+
+		(ContentLibraryItemOperationOutcome outcome, ContentLibraryItem? updated) =
+			await _service.UpdateAsync(library.Id, added!.Id, fileName, ContentStream("v2"), null, CancellationToken.None);
+
+		Assert.Equal(ContentLibraryItemOperationOutcome.Succeeded, outcome);
+		Assert.Equal(fileName, updated!.Name);
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, updated.DirectoryName, fileName)));
+		Assert.False(File.Exists(Path.Combine(library.DiskPath, updated.DirectoryName, "disk.iso")));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
+	[Fact]
+	public async Task UpdateAsync_OneMultiByteCharacterBeyondTheLongestWritableFileName_IsRejected()
+	{
+		ContentLibrary library = await SeedLibraryAsync("vcsp-name-length-multibyte-update-over");
+		(_, ContentLibraryItem? maybeAdded) = await _service.AddAsync(library.Id, "disk.iso", ContentStream("v1"), null, CancellationToken.None);
+		ContentLibraryItem added = maybeAdded!;
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _service.UpdateAsync(
+			library.Id, added.Id, MultiByteFileNameOfCharCount(109), ContentStream("v2"), null, CancellationToken.None));
+
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, added.DirectoryName, "disk.iso")));
+		await AssertIndexAgreesWithDiskAsync(library);
+	}
+
 	// ---- payload atomicity and mutation ordering (review round 1, F2 and F3) --------
 
 	private const int LargePayloadLength = 2 * 1024 * 1024;
