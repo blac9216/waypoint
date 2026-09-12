@@ -137,9 +137,9 @@ public sealed class RetentionController : ControllerBase
 		});
 
 		Response.Headers["X-Total-Count"] = all.Count.ToString(CultureInfo.InvariantCulture);
-		IReadOnlyList<RetainedContentState> pageItems = all.Skip(page.Offset).Take(page.Limit).ToArray();
+		RetainedContentState[] pageItems = all.Skip(page.Offset).Take(page.Limit).ToArray();
 
-		List<RetainedContentStateResponse> responses = new(pageItems.Count);
+		List<RetainedContentStateResponse> responses = new(pageItems.Length);
 		foreach (RetainedContentState item in pageItems)
 		{
 			responses.Add(await ToResponseAsync(item, cancellationToken).ConfigureAwait(false));
