@@ -80,17 +80,30 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 	/// a top-level bulletin XML, and per-VIB <c>vibs/*.xml</c> entries carrying
 	/// <c>relative-path</c>/<c>checksum</c>.
 	/// </summary>
+	/// <summary>
+	/// Fixed so "same content" is byte-identical regardless of wall-clock time: a zip
+	/// entry's local file header carries its <see cref="ZipArchiveEntry.LastWriteTime"/>
+	/// (DOS-timestamp granularity), so two archives built from otherwise-identical calls
+	/// would otherwise hash to different <c>ContentKey</c>s whenever the calls straddle
+	/// that granularity's rounding boundary (issue #1824).
+	/// </summary>
+	private static readonly DateTimeOffset FixedEntryTimestamp = new(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
 	private static void WriteMetadataZip(string path, IReadOnlyList<(string RelativePath, string ChecksumSha256)> vibs)
 	{
 		using FileStream fileStream = File.Create(path);
 		using ZipArchive archive = new(fileStream, ZipArchiveMode.Create);
 
-		using (StreamWriter writer = new(archive.CreateEntry("vendor-index.xml").Open()))
+		ZipArchiveEntry vendorIndexEntry = archive.CreateEntry("vendor-index.xml");
+		vendorIndexEntry.LastWriteTime = FixedEntryTimestamp;
+		using (StreamWriter writer = new(vendorIndexEntry.Open()))
 		{
 			writer.Write("<vendorIndex/>");
 		}
 
-		using (StreamWriter writer = new(archive.CreateEntry("vmware.xml").Open()))
+		ZipArchiveEntry bulletinEntry = archive.CreateEntry("vmware.xml");
+		bulletinEntry.LastWriteTime = FixedEntryTimestamp;
+		using (StreamWriter writer = new(bulletinEntry.Open()))
 		{
 			writer.Write("<bulletinList/>");
 		}
@@ -98,7 +111,9 @@ public sealed class EsxPatchStoreMetadataParserTests : IDisposable
 		int i = 0;
 		foreach ((string relativePath, string checksum) in vibs)
 		{
-			using StreamWriter writer = new(archive.CreateEntry($"vibs/vib-{i++}.xml").Open());
+			ZipArchiveEntry vibEntry = archive.CreateEntry($"vibs/vib-{i++}.xml");
+			vibEntry.LastWriteTime = FixedEntryTimestamp;
+			using StreamWriter writer = new(vibEntry.Open());
 			writer.Write(
 				$"""<vib><relative-path>{relativePath}</relative-path><packed-size>1024</packed-size><checksum checksum-type="sha-256">{checksum}</checksum></vib>""");
 		}

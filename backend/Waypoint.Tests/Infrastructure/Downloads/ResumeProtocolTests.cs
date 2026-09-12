@@ -186,6 +186,11 @@ public sealed class ResumeProtocolTests
 
 		public ConcurrentQueue<(string Method, string? RangeHeader)> Requests { get; } = new();
 
+		/// <summary>Set when the accept loop observes an exception outside the
+		/// shutdown-expected set below, so a test body can assert on it instead of the
+		/// exception silently ending the loop unobserved.</summary>
+		public Exception? UnexpectedException { get; private set; }
+
 		public ScenarioHttpServer(Func<HttpListenerRequest, HttpListenerResponse, Task> handle)
 		{
 			_handle = handle;
@@ -219,8 +224,15 @@ public sealed class ResumeProtocolTests
 				{
 					context = await _listener.GetContextAsync().ConfigureAwait(false);
 				}
-				catch
+				catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException)
 				{
+					// Shutdown-expected: Dispose() stops/closes the listener while
+					// GetContextAsync is pending.
+					return;
+				}
+				catch (Exception ex)
+				{
+					UnexpectedException = ex;
 					return;
 				}
 
@@ -228,6 +240,10 @@ public sealed class ResumeProtocolTests
 				try
 				{
 					await _handle(context.Request, context.Response).ConfigureAwait(false);
+				}
+				catch (Exception ex)
+				{
+					UnexpectedException = ex;
 				}
 				finally
 				{
@@ -462,7 +478,6 @@ public sealed class ResumeProtocolTests
 
 		using ScenarioHttpServer server = new(async (request, response) =>
 		{
-			Assert.Equal("bytes=5-", request.Headers["Range"]);
 			response.StatusCode = 206;
 			response.Headers.Add("Content-Range", "bytes 5-11/12");
 			byte[] remainder = FullBytes[5..];
@@ -480,6 +495,7 @@ public sealed class ResumeProtocolTests
 		Assert.Equal(FullBytes, await File.ReadAllBytesAsync(destinationPath));
 		Assert.False(File.Exists(destinationPath + ".resume.tmp"));
 		Assert.Equal(1, server.Requests.Count(r => r.Method == "GET"));
+		Assert.Equal("bytes=5-", Assert.Single(server.Requests).RangeHeader);
 
 		Directory.Delete(storeDir, recursive: true);
 	}
