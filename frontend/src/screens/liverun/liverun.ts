@@ -59,7 +59,7 @@ export type JobState =
 
 export const TERMINAL_JOB_STATES: ReadonlySet<JobState> = new Set(["uploaded", "done", "failed", "auth-failed", "cancelled"]);
 
-/** `stage x 25%` per the prototype README ("Target state machine"). */
+/** `stage x 25%` per docs/how-to/ui-prototype.md ("Target state machine"). */
 const STAGE_ORDER: JobState[] = ["queued", "running", "attesting", "converting", "uploaded"];
 
 export function progressPercentForState(state: JobState): number {

@@ -1,7 +1,7 @@
 /**
  * Config → Compliance Content tab (issue #40, frontend slice 2 of 2 — the
  * backend landed in PR #566). docs/ui/prototype's Config → Compliance
- * Content spec (`vcs-ops-console.dc.html` `cfgContent`): a COMPLIANCE
+ * Content spec (`vcf-ops-console.dc.html` `cfgContent`): a COMPLIANCE
  * CONTENT SOURCE panel (repository, pinned-tag-vs-tracked-branch, recorded
  * commit, Pull Updates) plus a PROFILE INVENTORY panel (name/kind/version/
  * state) that feeds the Benchmarks screen's profile list (#559).
