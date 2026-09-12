@@ -122,6 +122,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<ContentLibraryOptions>()
 			.Bind(configuration.GetSection(ContentLibraryOptions.SectionName));
 
+		services.AddOptions<SubscriptionEvaluationOptions>()
+			.Bind(configuration.GetSection(SubscriptionEvaluationOptions.SectionName));
+
 		services.AddOptions<Waypoint.Core.Downloads.ManagedToolOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Downloads.ManagedToolOptions.SectionName));
 
@@ -429,6 +432,18 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IPresetRepository>(new PresetRepository(connectionString));
 			services.AddSingleton<SubscriptionService>();
 			services.AddSingleton<PresetService>();
+
+			// Issue #1472: the subscription-evaluation job's persistence + fan-out
+			// primitives. ISubscriptionLineEvaluator has no dependency of its own
+			// (pure wrapper over the #1039 comparator) -- registered here as its first
+			// real DI consumer (SubscriptionFetchSetCalculator, registered by
+			// AddWaypointExecution alongside the job handler it backs).
+			services.AddSingleton<ISubscriptionLineEvaluator, SubscriptionLineEvaluator>();
+			services.AddSingleton<ISubscriptionEvaluationStateRepository>(new SubscriptionEvaluationStateRepository(connectionString));
+			// IHttpClientFactory is already registered unconditionally above (issue
+			// #310's StigManager probe) -- reused here rather than a second AddHttpClient() call.
+			services.AddSingleton<ILibraryVersionCounterGateway, HttpLibraryVersionCounterGateway>();
+			services.AddSingleton<SubscriptionEvaluationFanOutService>();
 			services.AddSingleton(new InventoryRepository(connectionString));
 			// Issue #732: stable compliance endpoint/component identity beneath a
 			// top-level target (migration 0054) -- distinct from InventoryRepository's
