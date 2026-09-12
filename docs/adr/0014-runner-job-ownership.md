@@ -22,6 +22,48 @@ replay already form a process-independent coordination boundary. Runners also ne
 bounded parallelism that respects the CPU and memory actually allocated to their
 container rather than one hard-coded global worker count.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from this ADR's own Context and Rationale (present since
+the bootstrap commit `95163887`, 2026-08-11T21:51:30+02:00); corroborated by PR #432
+(closes #431), which introduced this ADR._
+
+- Split ownership — the backend retaining a job lease while remotely instructing
+  another process — would require an internal dispatch/streaming protocol, make a
+  dropped connection ambiguous, and complicate cancellation, orphan recovery, and
+  terminal-state authority.
+- The existing Postgres queue, durable stage marker, append-only event log, and SSE
+  replay already form a process-independent coordination boundary; lease ownership and
+  process ownership remaining identical makes crash and network failure semantics
+  unambiguous.
+- PostgreSQL already provides durable coordination at the product's scale; an internal
+  runner RPC protocol or broker would duplicate it, and SSE must remain independent of
+  which process executes a job.
+- Runners need bounded parallelism that respects the CPU and memory actually allocated
+  to their container rather than one hard-coded global worker count, so a count
+  suitable for discovery is not applied blindly to memory-heavy scans.
+- Local decryption avoids transporting plaintext credentials between services and
+  preserves the existing audit/redaction model at the point of use.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own Context and Rationale (present since
+the bootstrap commit `95163887`, 2026-08-11T21:51:30+02:00); the sources record no
+issue or PR that separately evaluated these alternatives — the comparison lives only
+in this ADR's own text. Corroborated by PR #432 (closes #431)._
+
+- **The process doing the work owns the job lease itself** (this decision) — chosen.
+  Runners claim work directly from the existing Postgres queue and write events
+  through the existing durable event contract, reusing a coordination boundary that is
+  already process-independent.
+- **Split ownership: the backend retains the job lease and remotely instructs another
+  process** — rejected. Requires an internal dispatch/streaming protocol, makes a
+  dropped connection ambiguous, and complicates cancellation, orphan recovery, and
+  terminal-state authority.
+- **An internal runner RPC protocol or message broker for dispatch/events** — rejected.
+  PostgreSQL already provides durable coordination at the product's scale; a separate
+  protocol or broker would duplicate it.
+
 ## Decision
 
 1. **Runners claim work directly from PostgreSQL.** The atomic
