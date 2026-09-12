@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ContentLibraries;
 using Waypoint.Core.Errors;
 using Waypoint.Infrastructure.ContentLibraries;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -216,7 +216,7 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 			return;
 		}
 
-		if (IsRoot())
+		if (RootPrecondition.IsRoot())
 		{
 			// Running as root (e.g. an unsandboxed container test lane) -- an
 			// unwritable directory is not achievable for this process, so this
@@ -244,18 +244,6 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 		Assert.DoesNotContain(all, l => l.Name == "vcsp-unwritable");
 	}
 
-	/// <summary>Shells out to <c>id -u</c> -- the simplest portable check for effective root on Linux/macOS.</summary>
-	private static bool IsRoot()
-	{
-		using Process process = Process.Start(new ProcessStartInfo("id", "-u")
-		{
-			RedirectStandardOutput = true,
-			UseShellExecute = false,
-		})!;
-		string output = process.StandardOutput.ReadToEnd().Trim();
-		process.WaitForExit();
-		return output == "0";
-	}
 
 	/// <summary>
 	/// PR #1649 round 1 (S3b): the directory is removed BEFORE the row, so a failed

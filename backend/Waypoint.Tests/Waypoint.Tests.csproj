@@ -23,6 +23,7 @@
     </PackageReference>
     <!-- Schema/queue-concurrency tests (issue #4) talk to a real Postgres directly. -->
     <PackageReference Include="Npgsql" Version="8.0.5" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
   </ItemGroup>
 
   <ItemGroup>

@@ -62,10 +62,16 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 
 	/// <summary>
 	/// Same class-killer shape as <c>DepotIdentityToolTests.RealContractStub</c>: parses
-	/// argv the way the real 9.1.0.0400 tool documents and REJECTS an undocumented flag
-	/// combination with usage + <c>exit 2</c>, so a regression to a stale command shape
-	/// (e.g. <c>-d</c> without the value, or a missing required option) cannot silently
-	/// pass. Every call is appended to calls.log for order/shape assertions.
+	/// argv the way the real 9.1.0.0400 tool documents and REJECTS a subcommand other
+	/// than <c>metadata download</c>, an unrecognized flag, or a missing required
+	/// option (depot store / activation-code-file), with usage + <c>exit 2</c> -- so a
+	/// regression to any of those cannot silently pass. A bare <c>-d</c> (no value) is
+	/// deliberately ACCEPTED, matching the real tool's documented shorthand for
+	/// <c>--depot-store=</c> (see the production comment in
+	/// <see cref="ManagedToolMetadataPuller"/> and PR #792's review); the stub does not
+	/// pin argv *spelling* -- that is pinned by the explicit <c>Assert.Contains</c>
+	/// assertions in <see cref="WellFormedInvocation_AgainstRealContractStub_ReturnsOk"/>.
+	/// Every call is appended to calls.log for order/shape assertions.
 	/// </summary>
 	private string RealContractStub(int metadataDownloadExit = 0, string metadataDownloadStdout = "")
 	{
@@ -269,19 +275,18 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 	[Fact]
 	public async Task ToolNotInstalled_FailsWithoutInvokingAnything()
 	{
-		ManagedToolOptions options = new()
-		{
-			ToolStatePath = _root,
-			ActiveDirectoryName = "active",
-			ExecutableRelativePath = "bin/vcf-download-tool",
-		};
-		ManagedToolMetadataPuller puller = new(Options.Create(options), new NeverPresent());
+		// Positive self-check (issue #1618): an executable IS present at the expected
+		// path and WOULD append to calls.log if invoked, so asserting the log's
+		// absence actually proves non-invocation rather than merely being consistent
+		// with a presence checker the puller was never wired to call at all.
+		ManagedToolMetadataPuller puller = CreatePuller(RealContractStub(), out string callLogPath, new NeverPresent());
 
 		CatalogPullResult result = await puller.PullAsync(Path.Combine(_root, "depot"), Path.Combine(_root, "code.txt"), DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
 		Assert.Contains("not installed", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+		Assert.False(File.Exists(callLogPath), "the tool must never be invoked when the presence checker reports it is not installed");
 	}
 
 	[Fact]
@@ -328,6 +333,10 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
-		Assert.Contains("timed out", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+
+		// The shared failure prefix ("could not be started or timed out") also covers a
+		// process-start failure; assert the timeout-specific stderr tail so this test
+		// cannot pass for that other cause too (issue #1618).
+		Assert.Contains("did not complete within", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
 	}
 }

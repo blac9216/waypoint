@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
@@ -114,7 +113,7 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 	/// Skipped when the test process runs as root (root reads through a mode that
 	/// denies every other user, so this precondition cannot be constructed).
 	/// </summary>
-	[Fact]
+	[SkippableFact]
 	public async Task GetSupportedPlatformsAsync_UnchangedDocument_IsNotReReadOnTheSecondCall()
 	{
 		if (OperatingSystem.IsWindows())
@@ -122,10 +121,7 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 			return;
 		}
 
-		if (IsRoot())
-		{
-			return;
-		}
+		Skip.If(RootPrecondition.IsRoot(), "unreadable-file precondition cannot be constructed when running as root");
 
 		string documentPath = Path.Combine(_tempDirectory, "productVersionCatalog.json");
 		await File.WriteAllTextAsync(documentPath, """{ "lcm.esx.supported.host.platforms": ["esx-8.0-standard"] }""");
@@ -212,7 +208,7 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 	/// (<c>id -u</c> == 0): root can read through a mode that denies every other user,
 	/// so the unreadable-file precondition cannot be constructed at all.
 	/// </summary>
-	[Fact]
+	[SkippableFact]
 	public async Task GetSupportedPlatformsAsync_PermissionDenied_ReturnsEmptyRatherThanThrowing()
 	{
 		if (OperatingSystem.IsWindows())
@@ -220,10 +216,7 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 			return;
 		}
 
-		if (IsRoot())
-		{
-			return;
-		}
+		Skip.If(RootPrecondition.IsRoot(), "unreadable-file precondition cannot be constructed when running as root");
 
 		string documentPath = Path.Combine(_tempDirectory, "productVersionCatalog.json");
 		await File.WriteAllTextAsync(documentPath, """{ "lcm.esx.supported.host.platforms": ["esx-8.0-standard"] }""");
@@ -278,18 +271,5 @@ public sealed class CatalogFileEsxPlatformVocabularyReaderTests : IDisposable
 		postConfigure.PostConfigure(name: null, options);
 
 		Assert.Equal("/explicit/override.json", options.VocabularyDocumentPath);
-	}
-
-	/// <summary>Shells out to <c>id -u</c> -- the simplest portable check for effective root on Linux/macOS.</summary>
-	private static bool IsRoot()
-	{
-		using Process process = Process.Start(new ProcessStartInfo("id", "-u")
-		{
-			RedirectStandardOutput = true,
-			UseShellExecute = false,
-		})!;
-		string output = process.StandardOutput.ReadToEnd().Trim();
-		process.WaitForExit();
-		return output == "0";
 	}
 }
