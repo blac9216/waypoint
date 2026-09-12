@@ -138,6 +138,30 @@ public sealed class PresetRepositoryTests : IAsyncLifetime
 		Assert.Null(await _repository.GetAsync(id, CancellationToken.None));
 	}
 
+	[Fact]
+	public async Task UpdateAsync_ChangesNameGranularityAndAnchor_ButNeverStackOrIsCustom()
+	{
+		Guid id = await _repository.CreateAsync(NewShippedPreset("original") with { IsCustom = true }, CancellationToken.None);
+		Preset original = (await _repository.GetAsync(id, CancellationToken.None))!;
+
+		Preset updated = original with
+		{
+			Name = "renamed",
+			LineGranularity = SubscriptionLineGranularity.Major,
+			AnchorVersion = "9.1",
+			Stack = "VVF", // deliberately ignored by UpdateAsync -- proves it below
+			IsCustom = false, // deliberately ignored by UpdateAsync -- proves it below
+		};
+		await _repository.UpdateAsync(updated, CancellationToken.None);
+
+		Preset? loaded = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal("renamed", loaded!.Name);
+		Assert.Equal(SubscriptionLineGranularity.Major, loaded.LineGranularity);
+		Assert.Equal("9.1", loaded.AnchorVersion);
+		Assert.Equal("VCF", loaded.Stack); // UPDATE never touches stack
+		Assert.True(loaded.IsCustom); // UPDATE never touches is_custom
+	}
+
 	/// <summary>Review round 1 finding F2: <c>presets.stack</c> is a closed vocabulary (<see cref="PresetStacks"/>) enforced by <c>presets_stack_check</c>.</summary>
 	[Fact]
 	public async Task CreateAsync_InvalidStack_ViolatesCheckConstraint()

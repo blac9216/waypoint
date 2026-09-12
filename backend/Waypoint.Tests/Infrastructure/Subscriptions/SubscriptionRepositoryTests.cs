@@ -161,6 +161,45 @@ public sealed class SubscriptionRepositoryTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task UpdateAsync_ChangesMutableFields_ButNeverPresetIdOrCreatedAt()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insertPreset = new(
+			"""
+			INSERT INTO presets (stack, generation, name, line_granularity, anchor_version, is_custom)
+			VALUES ('VCF', '9', 'vcf-current', 'minor', '9.0', false)
+			RETURNING id
+			""", connection);
+		Guid presetId = (Guid)(await insertPreset.ExecuteScalarAsync())!;
+
+		Guid id = await _repository.CreateAsync(NewSubscription(presetId: presetId), CancellationToken.None);
+		Subscription original = (await _repository.GetAsync(id, CancellationToken.None))!;
+
+		Subscription updated = original with
+		{
+			Lane = "umds",
+			LineGranularity = SubscriptionLineGranularity.Major,
+			AnchorVersion = "9",
+			RefreshWindowDays = 14,
+			RetentionOverrideDays = 30,
+			IsEnabled = false,
+			PresetId = null, // deliberately ignored by UpdateAsync -- proves it below
+		};
+		await _repository.UpdateAsync(updated, CancellationToken.None);
+
+		Subscription? loaded = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal("umds", loaded!.Lane);
+		Assert.Equal(SubscriptionLineGranularity.Major, loaded.LineGranularity);
+		Assert.Equal("9", loaded.AnchorVersion);
+		Assert.Equal(14, loaded.RefreshWindowDays);
+		Assert.Equal(30, loaded.RetentionOverrideDays);
+		Assert.False(loaded.IsEnabled);
+		Assert.Equal(presetId, loaded.PresetId); // UPDATE never touches preset_id
+		Assert.Equal(original.CreatedAt, loaded.CreatedAt);
+	}
+
+	[Fact]
 	public async Task CreateAsync_InvalidLane_ViolatesCheckConstraint()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

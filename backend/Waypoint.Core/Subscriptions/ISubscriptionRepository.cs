@@ -23,6 +23,9 @@ public interface ISubscriptionRepository
 	/// <summary>Inserts a new subscription and returns its assigned id.</summary>
 	Task<Guid> CreateAsync(Subscription subscription, CancellationToken cancellationToken);
 
+	/// <summary>Updates an existing subscription's mutable fields (issue #1450). <c>Id</c> and <c>PresetId</c> are never changed by this call -- a subscription's originating preset is fixed at adopt time. Caller (<see cref="SubscriptionService"/>) resolves existence first; a missing row is a silent no-op here.</summary>
+	Task UpdateAsync(Subscription subscription, CancellationToken cancellationToken);
+
 	/// <summary>Fetches one subscription by id, or <c>null</c> when no such row exists.</summary>
 	Task<Subscription?> GetAsync(Guid id, CancellationToken cancellationToken);
 

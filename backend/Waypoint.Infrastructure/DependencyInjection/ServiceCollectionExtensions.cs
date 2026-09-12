@@ -26,6 +26,7 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Scheduling;
+using Waypoint.Core.Subscriptions;
 using Waypoint.Core.Users;
 using Waypoint.Infrastructure.Audit;
 using Waypoint.Infrastructure.Auth;
@@ -38,6 +39,7 @@ using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Scheduling;
 using Waypoint.Infrastructure.Sites;
+using Waypoint.Infrastructure.Subscriptions;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Infrastructure.Users;
 using Waypoint.Runner.Jobs;
@@ -418,6 +420,15 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));
 			services.AddSingleton(new Secrets.RepoCredentialBindingRepository(connectionString));
+
+			// Issue #1450: the Subscription/Preset REST CRUD surface over #1421's
+			// migration 0104 tables -- no runner consumer yet (the evaluation job,
+			// #1046, is still open), same "first real consumer registers it" precedent
+			// as #1436's comment above.
+			services.AddSingleton<ISubscriptionRepository>(new SubscriptionRepository(connectionString));
+			services.AddSingleton<IPresetRepository>(new PresetRepository(connectionString));
+			services.AddSingleton<SubscriptionService>();
+			services.AddSingleton<PresetService>();
 			services.AddSingleton(new InventoryRepository(connectionString));
 			// Issue #732: stable compliance endpoint/component identity beneath a
 			// top-level target (migration 0054) -- distinct from InventoryRepository's
