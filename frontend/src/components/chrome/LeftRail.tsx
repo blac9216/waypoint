@@ -11,6 +11,7 @@ import {
 	CatalogIcon,
 	ChevronIcon,
 	ConfigurationIcon,
+	ContentLibraryIcon,
 	DashboardIcon,
 	JobsIcon,
 	LibraryIcon,
@@ -37,6 +38,7 @@ const ICONS: Record<ScreenKey, ComponentType> = {
 	benchmarks: BenchmarksIcon,
 	catalog: CatalogIcon,
 	library: LibraryIcon,
+	"content-library": ContentLibraryIcon,
 	retention: RetentionIcon,
 	transfer: TransferIcon,
 	configuration: ConfigurationIcon,
@@ -55,7 +57,7 @@ const NAV_GROUPS: NavGroup[] = [
 	// once it gained a History mode alongside active work.
 	{ label: null, items: ["dashboard", "live-jobs"] },
 	{ label: "COMPLIANCE", items: ["live-run", "start-scan", "results", "benchmarks"] },
-	{ label: "CONTENT", items: ["catalog", "library", "retention", "transfer"] },
+	{ label: "CONTENT", items: ["catalog", "library", "content-library", "retention", "transfer"] },
 	{ label: "CONFIGURE", items: ["configuration", "audit"] },
 ];
 

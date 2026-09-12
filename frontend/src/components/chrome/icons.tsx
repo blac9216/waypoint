@@ -111,6 +111,16 @@ export function LibraryIcon(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
+/** Content Library nav icon (issue #1399) — a folder/box glyph, distinct from
+ * the flat-stack `LibraryIcon` above (the Repository tab). */
+export function ContentLibraryIcon(props: SVGProps<SVGSVGElement>) {
+	return (
+		<Icon {...props}>
+			<path d="M2 4.5 L6 4.5 L7.5 6 L14 6 L14 12.5 L2 12.5 Z" />
+		</Icon>
+	);
+}
+
 /** Retention Review nav icon (issue #1481) — a clock face, evoking the grace-period countdown this screen surfaces. */
 export function RetentionIcon(props: SVGProps<SVGSVGElement>) {
 	return (

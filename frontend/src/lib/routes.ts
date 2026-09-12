@@ -19,6 +19,7 @@ export type ScreenKey =
 	| "benchmarks"
 	| "catalog"
 	| "library"
+	| "content-library"
 	| "retention"
 	| "transfer"
 	| "configuration"
@@ -66,6 +67,16 @@ export const ROUTES: RouteDef[] = [
 	{ key: "benchmarks", path: "/benchmarks", title: "Benchmarks", requiredRole: "Viewer" },
 	{ key: "catalog", path: "/catalog", title: "Download Catalog", requiredRole: "Operator", connectedOnly: true },
 	{ key: "library", path: "/library", title: "Library", requiredRole: "Viewer" },
+	// Issue #1399 (epic #1185, split from #1056): the content-library view
+	// shell — per-type views over one content library's items, search/sort
+	// across the full item set, deep-linkable via `?library=&type=&q=&sort=`.
+	// Distinct from `library` above (the flat depot-catalog Repository tab,
+	// out of scope for the content-library surface per its own header
+	// comment) — this is the VCSP-backed content-library surface #37/#1391/
+	// #1396 built the model+registry+item layers for. Viewer+ read; no
+	// mutating actions exist on this screen yet (upload is #1826, folder
+	// organize is #1422 — both Operator+ gated on their own controllers).
+	{ key: "content-library", path: "/content-library", title: "Content Library", requiredRole: "Viewer" },
 	// Issue #1481 (epic #1182): grace/pending-purge review, pin/purge-now, and
 	// the orphan/out-of-scope review list, wired against #1453's retention API.
 	// Viewer+ can read this screen; pin/purge-now/delete are Admin-only gates
