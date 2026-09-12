@@ -257,106 +257,111 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 	public async Task WriteAsync_CancelledMidWrite_LeavesPriorLibraryTreeCompletelyUntouched()
 	{
 		ContentLibrary library = CreateLibrary();
-		VcspContentLibraryWriter writer = CreateWriter();
 
-		await writer.WriteAsync(library, [MakeItem(Guid.NewGuid(), directoryName: "existing-item")], CancellationToken.None);
+		await CreateWriter().WriteAsync(library, [MakeItem(Guid.NewGuid(), directoryName: "existing-item")], CancellationToken.None);
 		string itemsJsonPath = Path.Combine(library.DiskPath, "items.json");
 		string libJsonPath = Path.Combine(library.DiskPath, "lib.json");
 		byte[] itemsBefore = File.ReadAllBytes(itemsJsonPath);
 		byte[] libBefore = File.ReadAllBytes(libJsonPath);
 
-		// A wide brand-new item set: per the write-order guarantee under test, the
-		// writer emits every item's own item.json -- one temp-file-then-rename per
-		// item -- strictly before it ever touches items.json/lib.json. Watching for
-		// the FIRST new item.json to land and cancelling the instant it does
-		// guarantees the cancellation fires genuinely mid-write (some item.json files
-		// committed, items.json/lib.json never reached), while the ~299 items still
-		// queued behind it give the writer's next per-item
-		// ThrowIfCancellationRequested a wide, reliable window to observe the
-		// cancellation before the loop could otherwise finish.
+		// A wide brand-new item set gives the writer plenty of items still queued
+		// behind the one this test cancels on, so a bug that let the loop run past
+		// the cancellation would have a wide, reliable window to be caught.
 		const int newItemCount = 300;
 		List<ContentLibraryItemWrite> newItems = Enumerable.Range(0, newItemCount)
 			.Select(i => MakeItem(Guid.NewGuid(), directoryName: $"new-item-{i:D4}"))
 			.ToList();
 		string firstNewItemJson = Path.Combine(library.DiskPath, "new-item-0000", "item.json");
+		string secondNewItemJson = Path.Combine(library.DiskPath, "new-item-0001", "item.json");
 
-		// Issue #1811: the original approach polled File.Exists from a Task.Run/
-		// Task.Delay(1) loop -- both scheduled on the SAME thread pool the writer's
-		// own async I/O awaits compete for, so under CI contention the poll could be
-		// starved long enough that the writer finished all 300 items before the loop
-		// ever got scheduled to observe the first one, and cancellation never fired
-		// mid-write (flaked twice on unrelated PRs the same night). A
-		// FileSystemWatcher would remove the polling interval, but this sandbox's
-		// inotify instance quota is a genuinely shared, exhaustible resource across
-		// concurrently running agents/processes, so a watcher-based fix trades one
-		// flake for another failure mode entirely outside this test's control.
-		// Instead: poll from a dedicated, non-pooled <see cref="Thread"/> (never
-		// queued behind the writer's own async continuations) with no sleep at all --
-		// a tight spin loop is the cheapest way to guarantee this watcher thread is
-		// never starved relative to the writer's own progress, and it holds no OS
-		// watch handle. The outcome asserted below is still an exception KIND
-		// (OperationCanceledException) and file CONTENTS, never elapsed time.
+		// Issue #1691: earlier revisions raced a filesystem poll (first a
+		// Task.Run/Task.Delay(1) loop -- issue #1811 -- then a dedicated spin-loop
+		// Thread) against the writer's own progress to catch the cancellation
+		// mid-write, and needed a teardown `finally` to keep a failed poll from
+		// leaking that thread (issue #1878). Both problems existed only because the
+		// test had no way to be told directly when the writer's write reached a
+		// chosen point. The onTempFileWritten seam removes the race entirely: it
+		// fires strictly BEFORE the rename, with the temp file already on disk, so
+		// cancelling from inside it is a genuine, deterministic mid-write
+		// cancellation on EVERY run -- never a wall-clock race, and nothing to leak
+		// or tear down. Cancelling on the SECOND new item (rather than the first)
+		// additionally leaves one full new item.json committed beforehand, proving
+		// real per-item writes happened before the interruption.
 		using CancellationTokenSource cts = new();
-		using ManualResetEventSlim firstItemWritten = new(initialState: false);
-		using ManualResetEventSlim stopPolling = new(initialState: false);
-		Thread poller = new(() =>
+		VcspContentLibraryWriter writer = new(_clock, onTempFileWritten: targetPath =>
 		{
-			while (!File.Exists(firstNewItemJson))
+			if (targetPath == secondNewItemJson)
 			{
-				if (stopPolling.IsSet)
-				{
-					return;
-				}
-
-				Thread.SpinWait(1000);
+				cts.Cancel();
 			}
-
-			firstItemWritten.Set();
-		})
-		{
-			IsBackground = true,
-		};
-		poller.Start();
-
-		Task cancelOnFirstItemWritten = Task.Run(() =>
-		{
-			firstItemWritten.Wait();
-			cts.Cancel();
 		});
 
 		// Simulates a writer killed mid-run: a cancellation that fires after some
 		// item.json files are committed but before items.json/lib.json are ever
-		// touched must leave both of those documents byte-for-byte the same file they
-		// were before this call, and must leave no partial temp artifact behind for
-		// any document the cancellation interrupted.
-		try
-		{
-			await Assert.ThrowsAnyAsync<OperationCanceledException>(
-				() => writer.WriteAsync(library, newItems, cts.Token));
-			await cancelOnFirstItemWritten;
-		}
-		finally
-		{
-			// PR #1832 round-2 note N2c. Without this finally, a WriteAsync that threw
-			// some OTHER exception before the first item.json appeared made the assert
-			// above throw first, so the dedicated spin-loop poller was never told to
-			// stop -- it pinned one core for the remainder of the process, on a host
-			// docs/process/testing.md documents as shared with concurrent agents, and
-			// went on reading ManualResetEventSlims the `using` declarations above were
-			// meanwhile disposing. Releasing the poller, unblocking the waiter behind
-			// firstItemWritten and joining the thread makes teardown unconditional:
-			// reachable only when the test is already failing, which is exactly when a
-			// leaked hot thread is least welcome.
-			stopPolling.Set();
-			firstItemWritten.Set();
-			poller.Join(TimeSpan.FromSeconds(5));
-			await cancelOnFirstItemWritten;
-		}
+		// touched must leave both of those documents byte-for-byte the same file
+		// they were before this call, and must leave no partial temp artifact behind
+		// for any document the cancellation interrupted.
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(
+			() => writer.WriteAsync(library, newItems, cts.Token));
 
 		Assert.True(File.Exists(firstNewItemJson), "the cancellation fired before any new item.json was written -- this run did not exercise a mid-write cancellation");
 		Assert.Equal(itemsBefore, File.ReadAllBytes(itemsJsonPath));
 		Assert.Equal(libBefore, File.ReadAllBytes(libJsonPath));
 		Assert.Empty(Directory.GetFiles(library.DiskPath, "*.tmp", SearchOption.AllDirectories));
+	}
+
+	[Fact]
+	public async Task WriteAsync_WritesEveryItemJsonBeforeItemsJson_AndItemsJsonBeforeLibJson()
+	{
+		ContentLibrary library = CreateLibrary();
+		List<string> writeOrder = [];
+		VcspContentLibraryWriter writer = new(_clock, onDocumentWritten: writeOrder.Add);
+
+		// Issue #1680 gap 2: the write-order guarantee IContentLibraryWriter's own XML
+		// docs promise ("a subscriber never observes a bumped lib.json.version before
+		// the documents it points at exist") was asserted nowhere -- reordering the
+		// three WriteJsonAtomicAsync calls in WriteAsync would have been caught by
+		// nothing. The onDocumentWritten seam fires in the writer's own write order,
+		// so recording it directly proves the order without timing or polling.
+		await writer.WriteAsync(
+			library,
+			[MakeItem(Guid.NewGuid(), directoryName: "item-a"), MakeItem(Guid.NewGuid(), directoryName: "item-b")],
+			CancellationToken.None);
+
+		Assert.Equal(["item-a", "item-b", "items.json", "lib.json"], writeOrder);
+	}
+
+	[Fact]
+	public async Task WriteAsync_ItemHrefsAndSelfHref_PercentEncodeNamesThatNeedIt()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		// Issue #1680 gap 1: the only href test ("my-item"/"disk.vmdk") needs no
+		// escaping at all, so removing Uri.EscapeDataString from the href
+		// construction entirely would not fail a single existing test. A space, a
+		// '+', a '%' and a non-ASCII character each force real percent-encoding.
+		const string directoryName = "my item+50%é";
+		const string fileName = "a b+c%d é.vmdk";
+
+		await writer.WriteAsync(
+			library,
+			[MakeItem(Guid.NewGuid(), directoryName: directoryName, fileName: fileName)],
+			CancellationToken.None);
+
+		ItemJson item = ReadItems(library).Items.Single();
+		string expectedDirectorySegment = Uri.EscapeDataString(directoryName);
+		string expectedFileSegment = Uri.EscapeDataString(fileName);
+		Assert.Equal($"{expectedDirectorySegment}/item.json", item.SelfHref);
+		string href = Assert.Single(item.Files.Single().Hrefs);
+		Assert.Equal($"{expectedDirectorySegment}/{expectedFileSegment}", href);
+
+		// Percent-decoding the hrefs back must resolve to the REAL on-disk names --
+		// a literal Path.Combine of the encoded segments (as the pre-existing ASCII
+		// test does) is only a valid resolution for names that need no encoding.
+		string decodedSelfHrefPath = Uri.UnescapeDataString(item.SelfHref).Replace('/', Path.DirectorySeparatorChar);
+		Assert.True(File.Exists(Path.Combine(library.DiskPath, decodedSelfHrefPath)));
+		string decodedHrefPath = Uri.UnescapeDataString(href).Replace('/', Path.DirectorySeparatorChar);
+		Assert.Equal(Path.Combine(directoryName, fileName), decodedHrefPath);
 	}
 
 	[Fact]
@@ -374,8 +379,15 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 			.ToList();
 		await writer.WriteAsync(library, items, CancellationToken.None);
 
+		int expectedItemCount = items.Count;
 		using CancellationTokenSource stop = new();
 		int readCount = 0;
+		// Issue #1680 gap 3: asserting only readCount > 0 lets a single read landing
+		// entirely before the rewrites even begin satisfy the test -- it never proves
+		// any read observed a FULL document. Every parsed read below must carry the
+		// full, unchanged item count: a torn rename that dropped or truncated part of
+		// the item array would surface here even though the bytes still happen to
+		// parse as valid JSON.
 		Task readerTask = Task.Run(async () =>
 		{
 			while (!stop.IsCancellationRequested)
@@ -385,11 +397,14 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 				// File.Move's rename is the only thing standing between "always valid"
 				// and this throwing.
 				using JsonDocument document = JsonDocument.Parse(bytes);
+				int observedItemCount = document.RootElement.GetProperty("items").GetArrayLength();
+				Assert.Equal(expectedItemCount, observedItemCount);
 				Interlocked.Increment(ref readCount);
 			}
 		});
 
-		for (int rewrite = 0; rewrite < 25; rewrite++)
+		const int rewriteCount = 25;
+		for (int rewrite = 0; rewrite < rewriteCount; rewrite++)
 		{
 			List<ContentLibraryItemWrite> mutated = items
 				.Select((item, index) => index == rewrite % items.Count
@@ -402,7 +417,10 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 
 		stop.Cancel();
 		await readerTask;
-		Assert.True(readCount > 0, "the reader loop never got a chance to run");
+		// A meaningfully large read count, not merely > 0: proves the reader had a
+		// real chance to interleave with the 25 rewrites above rather than getting one
+		// lucky read in edgewise.
+		Assert.True(readCount >= rewriteCount, $"the reader loop only completed {readCount} reads against {rewriteCount} rewrites -- too few to meaningfully exercise interleaving");
 	}
 
 	// ---- input validation ---------------------------------------------------------
