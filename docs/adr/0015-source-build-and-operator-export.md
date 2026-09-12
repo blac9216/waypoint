@@ -22,6 +22,40 @@ content an authorized operator needs, then move a functional appliance and selec
 managed content across an air gap. Avoiding project redistribution must not turn into
 an appliance that loses required tooling when transferred.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #431, #432. Issue #431 requested recording "that
+Waypoint distributes source/build definitions while operators build, provision,
+export, and transfer their own appliance images and required tooling"; PR #432 is the
+ADR's own originating commit. Neither records a separate comparison session — the
+drivers below are this ADR's own original Context text, restated as a bullet list:_
+
+- Waypoint is a public source repository, and some tools/content required by
+  operators are downloadable only under the operator's own account or entitlement, so
+  the project cannot publish them or completed images containing them (Context).
+- The product's central purpose is nevertheless to acquire and manage the software and
+  content an authorized operator needs, then move a functional appliance and selected
+  managed content across an air gap (Context).
+- Avoiding project redistribution must not turn into an appliance that loses required
+  tooling when transferred (Context).
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #431, #432, and ADR-0001 (Amends: above). The sources
+do not record a named alternative distribution model beside the one this ADR
+supersedes — ADR-0001's original v1 delivery, which this ADR's own header and opening
+paragraph identify as the packaging portion being replaced:_
+
+- **Project-supplied `docker save` archive of all images** (ADR-0001's original v1
+  air-gap delivery) — superseded for this purpose. A project-built and
+  project-distributed image cannot contain entitlement-restricted tools or content
+  that the project has no right to redistribute, so this option cannot satisfy the
+  entitlement driver above.
+- **Public source and build definitions; operators build, provision entitled tools
+  through Waypoint, and export their own images** (chosen). Keeps entitled material
+  out of anything the project publishes, while the operator-built appliance still
+  acquires and carries everything a receiving appliance needs across the air gap.
+
 ## Decision
 
 1. **The project publishes source and build definitions, not completed container
