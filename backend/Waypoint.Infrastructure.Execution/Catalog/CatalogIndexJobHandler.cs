@@ -368,16 +368,20 @@ public sealed partial class CatalogIndexJobHandler : IJobHandler
 			_ => null,
 		};
 
-		if (result is null && value is not null && _logger.IsEnabled(LogLevel.Debug))
+		if (result is null && value is not null)
 		{
-			LogSizeDropped(_logger, value.ToString() ?? string.Empty, value.GetType().Name);
+			// The LoggerMessage-generated method itself guards on IsEnabled and defers
+			// formatting -- passing `value` and its `Type` directly (rather than
+			// pre-computing ToString()/Name here, CA1873's own complaint) means neither
+			// is evaluated at all when debug logging is disabled.
+			LogSizeDropped(_logger, value, value.GetType());
 		}
 
 		return result;
 	}
 
 	[LoggerMessage(Level = LogLevel.Debug, Message = "catalog-index: SizeBytes value '{Value}' ({Type}) could not be parsed to a long; size dropped.")]
-	private static partial void LogSizeDropped(ILogger logger, string value, string type);
+	private static partial void LogSizeDropped(ILogger logger, object value, Type type);
 
 	private static bool IsIntegralInLongRange(double value)
 	{
