@@ -397,6 +397,43 @@ public sealed class RetentionControllerTests : IAsyncLifetime, IDisposable
 		Assert.Equal("keep for audit", row.GetProperty("pin_note").GetString());
 	}
 
+	/// <summary>
+	/// Issue #1962 AC: <c>grace_ends_at</c> equals <c>grace_started_at</c> plus the
+	/// resolved grace period (the <c>default</c> scope policy's <c>GracePeriodDays</c>,
+	/// the SAME authoritative source <c>RetentionSweepService</c>'s auto-prune pass
+	/// reads) for a grace-state row, and is absent for a pinned row.
+	/// </summary>
+	[Fact]
+	public async Task ListState_GraceRow_ExposesGraceEndsAtFromResolvedPolicy_AbsentForPinnedRow()
+	{
+		IRetentionPolicyRepository policies = _factory.Services.GetRequiredService<IRetentionPolicyRepository>();
+		RetentionPolicy defaultPolicy = (await policies.GetByScopeKeyAsync(RetentionPolicyScopes.Default, CancellationToken.None))!;
+
+		Guid graceArtifact = await InsertDepotArtifactAsync("grace-ends-at/grace.iso");
+		Guid graceId = await TrackAsync(graceArtifact);
+		RetainedContentStateRepository states = new(_fixture.ConnectionString);
+		await states.TransitionAsync(graceId, RetainedContentStates.Grace, CancellationToken.None);
+
+		Guid pinnedArtifact = await InsertDepotArtifactAsync("grace-ends-at/pinned.iso");
+		Guid pinnedId = await TrackAsync(pinnedArtifact);
+		await states.PinAsync(pinnedId, "someone", null, CancellationToken.None);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, "/api/v1/download-retention/state", "Viewer", null);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+		JsonElement graceRow = body.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetGuid() == graceId);
+		DateTimeOffset graceStartedAt = graceRow.GetProperty("grace_started_at").GetDateTimeOffset();
+		DateTimeOffset expectedGraceEndsAt = graceStartedAt + TimeSpan.FromDays(defaultPolicy.GracePeriodDays);
+		Assert.Equal(expectedGraceEndsAt, graceRow.GetProperty("grace_ends_at").GetDateTimeOffset());
+
+		// WaypointJsonOptions.Apply sets DefaultIgnoreCondition.WhenWritingNull, so a
+		// null grace_ends_at is OMITTED entirely, not present-with-null -- matching
+		// this field's "absent/null otherwise" contract literally.
+		JsonElement pinnedRow = body.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetGuid() == pinnedId);
+		Assert.False(pinnedRow.TryGetProperty("grace_ends_at", out _));
+	}
+
 	/// <summary>F1: the optional <c>state</c> query filter narrows to exactly one of the three ADR-0034 states.</summary>
 	[Fact]
 	public async Task ListState_FilterByState_ReturnsOnlyThatState()

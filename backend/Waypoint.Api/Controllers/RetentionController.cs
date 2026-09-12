@@ -137,8 +137,14 @@ public sealed class RetentionController : ControllerBase
 		});
 
 		Response.Headers["X-Total-Count"] = all.Count.ToString(CultureInfo.InvariantCulture);
-		IEnumerable<RetainedContentState> pageItems = all.Skip(page.Offset).Take(page.Limit);
-		return Ok(pageItems.Select(RetainedContentStateResponse.FromDomain).ToArray());
+		RetainedContentState[] pageItems = all.Skip(page.Offset).Take(page.Limit).ToArray();
+
+		List<RetainedContentStateResponse> responses = new(pageItems.Length);
+		foreach (RetainedContentState item in pageItems)
+		{
+			responses.Add(await ToResponseAsync(item, cancellationToken).ConfigureAwait(false));
+		}
+		return Ok(responses);
 	}
 
 	/// <summary>
@@ -170,7 +176,7 @@ public sealed class RetentionController : ControllerBase
 		}
 
 		RetainedContentState updated = (await _states.GetAsync(id, cancellationToken).ConfigureAwait(false))!;
-		return Ok(RetainedContentStateResponse.FromDomain(updated));
+		return Ok(await ToResponseAsync(updated, cancellationToken).ConfigureAwait(false));
 	}
 
 	/// <summary>
@@ -204,7 +210,7 @@ public sealed class RetentionController : ControllerBase
 		}
 
 		RetainedContentState updated = (await _states.GetAsync(id, cancellationToken).ConfigureAwait(false))!;
-		return Ok(RetainedContentStateResponse.FromDomain(updated));
+		return Ok(await ToResponseAsync(updated, cancellationToken).ConfigureAwait(false));
 	}
 
 	/// <summary>
@@ -286,6 +292,42 @@ public sealed class RetentionController : ControllerBase
 		Guid id = await _policies.UpsertAsync(scopeKey, basis.GracePeriodDays, basis.GraceMaxRefreshes, dial, cancellationToken).ConfigureAwait(false);
 		RetentionPolicy updated = (await _policies.GetAsync(id, cancellationToken).ConfigureAwait(false))!;
 		return Ok(new RetentionDialResponse(updated.ScopeKey, updated.ManualDownloadDialDefault));
+	}
+
+	/// <summary>
+	/// Issue #1962: projects <paramref name="state"/> to its response shape with
+	/// <c>grace_ends_at</c> resolved from the SAME authoritative grace-period source
+	/// the retention purge scheduler itself reads (<see cref="ResolveGracePeriodDaysAsync"/>),
+	/// never a client-side guess or a hardcoded default.
+	/// </summary>
+	private async Task<RetainedContentStateResponse> ToResponseAsync(RetainedContentState state, CancellationToken cancellationToken)
+	{
+		int? gracePeriodDays = await ResolveGracePeriodDaysAsync(state, cancellationToken).ConfigureAwait(false);
+		return RetainedContentStateResponse.FromDomain(state, gracePeriodDays);
+	}
+
+	/// <summary>
+	/// Issue #1962: mirrors <c>RetentionSweepService.RunSweepAsync</c>'s own auto-prune-
+	/// pass policy resolution for a grace-state row -- an explicit <c>policy_id</c> when
+	/// the row carries one, else the <see cref="RetentionPolicyScopes.Default"/> scope's
+	/// policy -- so <c>grace_ends_at</c> can never disagree with the window the scheduler
+	/// actually purges against. Short-circuits to null for a row that is not currently
+	/// in <c>grace</c> (no grace period is "ending" at all) or one with no
+	/// <see cref="RetainedContentState.GraceStartedAt"/> yet, without an extra policy
+	/// lookup neither case needs.
+	/// </summary>
+	private async Task<int?> ResolveGracePeriodDaysAsync(RetainedContentState state, CancellationToken cancellationToken)
+	{
+		if (!string.Equals(state.State, RetainedContentStates.Grace, StringComparison.Ordinal) || state.GraceStartedAt is null)
+		{
+			return null;
+		}
+
+		RetentionPolicy? policy = state.PolicyId is { } policyId
+			? await _policies.GetAsync(policyId, cancellationToken).ConfigureAwait(false)
+			: await _policies.GetByScopeKeyAsync(RetentionPolicyScopes.Default, cancellationToken).ConfigureAwait(false);
+
+		return policy?.GracePeriodDays;
 	}
 
 	/// <summary>Resolves <paramref name="scopeKey"/>'s policy, falling back to <see cref="RetentionPolicyScopes.Default"/> -- migration 0107 seeds that row unconditionally, so an unresolvable Default is a server-side integrity problem.</summary>
