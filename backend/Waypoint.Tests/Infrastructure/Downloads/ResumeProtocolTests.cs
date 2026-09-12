@@ -172,6 +172,8 @@ public sealed class ResumeProtocolTests
 			Task.FromResult<(IReadOnlyList<DepotArtifact>, long)>(([Row], 1));
 
 		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) => throw new NotSupportedException();
 	}
 
 	/// <summary>

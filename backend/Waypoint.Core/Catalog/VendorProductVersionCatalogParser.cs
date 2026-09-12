@@ -110,6 +110,22 @@ public static class VendorProductVersionCatalogParser
 
 	private static DepotArtifactUpsert? TryParseBinary(JsonElement binary, string component, string? version, string? bundleId)
 	{
+		// Issue #797: a binary entry with no productVersion never has a real
+		// product+version identity to index under, whatever component key it
+		// happens to sit under -- component alone (an object property name, never
+		// null itself) is not enough. The live-stack defect this guards against
+		// was a row keyed by the vendor catalog DOCUMENT's own depot path
+		// ("PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json")
+		// with NULL product/version; that document is never one of this method's
+		// own component/entry/bundle/binary shapes, so the guard here is
+		// deliberately the general "no version, no index" rule rather than a
+		// special case naming that one path -- any future self-referential or
+		// metadata-only entry the vendor catalog adds is refused the same way.
+		if (string.IsNullOrWhiteSpace(version))
+		{
+			return null;
+		}
+
 		if (!binary.TryGetProperty("fileName", out JsonElement fileNameElement) || fileNameElement.ValueKind != JsonValueKind.String)
 		{
 			return null;

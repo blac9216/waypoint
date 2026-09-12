@@ -51,6 +51,8 @@ public sealed class SubscriptionEvaluationJobHandlerTests
 
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken)
 			=> Task.FromResult<(IReadOnlyList<DepotArtifact>, long)>((artifacts, artifacts.Count));
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
 	private sealed class FakeStateRepository : ISubscriptionEvaluationStateRepository

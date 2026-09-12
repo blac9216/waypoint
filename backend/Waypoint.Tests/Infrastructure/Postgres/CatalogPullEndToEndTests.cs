@@ -313,6 +313,9 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, Waypoint.Core.Pagination.PageRequest page, CancellationToken cancellationToken) =>
 			_inner.ListAsync(filter, page, cancellationToken);
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) =>
+			_inner.SupersedeCatalogDocumentRowAsync(catalogDocumentRelativePath, cancellationToken);
 	}
 
 	private async Task<Guid> SeedActivationCodeCredentialAsync(string secret)

@@ -97,6 +97,30 @@ public interface IDepotArtifactRepository
 	/// creates one at the TO identity itself.
 	/// </summary>
 	Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #797 reconciliation: marks superseded (never deletes -- the same
+	/// never-auto-remove policy <see cref="RekeyManyAsync"/>'s own doc comment
+	/// states, structurally enforced by
+	/// <c>ReviewListServiceTests.Interface_HasNoDeleteOrRemoveOrPurgeMethod</c>
+	/// against this interface) any non-superseded row at
+	/// <paramref name="catalogDocumentRelativePath"/> that ALSO has no product and
+	/// no version -- the exact shape a pre-#797 parser bug left on a live stack
+	/// after a connected pull: a row for the vendor catalog document itself
+	/// (<c>ManagedToolOptions.ProductVersionCatalogPath</c>, e.g.
+	/// <c>PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json</c>)
+	/// with NULL product and NULL version. The product+version guard on top of the
+	/// path match is deliberate: it is what keeps this call from ever touching a
+	/// legitimate row a future catalog entry might someday hold at that same
+	/// relative path once it carries a real identity, and from ever superseding
+	/// the wholly-different NULL-product rows <c>CatalogIndexJobHandler</c>'s local
+	/// re-index always writes for every ordinary artifact it walks (that handler's
+	/// NULL product/version is a documented, permanent shape for a DIFFERENT
+	/// identity space, not the bug this reconciles). A no-op, not an error, when no
+	/// such row exists -- the common case on every stack that never hit the bug.
+	/// Returns <c>true</c> when a row was superseded.
+	/// </summary>
+	Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken);
 }
 
 /// <summary>

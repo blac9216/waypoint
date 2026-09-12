@@ -241,6 +241,12 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 		return Task.FromResult(0);
 	}
 
+	public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken)
+	{
+		_ = (catalogDocumentRelativePath, cancellationToken);
+		return Task.FromResult(false);
+	}
+
 	public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
 	{
 		_ = cancellationToken;

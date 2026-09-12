@@ -120,6 +120,16 @@ const KNOWN_PRODUCT_NAMES: Record<string, string> = {
 };
 
 /**
+ * Issue #797: the grouping key a malformed row (missing product identity --
+ * the backend defect this issue also fixes) falls back to, rather than
+ * grouping under a literal `null`/`undefined` map key that would crash
+ * `humanizeProductKey`'s split on it below. `friendlyProductName` maps this
+ * key straight to a human label instead of running it through that split.
+ */
+const UNKNOWN_PRODUCT_KEY = "__unknown__";
+const UNKNOWN_PRODUCT_LABEL = "Unknown";
+
+/**
  * `SUPERVISOR_SERVICE_ABC` -> "Supervisor Service ABC"; short (<=3 char)
  * segments (version numbers, acronyms) are upper-cased rather than
  * title-cased.
@@ -149,6 +159,9 @@ function humanizeProductKey(key: string): string {
 }
 
 export function friendlyProductName(productKey: string): string {
+	if (productKey === UNKNOWN_PRODUCT_KEY) {
+		return UNKNOWN_PRODUCT_LABEL;
+	}
 	return KNOWN_PRODUCT_NAMES[productKey] ?? humanizeProductKey(productKey);
 }
 
@@ -182,11 +195,12 @@ export interface ProductGroup {
 export function groupArtifactsByProduct(artifacts: CatalogArtifact[]): ProductGroup[] {
 	const byKey = new Map<string, CatalogArtifact[]>();
 	for (const artifact of artifacts) {
-		const list = byKey.get(artifact.product);
+		const key = artifact.product || UNKNOWN_PRODUCT_KEY;
+		const list = byKey.get(key);
 		if (list) {
 			list.push(artifact);
 		} else {
-			byKey.set(artifact.product, [artifact]);
+			byKey.set(key, [artifact]);
 		}
 	}
 
@@ -329,13 +343,23 @@ export function fetchCatalogArtifacts(
  * case-insensitive substring) but is now applied by the caller against
  * in-memory state rather than re-walking the whole catalog on every
  * keystroke.
+ *
+ * Issue #797: `name`/`sha256` are guarded null-safe here — a malformed row
+ * (the backend defect this issue also fixes; see
+ * `VendorProductVersionCatalogParser`) previously reached this filter with a
+ * missing field and threw on `.toLowerCase()` mid-keystroke, degrading the
+ * whole screen to "Could not load the download catalog." A row missing
+ * either field simply never matches a non-empty search term rather than
+ * crashing the filter for every other row alongside it.
  */
 export function filterArtifactsBySearch(artifacts: CatalogArtifact[], search?: string): CatalogArtifact[] {
 	const trimmed = search?.trim().toLowerCase();
 	if (!trimmed) {
 		return artifacts;
 	}
-	return artifacts.filter((a) => a.name.toLowerCase().includes(trimmed) || a.sha256.toLowerCase().includes(trimmed));
+	return artifacts.filter(
+		(a) => (a.name ?? "").toLowerCase().includes(trimmed) || (a.sha256 ?? "").toLowerCase().includes(trimmed),
+	);
 }
 
 export interface CatalogSyncResponse {
