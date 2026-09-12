@@ -24,6 +24,15 @@ export interface RetainedContentState {
 	depot_artifact_id: string;
 	state: string;
 	grace_started_at: string | null;
+	/**
+	 * Issue #1962: absolute timestamp at which this row's grace period ends
+	 * (`grace_started_at` + the resolved grace-period length — the SAME source
+	 * the purge scheduler uses). Present only for `grace`-state rows with a
+	 * resolvable policy; null/absent for `pending-purge`/`pinned` and any row
+	 * with no resolvable policy. This is what makes a true time-remaining
+	 * countdown possible.
+	 */
+	grace_ends_at: string | null;
 	pinned_by: string | null;
 	pinned_at: string | null;
 	pin_note: string | null;
@@ -90,29 +99,37 @@ export function deleteReviewListEntry(entry: ReviewListEntry, reason?: string): 
 }
 
 /**
- * Elapsed time since `grace_started_at`, rendered as this screen's
- * "countdown" (e.g. "in grace 3d 4h"). No response this screen can fetch
- * exposes the resolved grace-period length (`GET dial` returns only the
- * manual-download dial, not `RetentionPolicy.GracePeriodDays`), so a true
- * time-remaining cannot be computed; elapsed-since-entry is the honest
- * countdown this contract supports today.
+ * True time-remaining countdown until this row's grace period ends, computed
+ * from `grace_ends_at` (issue #1962: absolute end timestamp = grace start + the
+ * resolved grace-period length, the SAME source the purge scheduler uses).
+ * Rendered as e.g. "3d 4h left". When `grace_ends_at` is null/absent (a
+ * `pending-purge`/`pinned` row, or any row with no resolvable policy) there is
+ * nothing to count down to, so returns "—". When the end is already in the past
+ * (or now), the purge is due, so returns "past due" rather than a negative
+ * value.
  */
-export function graceElapsedLabel(graceStartedAt: string | null, now: Date = new Date()): string {
-	if (!graceStartedAt) {
+export function graceCountdownLabel(graceEndsAt: string | null, now: Date = new Date()): string {
+	if (!graceEndsAt) {
 		return "—";
 	}
-	const started = new Date(graceStartedAt).getTime();
-	const elapsedMs = Math.max(0, now.getTime() - started);
-	const totalHours = Math.floor(elapsedMs / (1000 * 60 * 60));
+	const ends = new Date(graceEndsAt).getTime();
+	if (!Number.isFinite(ends)) {
+		return "—";
+	}
+	const remainingMs = ends - now.getTime();
+	if (remainingMs <= 0) {
+		return "past due";
+	}
+	const totalHours = Math.floor(remainingMs / (1000 * 60 * 60));
 	const days = Math.floor(totalHours / 24);
 	const hours = totalHours % 24;
 	if (days === 0 && hours === 0) {
-		return "in grace <1h";
+		return "<1h left";
 	}
 	if (days === 0) {
-		return `in grace ${hours}h`;
+		return `${hours}h left`;
 	}
-	return `in grace ${days}d ${hours}h`;
+	return `${days}d ${hours}h left`;
 }
 
 /** One derived, client-side alert row (see this file's header comment). */

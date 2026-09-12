@@ -6,8 +6,9 @@
  *   1. Alerts    — grace-entry / review-list-addition, derived client-side
  *                  (see retention.ts's header comment for why).
  *   2. Grace list — imminent-purge display: grace/pending-purge content, with
- *                  a live-elapsed "countdown" and pin / purge-now actions.
- *                  Pinning removes the row from this list (it now reports
+ *                  a true time-remaining countdown (computed from #1962's
+ *                  `grace_ends_at`) and pin / purge-now actions. Pinning
+ *                  removes the row from this list (it now reports
  *                  `state: "pinned"`, which the fetch below excludes).
  *   3. Review list — orphan/out-of-scope content; delete is the only
  *                  mutating action available here (no bulk auto-action).
@@ -26,7 +27,7 @@ import {
 	fetchReviewList,
 	fetchRetentionState,
 	formatBytes,
-	graceElapsedLabel,
+	graceCountdownLabel,
 	pinContent,
 	purgeNow,
 	type RetainedContentState,
@@ -159,7 +160,7 @@ export function RetentionReviewScreen() {
 								<td>
 									<span className={`retention-badge retention-badge--${item.state}`}>{item.state}</span>
 								</td>
-								<td className="mono">{graceElapsedLabel(item.grace_started_at)}</td>
+								<td className="mono">{graceCountdownLabel(item.grace_ends_at)}</td>
 								<td className="retention-col-actions">
 									<button
 										type="button"

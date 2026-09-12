@@ -11,12 +11,19 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { RetentionReviewScreen } from "./RetentionReviewScreen";
+import { graceCountdownLabel } from "./retention";
+
+// #1962: `grace`-state rows carry `grace_ends_at` (absolute end timestamp), so
+// the COUNTDOWN column shows a true time-remaining. Compute a fixed-offset
+// future end so the rendered countdown is deterministic ("3d 5h left").
+const GRACE_ENDS_AT = new Date(Date.now() + (3 * 24 + 5) * 60 * 60 * 1000).toISOString();
 
 const GRACE_ITEM = {
 	id: "state-1",
 	depot_artifact_id: "artifact-1",
 	state: "grace",
 	grace_started_at: "2026-09-10T00:00:00Z",
+	grace_ends_at: GRACE_ENDS_AT,
 	pinned_by: null,
 	pinned_at: null,
 	pin_note: null,
@@ -30,6 +37,9 @@ const PENDING_PURGE_ITEM = {
 	id: "state-2",
 	depot_artifact_id: "artifact-2",
 	state: "pending-purge",
+	// #1962: `grace_ends_at` is null for non-grace rows — the countdown cell
+	// then has nothing to count down to.
+	grace_ends_at: null,
 };
 
 const REVIEW_ENTRY = {
@@ -99,13 +109,18 @@ describe("RetentionReviewScreen", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders grace/pending-purge content with a countdown, from GET /download-retention/state", async () => {
+	it("renders grace/pending-purge content with a time-remaining countdown from grace_ends_at, from GET /download-retention/state", async () => {
 		installFetchMock();
 		renderWithProviders();
 
 		await waitFor(() => expect(screen.getByText("artifact-1")).toBeInTheDocument());
 		expect(screen.getByText("artifact-2")).toBeInTheDocument();
-		expect(screen.getAllByText(/in grace/).length).toBeGreaterThan(0);
+		// Grace row: true time-remaining computed from `grace_ends_at`.
+		expect(screen.getByText(/\d+d \d+h left/)).toBeInTheDocument();
+		// Non-grace row (pending-purge, `grace_ends_at: null`): nothing to count down.
+		const pendingRow = screen.getByText("artifact-2").closest("tr");
+		expect(pendingRow).not.toBeNull();
+		expect(pendingRow!.textContent).toContain("—");
 	});
 
 	it("pinning removes the item from the grace/pending-purge list", async () => {
@@ -199,5 +214,27 @@ describe("RetentionReviewScreen", () => {
 		const pinButton = screen.getAllByText("Pin")[0] as HTMLButtonElement;
 		expect(pinButton.disabled).toBe(true);
 		expect(pinButton.title).toMatch(/Admin/);
+	});
+});
+
+describe("graceCountdownLabel", () => {
+	const NOW = new Date("2026-09-12T00:00:00Z");
+
+	it("computes true time-remaining from grace_ends_at (#1962)", () => {
+		// 3 days, 4 hours ahead of NOW.
+		expect(graceCountdownLabel("2026-09-15T04:00:00Z", NOW)).toBe("3d 4h left");
+		// Under a day.
+		expect(graceCountdownLabel("2026-09-12T05:00:00Z", NOW)).toBe("5h left");
+		// Under an hour.
+		expect(graceCountdownLabel("2026-09-12T00:30:00Z", NOW)).toBe("<1h left");
+	});
+
+	it("reports past due when grace_ends_at is in the past or now", () => {
+		expect(graceCountdownLabel("2026-09-11T00:00:00Z", NOW)).toBe("past due");
+		expect(graceCountdownLabel("2026-09-12T00:00:00Z", NOW)).toBe("past due");
+	});
+
+	it("renders a dash when grace_ends_at is absent (non-grace row / no resolvable policy)", () => {
+		expect(graceCountdownLabel(null, NOW)).toBe("—");
 	});
 });
