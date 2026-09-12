@@ -29,6 +29,7 @@ public sealed record RetainedContentStateResponse(
 	[property: JsonPropertyName("depot_artifact_id")] Guid DepotArtifactId,
 	string State,
 	[property: JsonPropertyName("grace_started_at")] DateTimeOffset? GraceStartedAt,
+	[property: JsonPropertyName("grace_ends_at")] DateTimeOffset? GraceEndsAt,
 	[property: JsonPropertyName("pinned_by")] string? PinnedBy,
 	[property: JsonPropertyName("pinned_at")] DateTimeOffset? PinnedAt,
 	[property: JsonPropertyName("pin_note")] string? PinNote,
@@ -36,9 +37,27 @@ public sealed record RetainedContentStateResponse(
 	[property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
 	[property: JsonPropertyName("updated_at")] DateTimeOffset UpdatedAt)
 {
-	public static RetainedContentStateResponse FromDomain(RetainedContentState state) => new(
+	/// <summary>
+	/// Issue #1962: <paramref name="gracePeriodDays"/> is the SAME authoritative
+	/// grace-period length the retention purge scheduler resolves for this row (its
+	/// explicit <c>policy_id</c> when set, else the <c>default</c> scope's policy --
+	/// see <c>RetentionSweepService.RunSweepAsync</c>'s own auto-prune-pass resolution,
+	/// which this projection mirrors rather than re-derives independently). Null
+	/// whenever <paramref name="state"/> is not currently in <c>grace</c>, or the
+	/// resolved policy is unavailable -- <see cref="GraceEndsAt"/> is then also null,
+	/// matching this field's "absent/null otherwise" contract.
+	/// </summary>
+	public static RetainedContentStateResponse FromDomain(RetainedContentState state, int? gracePeriodDays) => new(
 		state.Id, state.DepotArtifactId, state.State, state.GraceStartedAt,
+		ResolveGraceEndsAt(state, gracePeriodDays),
 		state.PinnedBy, state.PinnedAt, state.PinNote, state.PurgedAt, state.CreatedAt, state.UpdatedAt);
+
+	private static DateTimeOffset? ResolveGraceEndsAt(RetainedContentState state, int? gracePeriodDays) =>
+		string.Equals(state.State, RetainedContentStates.Grace, StringComparison.Ordinal)
+			&& state.GraceStartedAt is { } graceStartedAt
+			&& gracePeriodDays is { } days
+				? graceStartedAt + TimeSpan.FromDays(days)
+				: null;
 }
 
 /// <summary>Body for <c>POST /api/v1/download-retention/{id}/pin</c>. <see cref="Note"/> is optional operator context, never secret material.</summary>
