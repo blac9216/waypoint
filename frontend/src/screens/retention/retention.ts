@@ -1,29 +1,17 @@
 /**
- * Retention review-list screen data layer (issue #1481, epic #1182). Wired
- * against `RetentionController` (issue #1453, `backend/Waypoint.Api/Controllers/RetentionController.cs`,
- * documented in `docs/reference/api-contract.md` under `/download-retention/*`):
+ * Retention review-list screen data layer (issue #1481). Wired against
+ * `RetentionController` (issue #1453, `docs/reference/api-contract.md`
+ * `/download-retention/*`): `GET state`, `POST {id}/pin`/`unpin`/`purge-now`
+ * (Admin-only), `GET`/`DELETE review-list` (delete Admin-only). Shapes below
+ * mirror `RetentionContracts.cs` field-for-field.
  *
- *   GET  /download-retention/state              — grace/pending-purge/pinned rows
- *   POST /download-retention/{id}/pin           — Admin-only
- *   POST /download-retention/{id}/unpin         — Admin-only
- *   POST /download-retention/{id}/purge-now     — Admin-only
- *   GET  /download-retention/review-list        — orphan/out-of-scope union
- *   DELETE /download-retention/review-list      — Admin-only, the sole deletion path
- *
- * The response shapes below mirror `RetainedContentStateResponse` /
- * `ReviewListEntryResponse` / `PurgeNowResponse` / `DeleteReviewListEntryResponse`
- * in `backend/Waypoint.Api/Contracts/RetentionContracts.cs` field-for-field.
- *
- * Alerts: `docs/reference/api-contract.md`'s own "Download-domain extension, planned"
- * note under `/alerts` records that the `retention_grace_approaching` /
- * `retention_grace_expired` / pinned-informational `kind` values are NOT YET SHIPPED
- * in `AlertKinds` — there is no backend alert row to fetch for them yet. Issue #1481's
- * AC4 ("new alerts — grace-entry, review-list addition — are visible on this screen")
- * is therefore satisfied by deriving alert-shaped entries client-side from the same
- * `state`/`review-list` responses this screen already fetches, not by polling a
- * `/alerts?kind=...` filter that would 400 against today's closed `kind` set. When
- * the real alert kinds ship, this derivation can be replaced by a real fetch without
- * changing the screen's rendering contract.
+ * Alerts: the api-contract's own "planned" note under `/alerts` records that
+ * `retention_grace_approaching`/`retention_grace_expired` `kind` values are
+ * NOT YET SHIPPED in `AlertKinds` — there is no backend alert row for them
+ * yet. AC4 ("grace-entry/review-list-addition alerts visible") is satisfied
+ * by deriving alert rows client-side from the state/review-list responses
+ * already fetched here, rather than polling a `kind` value that would 400
+ * against today's closed set.
  */
 
 import { apiDelete, apiGet, apiPost } from "../../lib/api";
@@ -102,14 +90,12 @@ export function deleteReviewListEntry(entry: ReviewListEntry, reason?: string): 
 }
 
 /**
- * Elapsed time since `grace_started_at`, rendered as this screen's "countdown"
- * (e.g. "in grace 3d 4h"). The API does not expose the resolved grace-period
- * length on this row or on `GET /download-retention/dial` (that endpoint returns
- * only the manual-download dial, not `RetentionPolicy.GracePeriodDays`) — so a
- * true "time remaining" cannot be computed from any response this screen can
- * fetch today. Showing elapsed time since grace entry is the honest countdown
- * this contract supports; a true remaining-time display can replace this once
- * grace-period length is exposed on the wire.
+ * Elapsed time since `grace_started_at`, rendered as this screen's
+ * "countdown" (e.g. "in grace 3d 4h"). No response this screen can fetch
+ * exposes the resolved grace-period length (`GET dial` returns only the
+ * manual-download dial, not `RetentionPolicy.GracePeriodDays`), so a true
+ * time-remaining cannot be computed; elapsed-since-entry is the honest
+ * countdown this contract supports today.
  */
 export function graceElapsedLabel(graceStartedAt: string | null, now: Date = new Date()): string {
 	if (!graceStartedAt) {
