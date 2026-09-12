@@ -126,11 +126,23 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			$"sweep-discover-{Guid.NewGuid():N}", "discover", "* * * * *", "{}", null,
 			DateTimeOffset.UtcNow.AddMinutes(-1), "alice", CancellationToken.None))!.Value;
 
+		// Issue #1685: a "* * * * *" schedule's advanced NextRunAt is the next minute
+		// boundary computed AT SweepAsync's own internal "now" -- if that internal now
+		// lands only milliseconds before a minute boundary, NextRunAt can be only
+		// milliseconds in the future. Comparing it against a fresh DateTimeOffset.UtcNow
+		// read AFTER the sweep (an independent, later clock read) races that same
+		// boundary: under full-suite load the extra scheduling delay between the sweep
+		// and the read is enough to cross it, flipping a true assertion to false with
+		// nothing wrong in the dispatcher. Anchor the comparison to a timestamp captured
+		// BEFORE the sweep runs instead -- NextRunAt is always a cron occurrence at or
+		// after the sweep's internal now, which is itself at or after this anchor, so
+		// the comparison no longer races a clock read taken after the fact.
+		DateTimeOffset beforeSweep = DateTimeOffset.UtcNow;
 		await _dispatch.SweepAsync(CancellationToken.None);
 
 		Schedule after = (await _schedules.GetAsync(id, CancellationToken.None))!;
 		Assert.NotNull(after.LastRunId);
-		Assert.True(after.NextRunAt > DateTimeOffset.UtcNow);
+		Assert.True(after.NextRunAt >= beforeSweep);
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();

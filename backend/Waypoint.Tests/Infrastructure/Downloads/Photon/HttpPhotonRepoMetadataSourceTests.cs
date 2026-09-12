@@ -32,8 +32,8 @@ namespace Waypoint.Tests.Infrastructure.Downloads.Photon;
 /// <c>photon_snapshots</c>-shaped no-repodata classification (a 404 on
 /// <c>repodata/repomd.xml</c> whose repo directory nonetheless exists, never an
 /// exception), the "directory absent upstream" classification (a 404 on both
-/// <c>repodata/repomd.xml</c> AND the repo directory itself, round-0 review finding
-/// #4), and PR #1791 round-0 review finding #2's guard: a <c>repomd.xml</c> primary
+/// <c>repodata/repomd.xml</c> AND the repo directory itself, round-1 review finding
+/// #4), and PR #1791 round-1 review finding #2's guard: a <c>repomd.xml</c> primary
 /// <c>&lt;location href&gt;</c> that traverses out of the repo directory (or otherwise
 /// fails <see cref="HttpPhotonRepoMetadataSource.IsValidPrimaryHref"/>) is refused
 /// before any fetch is attempted, including a permanent regression fixture for the
@@ -162,7 +162,7 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	}
 
 	/// <summary>
-	/// Round-0 review finding #4: a repo directory that does not exist upstream at all
+	/// Round-1 review finding #4: a repo directory that does not exist upstream at all
 	/// (404 on both repomd.xml AND the directory-existence probe) is a distinct outcome
 	/// from "photon_snapshots-shaped, no repodata" -- the caller must not index it.
 	/// </summary>
@@ -206,7 +206,7 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 		""";
 
 	/// <summary>
-	/// Permanent regression fixture for round-0 review finding #2's mutation: a
+	/// Permanent regression fixture for round-1 review finding #2's mutation: a
 	/// <c>repomd.xml</c> primary <c>&lt;location href&gt;</c> that escapes the probed
 	/// repo directory into a real package file must be refused -- a
 	/// <see cref="PhotonRepomdProbeKind.Error"/> result, never a fetch of that URL.
@@ -318,7 +318,7 @@ public sealed class HttpPhotonRepoMetadataSourceTests
 	public void IsValidPrimaryHref_AcceptsRepodataMetadataKinds(string href) =>
 		Assert.True(HttpPhotonRepoMetadataSource.IsValidPrimaryHref(href));
 
-	/// <summary>Round-0 review finding #3, note 3: a size-cap hit must be reported distinctly from "unreachable".</summary>
+	/// <summary>Round-1 review finding #3, note 3: a size-cap hit must be reported distinctly from "unreachable".</summary>
 	[Fact]
 	public async Task TryGetRepomdRevisionAndPackageCountAsync_PrimaryXmlGzOverSizeCap_ReportsSizeCapRejection()
 	{

@@ -128,15 +128,20 @@ public sealed class HttpStigManagerUploadClientTests
 	[Fact]
 	public async Task UploadCklAsync_TimeoutIsConfigurable_ShorterBudgetTripsSooner()
 	{
-		// A stub that always delays 300ms: a 2s budget comfortably completes, a 50ms
-		// budget does not -- proves UploadTimeout actually drives the observed budget
-		// rather than some other fixed constant.
-		DelayingHandler slowHandler = new() { Delay = TimeSpan.FromMilliseconds(300) };
+		// Issue #1670: the original 300ms delay vs {2s, 50ms} budgets left the
+		// generous side only ~6.7x above the delay -- an absolute-floor race a
+		// contended CI runner (thread-pool starvation, GC pauses) can lose without
+		// anything being wrong with the client under test. Each side now uses its own
+		// handler delay chosen so the margin against its own budget is ~100x in
+		// whichever direction that side needs to prove (comfortably completes /
+		// definitely times out), rather than the same delay racing two very
+		// differently sized budgets.
+		DelayingHandler slowHandler = new() { Delay = TimeSpan.FromMilliseconds(50) };
 		string cklPath = CreateTempCkl();
 
 		try
 		{
-			HttpStigManagerUploadClient generousClient = CreateClient(slowHandler, TimeSpan.FromSeconds(2));
+			HttpStigManagerUploadClient generousClient = CreateClient(slowHandler, TimeSpan.FromSeconds(5));
 			StigManagerUploadResult generousResult = await generousClient.UploadCklAsync(Connection, "secret", cklPath, CancellationToken.None);
 			// The discovery stub returns "{}" with no token_endpoint, so this
 			// degrades to Failed too, but for a *different* reason -- proving the
@@ -145,7 +150,7 @@ public sealed class HttpStigManagerUploadClientTests
 			Assert.Equal(StigManagerUploadOutcome.Failed, generousResult.Outcome);
 			Assert.DoesNotContain("timed out", generousResult.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 
-			DelayingHandler tightHandlerBackingStore = new() { Delay = TimeSpan.FromMilliseconds(300) };
+			DelayingHandler tightHandlerBackingStore = new() { Delay = TimeSpan.FromSeconds(5) };
 			HttpStigManagerUploadClient tightClient = CreateClient(tightHandlerBackingStore, TimeSpan.FromMilliseconds(50));
 			StigManagerUploadResult tightResult = await tightClient.UploadCklAsync(Connection, "secret", cklPath, CancellationToken.None);
 			Assert.Equal(StigManagerUploadOutcome.Failed, tightResult.Outcome);

@@ -238,7 +238,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 		Assert.Contains("repodata/repomd.xml was 404", outcome.Note, StringComparison.Ordinal);
 	}
 
-	/// <summary>Round-0 review finding #3: an all-probes-failed sweep must fail the job, not report "Indexed 0" as success.</summary>
+	/// <summary>Round-1 review finding #3: an all-probes-failed sweep must fail the job, not report "Indexed 0" as success.</summary>
 	[Fact]
 	public async Task ExecuteAsync_AllProbesFail_FailsTheJob()
 	{
@@ -254,7 +254,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 	}
 
 	/// <summary>
-	/// Round-0 review finding #3: a sweep with SOME successes and SOME failures stays a
+	/// Round-1 review finding #3: a sweep with SOME successes and SOME failures stays a
 	/// success-with-warnings -- only an all-failed sweep fails the job.
 	/// </summary>
 	[Fact]
@@ -299,7 +299,7 @@ public sealed class PhotonRepoDiscoveryJobHandlerTests
 		Assert.Equal(totalProbes, source.RepomdRequests.Count);
 	}
 
-	/// <summary>Round-0 review finding #4: a repo directory absent upstream produces no row, only a debug-level note.</summary>
+	/// <summary>Round-1 review finding #4: a repo directory absent upstream produces no row, only a debug-level note.</summary>
 	[Fact]
 	public async Task ExecuteAsync_AbsentRepoDirectory_ProducesNoRowAndIsNotAnError()
 	{

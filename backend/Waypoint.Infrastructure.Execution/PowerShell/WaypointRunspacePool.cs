@@ -60,7 +60,29 @@ public sealed partial class WaypointRunspacePool : IDisposable
 	// first MaxRunspaces creations after process start, or after enough poisoning to
 	// need replacements) pays a short serialization cost, once, in exchange for
 	// making concurrent job starts safe by construction rather than by retry.
-	private readonly SemaphoreSlim _moduleImportGate = new(1, 1);
+	//
+	// Issue #1868: this gate was originally an instance field, serializing cold
+	// imports only WITHIN one pool. AnalysisCache is process-global (see above), but
+	// `backend/Waypoint.Tests/` alone constructs 20 separate `WaypointRunspacePool`
+	// instances across as many test classes; under xUnit's default class-level
+	// parallelism their first cold-imports could still race EACH OTHER against the
+	// same process-global cache -- a window #1020's instance-scoped gate never
+	// closed, since it only ever had one holder inside one pool. Promoted to static
+	// so every instance in the process shares the same gate and the cross-instance
+	// race is closed the same way the cross-call race inside one instance already
+	// was. A production process constructs exactly one pool via DI, so this changes
+	// nothing about production behavior; it only serializes what test hosts (and any
+	// future multi-pool caller) do differently.
+	private static readonly SemaphoreSlim s_moduleImportGate = new(1, 1);
+
+	/// <summary>
+	/// Test-only window onto <see cref="s_moduleImportGate"/> (issue #1868): lets a
+	/// test hold the same static gate an unrelated <see cref="WaypointRunspacePool"/>
+	/// instance's cold-start path acquires, proving by direct synchronization -- not
+	/// an elapsed-time comparison -- that the gate really is shared process-wide
+	/// across instances rather than merely happening to be declared static.
+	/// </summary>
+	internal static SemaphoreSlim ModuleImportGateForTests => s_moduleImportGate;
 	private long _poisonedTotal;
 	private long _createdTotal;
 	private volatile bool _disposed;
@@ -127,9 +149,32 @@ public sealed partial class WaypointRunspacePool : IDisposable
 
 			acquired = true;
 
-			if (!_idle.TryTake(out Runspace? runspace))
+			Runspace runspace;
+			if (_idle.TryTake(out Runspace? idleRunspace))
 			{
-				runspace = await CreateRunspaceAsync(linked.Token).ConfigureAwait(false);
+				runspace = idleRunspace;
+			}
+			else
+			{
+				try
+				{
+					runspace = await CreateRunspaceAsync(linked.Token).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException) when (_disposalCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+				{
+					// Issue #1868 follow-up: promoting the module-import gate to
+					// static/process-wide (see s_moduleImportGate's remarks) makes it
+					// genuinely contended by unrelated pool instances elsewhere in the
+					// process, where before it was private to this pool and effectively
+					// never awaited under real contention. That opened the same
+					// disposal-vs-wait race #343 already fixed for `_slots.WaitAsync`
+					// above, but one level deeper: a cold rent can now be genuinely
+					// PARKED inside `s_moduleImportGate.WaitAsync` (not just `_slots`)
+					// when Dispose() cancels `_disposalCts`, surfacing as a bare
+					// OperationCanceledException instead of the one consistent shutdown
+					// outcome every other disposal race in this type produces.
+					throw new ObjectDisposedException(GetType().FullName);
+				}
 			}
 
 			return new RunspaceLease(this, runspace);
@@ -147,7 +192,7 @@ public sealed partial class WaypointRunspacePool : IDisposable
 
 	/// <summary>
 	/// Creates and opens a new runspace, importing its modules. Issue #1020: the
-	/// import/open phase is serialized process-wide via <see cref="_moduleImportGate"/>
+	/// import/open phase is serialized process-wide via <see cref="s_moduleImportGate"/>
 	/// -- see that field's remarks for why. The gate is acquired/released here rather
 	/// than around the whole <see cref="RentAsync"/> call so a caller that hits the
 	/// idle bag (the common warm-pool case) never waits on it, and so at most one
@@ -156,7 +201,7 @@ public sealed partial class WaypointRunspacePool : IDisposable
 	/// </summary>
 	private async Task<Runspace> CreateRunspaceAsync(CancellationToken cancellationToken)
 	{
-		await _moduleImportGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+		await s_moduleImportGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 		try
 		{
 			InitialSessionState sessionState = InitialSessionState.CreateDefault2();
@@ -184,7 +229,7 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		}
 		finally
 		{
-			_moduleImportGate.Release();
+			s_moduleImportGate.Release();
 		}
 	}
 
@@ -288,12 +333,13 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		// an indeterministic disposal race with no first-class fix in the BCL.
 		_disposalCts.Dispose();
 
-		// Unlike _slots (see the long comment above), _moduleImportGate has no
-		// #343-shaped hazard: nothing parks on it indefinitely -- the only holder is
-		// CreateRunspaceAsync, which always releases in its own finally within one
-		// module-import/open call, never across an externally-controlled wait. Safe to
-		// dispose synchronously here.
-		_moduleImportGate.Dispose();
+		// Issue #1868: s_moduleImportGate is now static/process-wide -- shared by every
+		// WaypointRunspacePool instance in the process, so an individual instance's
+		// Dispose() must NEVER dispose it. Disposing here would poison the gate for
+		// every other still-live pool instance (their next CreateRunspaceAsync would
+		// throw ObjectDisposedException on a semaphore they never owned disposing).
+		// The gate's lifetime is process lifetime, not pool-instance lifetime -- there
+		// is nothing to dispose here anymore.
 
 		while (_idle.TryTake(out Runspace? runspace))
 		{

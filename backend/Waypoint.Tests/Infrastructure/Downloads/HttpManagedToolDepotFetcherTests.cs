@@ -240,9 +240,15 @@ public sealed class HttpManagedToolDepotFetcherTests : IDisposable
 	[Fact]
 	public async Task FetchAsync_TimesOut_DegradesToUnreachable_NotAnUncaughtThrow()
 	{
-		ScriptedHandler handler = new() { Delay = TimeSpan.FromSeconds(5) };
+		// Issue #1657: a 150ms-vs-5s margin (33x) is still an absolute-floor race on a
+		// contended CI runner where thread-pool/GC pauses can eat tens of ms before the
+		// handler is even reached. Widen the margin to ~500x (20ms timeout vs 10s
+		// handler delay) so the cancellation is deterministic without needing real-time
+		// precision anywhere in the pipeline -- the assertion only needs the timeout to
+		// fire strictly before the handler's delay elapses, never a tight race.
+		ScriptedHandler handler = new() { Delay = TimeSpan.FromSeconds(10) };
 		ManagedToolOptions options = DefaultOptions();
-		options.DepotFetchTimeout = TimeSpan.FromMilliseconds(150);
+		options.DepotFetchTimeout = TimeSpan.FromMilliseconds(20);
 		HttpManagedToolDepotFetcher fetcher = CreateFetcher(handler, options);
 
 		ManagedToolDepotFetchResult result = await fetcher.FetchAsync(Token, null, _destinationDirectory, CancellationToken.None);
