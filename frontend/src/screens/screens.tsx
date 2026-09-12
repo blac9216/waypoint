@@ -7,6 +7,7 @@ import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/Dashboa
 import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
 import { LiveJobsRoute } from "./livejobs/LiveJobsScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
+import { RetentionReviewScreen as RetentionReviewRoute } from "./retention/RetentionReviewScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
@@ -40,6 +41,10 @@ export function CatalogScreen() {
 
 export function LibraryScreen() {
 	return <RepositoryLibraryScreen />;
+}
+
+export function RetentionScreen() {
+	return <RetentionReviewRoute />;
 }
 
 export function TransferScreen() {
