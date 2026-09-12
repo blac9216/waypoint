@@ -247,7 +247,7 @@ services:
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password="
       Database__PasswordFile: "${WAYPOINT_COMPLIANCE_DB_PASSWORD_FILE:-/run/db-secret/postgres-compliance-runner-password}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      # why: docs/rationale/deploy.md#compose-module-preload-order
+      # why: docs/rationale/deploy.md#compose-module-preload-order-compliance-runner
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
@@ -299,7 +299,7 @@ services:
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password="
       Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-/run/db-secret/postgres-download-runner-password}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      # why: docs/rationale/deploy.md#compose-module-preload-order
+      # why: docs/rationale/deploy.md#compose-module-preload-order-download-runner
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointCatalogIndex"
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointDownload"
@@ -313,7 +313,7 @@ services:
       # Nested deliberately over the depot subtree path the runner's store
       # conventions already use -- vcf-download-manager.common.ps1 still
       # writes/reads ContentLibrary/ under /vcf, unmodified.
-      # why: docs/rationale/deploy.md#content-libraries-own-volume
+      # why: docs/rationale/deploy.md#content-libraries-nested-mount
       - content-libraries:/vcf/ContentLibrary
       # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
       # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment

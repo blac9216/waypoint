@@ -86,4 +86,4 @@ buffering disabled.
   reserved future toggle — `ssl_verify_client optional` is left commented out and
   explicitly absent on every repo location, documented as the seam a later
   per-location auth toggle attaches to. See
-  `docs/rationale/deploy.md#nginx-repo-mtls-carve-out` for the full reasoning.
+  `docs/rationale/deploy.md#nginx-repo-mtls-placeholder-seam` for the full reasoning.

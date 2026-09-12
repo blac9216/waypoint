@@ -211,31 +211,61 @@ Refs: #621, #630, ADR-0014 §7
 ### content-libraries-own-volume
 
 The content-library registry root gets its OWN named volume
-(`content-libraries`), not a subtree of `depot` -- unlike every other repo
-store (see nginx-repo-store-subtree-aliases). Three reasons: design record
-#16 §1 already says each sidecar store has its own named volume; the
-backend never mounts `depot` at all today, and folding the registry into
-it would be the first crack in that boundary; and a deployment may
-legitimately mount `depot` read-only from a shared/vendor tree (issue
-#614's scenario), while a content library must stay writable regardless --
-true of the backend and nginx arms; the runner arm carries a precondition
-on that same scenario (next entry) that #614 uncovered.
-Same permission pattern the `tool-upload-staging` volume already
-establishes for the backend.
+(`content-libraries`), not a subtree of `depot` -- unlike every other
+repo store (see nginx-repo-store-subtree-aliases). Same permission
+pattern the `tool-upload-staging` volume already establishes for the
+backend. See content-libraries-own-volume-reasons for why.
 
-On `download-runner`, the volume is nested at `/vcf/ContentLibrary` --
-INSIDE the `depot` mount, not beside it -- deliberately: the runner's own
-store-path conventions (`vcf-download-manager.common.ps1`) and any
-depot-fed content-library sync (#1057) keep writing/reading
-`ContentLibrary/` under `/vcf` unmodified; only the volume backing that
-one path changed. `/repo/depot/` still 404s the `ContentLibrary` subtree
-name (nginx-repo-store-subtree-aliases' denylist) so a stray depot-side
-`ContentLibrary/` directory is never a second route to it. This nesting
-does add a precondition to a read-only depot mount -- see
+Refs: #1706, #1647, #1502, design record #16 §1
+
+### content-libraries-own-volume-reasons
+
+Three reasons (content-libraries-own-volume): design record #16 §1
+already says each sidecar store has its own named volume; the backend
+never mounts `depot` at all today, and folding the registry into it
+would be the first crack in that boundary; and the read-only-depot
+scenario below.
+
+Refs: #1706, #1647, #1502, design record #16 §1
+
+### content-libraries-own-volume-readonly-depot-scenario
+
+A deployment may legitimately mount `depot` read-only from a
+shared/vendor tree (issue #614's scenario), while a content library must
+stay writable regardless -- true of the backend and nginx arms; the
+runner arm carries a precondition on that same scenario
+(content-libraries-nested-mount) that #614 uncovered.
+
+Refs: #1706, #1647, #1502, #614
+
+### content-libraries-nested-mount
+
+On `download-runner`, the `content-libraries` volume is nested at
+`/vcf/ContentLibrary` -- INSIDE the `depot` mount, not beside it --
+deliberately: the runner's own store-path conventions
+(`vcf-download-manager.common.ps1`) and any depot-fed content-library
+sync (#1057) keep writing/reading `ContentLibrary/` under `/vcf`
+unmodified; only the volume backing that one path changed.
+
+Refs: #1706, #1647, #1502
+
+### content-libraries-nested-mount-readonly-precondition-pointer
+
+This nesting (content-libraries-nested-mount) does add a precondition to
+a read-only depot mount -- see
 `content-libraries-nested-mount-readonly-depot-precondition` under
 `runners/download-runner/docker-entrypoint.sh` below.
 
-Refs: #1706, #1647, #1502, design record #16 §1
+Refs: #1706, #1647, #1502, #1753
+
+### content-libraries-nested-mount-depot-alias-safety
+
+`/repo/depot/` still 404s the `ContentLibrary` subtree name
+(nginx-repo-store-subtree-aliases' denylist) so a stray depot-side
+`ContentLibrary/` directory is never a second route to the nested
+content-library mount (content-libraries-nested-mount).
+
+Refs: #1706, #1647, #1502
 
 ### compose-postgres-healthcheck-wrapper
 
@@ -280,7 +310,7 @@ shifts every Keycloak-served path, including the management health endpoint
 
 Refs: #534, #536
 
-### compose-module-preload-order
+### compose-module-preload-order-compliance-runner
 
 `WaypointLogging` must preload first: the imported vmware-stig-docker
 transport files the other modules dot-source expect `Get-LogSplat`/
@@ -289,16 +319,27 @@ build if a future handler's module ships without an entry here — the guard
 exists because `WaypointComplianceContent` was once missing and silently
 failed with "term ... is not recognized".
 
+Refs: #579, #613
+
+### compose-module-preload-order-download-runner
+
 download-runner preloads `WaypointLogging` first too (issue #719), for a
 different reason than compliance-runner's: the migrated
 `vcf-download-manager.common.ps1` defines its own filtered, console/file
-`Write-Log` rather than expecting one — `WaypointDownload.psm1` and
-`WaypointCatalogIndex.psm1` each re-define `Write-Log` immediately after
-dot-sourcing it, delegating to `WaypointLogging\Write-Log` so Debug/Verbose
-severities reach job.log instead of being silently dropped by the sibling
-script's own level filter.
+`Write-Log` rather than expecting one.
 
-Refs: #579, #613, #719
+Refs: #719
+
+### compose-module-preload-order-download-runner-write-log-shim
+
+`WaypointDownload.psm1` and `WaypointCatalogIndex.psm1` each re-define
+`Write-Log` immediately after dot-sourcing it
+(compose-module-preload-order-download-runner), delegating to
+`WaypointLogging\Write-Log` so Debug/Verbose severities reach job.log
+instead of being silently dropped by the sibling script's own level
+filter.
+
+Refs: #719
 
 ### compose-runner-egress-topology
 
@@ -539,32 +580,66 @@ Refs: #498
 Repo path-space content is seeded straight into the throwaway `depot`
 volume before `up`, at exactly the paths the runner writes (`PROD/`,
 `UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `Transfer/`, `VCSA/`, plus a
-stray marker under `ContentLibrary/` -- see below) -- the same trick
-smoke-seeding-preconditions already uses for `compliance-profiles`. A
-`NewStore/` marker is seeded too, at a path the runner has never
-written and `default.conf` never names, to prove the allowlist denies a
-subtree by construction rather than by an entry a denylist would need
-maintaining (#1608). Nothing in this stack yet produces real repo
-content (that's later lanes), so the smoke test has to plant it itself
+stray marker under `ContentLibrary/` -- see
+smoke-repo-path-space-content-library-exception) -- the same trick
+smoke-seeding-preconditions already uses for `compliance-profiles`.
+
+Refs: #1043, #1502
+
+### smoke-repo-path-space-why-seed-at-all
+
+Nothing in this stack yet produces real repo content (that's later
+lanes), so the smoke test (smoke-repo-path-space) has to plant it itself
 to prove nginx serves what a producer will eventually write.
 
-Seeding the real layout rather than a set of separate placeholder volumes
-is what makes the isolation assertions mean anything: the stores overlap
-inside one volume (nginx-repo-store-subtree-aliases), so the test probes
-that pair -- every store subtree 404s through `/repo/depot/` while
-serving through its own location -- instead of two trivially-separate
-volumes. Symlink escapes are seeded in both absolute and relative form,
-on the store location and on `/repo/depot/`, and a hardlink is seeded to
-prove `disable_symlinks on` does not break it.
+Refs: #1043, #1502
+
+### smoke-repo-path-space-newstore-marker
+
+A `NewStore/` marker is seeded too (smoke-repo-path-space), at a path the
+runner has never written and `default.conf` never names, to prove the
+allowlist denies a subtree by construction rather than by an entry a
+denylist would need maintaining (#1608).
+
+Refs: #1043, #1502, #1608
+
+### smoke-repo-path-space-isolation-fidelity
+
+Seeding the real layout (smoke-repo-path-space) rather than a set of
+separate placeholder volumes is what makes the isolation assertions mean
+anything: the stores overlap inside one volume
+(nginx-repo-store-subtree-aliases), so the test probes that pair --
+every store subtree 404s through `/repo/depot/` while serving through
+its own location -- instead of two trivially-separate volumes.
+
+Refs: #1043, #1502
+
+### smoke-repo-path-space-symlink-hardlink-seeding
+
+Symlink escapes are seeded in both absolute and relative form, on the
+store location and on `/repo/depot/`, and a hardlink is seeded to prove
+`disable_symlinks on` (nginx-repo-umds-disable-symlinks) does not break
+it.
+
+Refs: #1043, #1502
+
+### smoke-repo-path-space-content-library-exception
 
 `ContentLibrary/` is the one exception to "every store is a depot
 subtree" (content-libraries-own-volume, issues #1706/#1647): its real
 content is seeded into the separate `content-libraries` volume instead,
 at its root (nginx aliases `/repo/content-libraries/` straight to that
-mount, not to a `depot` subtree). Only a marker file is still seeded
-under the `depot` volume's `ContentLibrary/` path, to prove a stray
-depot-side directory of that name is still denied through
-`/repo/depot/` even though it is no longer where real content lives.
+mount, not to a `depot` subtree).
+
+Refs: #1043, #1502, #1706, #1647
+
+### smoke-repo-path-space-content-library-stray-marker
+
+Only a marker file is still seeded under the `depot` volume's
+`ContentLibrary/` path (smoke-repo-path-space-content-library-exception),
+to prove a stray depot-side directory of that name is still denied
+through `/repo/depot/` even though it is no longer where real content
+lives.
 
 Refs: #1043, #1502, #1706, #1647
 
@@ -774,11 +849,17 @@ Refs: #66
 
 Repo path-space locations (depot/UMDS/Photon/VMTools/VKS/content-libraries)
 never require the client certificate app paths may eventually require.
+Amends ADR-0003: the app-path mTLS posture described there does not
+extend to these locations.
+
+Refs: #1043, #1502
+
+### nginx-repo-mtls-placeholder-seam
+
 `ssl_verify_client optional` is left as a commented-out, explicitly-absent
-placeholder on those locations rather than configured now, so a later
-per-location auth toggle has a documented seam to attach to instead of
-guessing where mTLS would go. Amends ADR-0003: the app-path mTLS posture
-described there does not extend to these locations.
+placeholder on the repo path-space locations (nginx-repo-mtls-carve-out)
+rather than configured now, so a later per-location auth toggle has a
+documented seam to attach to instead of guessing where mTLS would go.
 
 Refs: #1043, #1502
 
@@ -786,11 +867,17 @@ Refs: #1043, #1502
 
 Every repo location is prefixed under `/repo/<store>/` (Photon is the one
 documented exception -- see nginx-repo-photon-case-sensitive-root) rather
-than mounted at the domain root. SDDC Manager 9.1 supports a non-root
-`basePath`; a pre-5.2 root-only consumer still works against a sub-path
-just fine, but the reverse isn't true, so the location tree must not bake
-in a root-only assumption. This is about the URL space only -- the
+than mounted at the domain root. This is about the URL space only -- the
 filesystem side is nginx-repo-store-subtree-aliases.
+
+Refs: #1043, #1502
+
+### nginx-repo-no-root-mount-sddc-compat
+
+SDDC Manager 9.1 supports a non-root `basePath`; a pre-5.2 root-only
+consumer still works against a sub-path just fine, but the reverse isn't
+true, so the repo location tree (nginx-repo-no-root-mount) must not bake
+in a root-only assumption.
 
 Refs: #1043, #1502
 
@@ -800,39 +887,85 @@ The six stores are six subtrees of ONE volume, not six volumes. `depot`
 is download-runner's `/vcf` and the runner writes `UMDS/`, `Photon/`,
 `VKS/`, `VMTools/`, `ContentLibrary/` (plus `VCSA/` and `Transfer/`)
 inside it (`vcf-download-manager.common.ps1`); the backend indexes the
-same share as one depot root (`CatalogOptions.DepotPath`). Splitting the
-stores onto their own volumes would mean repointing the runner's store
-paths and breaking that single-share contract, and Compose
-`volume.subpath` mounts fail closed when the subdirectory does not exist
-yet -- on a fresh stack the runner has written nothing, so nginx would
-refuse to start. So nginx mounts the one volume read-only at `/srv/repo`
-and each location `alias`es its own distinct subtree.
+same share as one depot root (`CatalogOptions.DepotPath`).
 
-Isolation is therefore enforced at the location layer. It was originally
-a denylist naming the runner's seven store/staging directories
-(`UMDS|Photon|VKS|VMTools|ContentLibrary|VCSA|Transfer`), which is
-fail-open: a store directory added to `/vcf` after the regex was written
-is silently reachable through `/repo/depot/` until someone edits it, and
-the smoke test's cross-store isolation assertions only catch a
+Refs: #1043, #1502
+
+### nginx-repo-store-subtree-aliases-mount-shape
+
+So nginx mounts the one volume (nginx-repo-store-subtree-aliases)
+read-only at `/srv/repo` and each location `alias`es its own distinct
+subtree.
+
+Refs: #1043, #1502
+
+### nginx-repo-store-subtree-aliases-no-split
+
+Splitting the stores (nginx-repo-store-subtree-aliases) onto their own
+volumes would mean repointing the runner's store paths and breaking that
+single-share contract, and Compose `volume.subpath` mounts fail closed
+when the subdirectory does not exist yet -- on a fresh stack the runner
+has written nothing, so nginx would refuse to start.
+
+Refs: #1043, #1502
+
+### nginx-repo-store-subtree-aliases-denylist-history
+
+Isolation is enforced at the location layer (nginx-repo-store-subtree-aliases).
+It was originally a denylist naming the runner's seven store/staging
+directories (`UMDS|Photon|VKS|VMTools|ContentLibrary|VCSA|Transfer`).
+
+Refs: #1043, #1502, #1608
+
+### nginx-repo-store-subtree-aliases-denylist-fail-open
+
+The original denylist (nginx-repo-store-subtree-aliases-denylist-history)
+is fail-open: a store directory added to `/vcf` after the regex was
+written is silently reachable through `/repo/depot/` until someone edits
+it, and the smoke test's cross-store isolation assertions only catch a
 *regression* of a name already listed, not a *new* name nobody added.
 
-`/repo/depot/` is now an ALLOWLIST instead (#1608): `location ^~
-/repo/depot/PROD/` aliases only the vendor's own depot-proper tree
-(`PROD/` -- research #1027 confirms this is the whole VCF 9 depot
+Refs: #1043, #1502, #1608
+
+### nginx-repo-store-subtree-aliases-depot-allowlist
+
+`/repo/depot/` is now an ALLOWLIST instead (#1608), replacing the
+fail-open denylist (nginx-repo-store-subtree-aliases-denylist-fail-open):
+`location ^~ /repo/depot/PROD/` aliases only the vendor's own
+depot-proper tree, and a second `location ^~ /repo/depot/` 404s
+everything else.
+
+Refs: #1043, #1502, #1608
+
+### nginx-repo-store-subtree-aliases-depot-allowlist-prod-scope
+
+`PROD/` -- research #1027 confirms this is the whole VCF 9 depot
 contract; the vendor's other root sibling, `umds-patch-store`, is this
 runner's `UMDS/`, already served at its own `/repo/umds/` location and
-never through `/repo/depot/`), and a second `location ^~ /repo/depot/`
-404s everything else. Both locations use `^~` so the longest-prefix
-search settles between them directly -- `/repo/depot/PROD/...` always
-resolves to the first, and every other path under `/repo/depot/`
-(any of the seven store/staging directories, or a directory nobody has
-named yet) falls to the second and 404s by construction. A store
-directory added to `/vcf` tomorrow needs no config change here at all;
-the smoke test's cross-store isolation assertions (extended in #1609,
-plus a `NewStore/` marker never named anywhere) exist to prove that,
-not to enumerate names that could drift out of sync.
+never through `/repo/depot/` (nginx-repo-store-subtree-aliases-depot-allowlist).
 
-Refs: #1043, #1502, #1608, #1609, #1027
+Refs: #1043, #1502, #1027
+
+### nginx-repo-store-subtree-aliases-depot-allowlist-prefix-precedence
+
+Both locations (nginx-repo-store-subtree-aliases-depot-allowlist) use
+`^~` so the longest-prefix search settles between them directly --
+`/repo/depot/PROD/...` always resolves to the first, and every other
+path under `/repo/depot/` (any of the seven store/staging directories,
+or a directory nobody has named yet) falls to the second and 404s by
+construction.
+
+Refs: #1043, #1502, #1608
+
+### nginx-repo-store-subtree-aliases-depot-allowlist-no-drift
+
+A store directory added to `/vcf` tomorrow needs no config change to the
+allowlist (nginx-repo-store-subtree-aliases-depot-allowlist) at all; the
+smoke test's cross-store isolation assertions (extended in #1609, plus a
+`NewStore/` marker never named anywhere) exist to prove that, not to
+enumerate names that could drift out of sync.
+
+Refs: #1043, #1502, #1608, #1609
 
 ### nginx-repo-photon-case-sensitive-root
 
@@ -840,23 +973,53 @@ The Photon mirror is a literal lowercase `/photon/` root because `tdnf`
 `baseurl` matching on the consumer side is case-sensitive. A single
 `/Photon/` location only caught that one spelling -- `/PHOTON/` and other
 mixed-case variants fell through to the SPA catch-all's
-`try_files ... /index.html` and answered 200 with the wrong body. The
-guard is now a case-insensitive regex location (`~* ^/photon/ { return
-404; }`) that 404s any non-lowercase variant, paired with `^~ /photon/`
-on the literal lowercase location so it wins over the regex for the one
-spelling that must serve (nginx checks regex locations only after the
-longest-prefix search, and `^~` stops that search from falling through
-to regex matching once the literal prefix matches).
+`try_files ... /index.html` and answered 200 with the wrong body.
 
-Neither trailing-slash location is a prefix of a request with no
-trailing slash, so a bare `/photon` or `/Photon` fell through both and
-reached the SPA catch-all, answering 200 with `index.html` (#1598).
-Two more locations close that: `location = /photon { return 301
-/photon/; }` (exact match, so only the literal lowercase spelling with
-no trailing slash) and `location ~* ^/photon$ { return 404; }` for
-every other bare capitalization -- exact-match locations are checked
-before any other kind, so the redirect always wins for the one spelling
-that must serve.
+Refs: #1043, #1502, #1598
+
+### nginx-repo-photon-case-sensitive-root-regex-guard
+
+The guard (nginx-repo-photon-case-sensitive-root) is a case-insensitive
+regex location (`~* ^/photon/ { return 404; }`) that 404s any
+non-lowercase variant, paired with `^~ /photon/` on the literal lowercase
+location so it wins over the regex for the one spelling that must serve.
+
+Refs: #1043, #1502, #1598
+
+### nginx-repo-photon-case-sensitive-root-regex-precedence
+
+nginx checks regex locations only after the longest-prefix search, and
+`^~` (nginx-repo-photon-case-sensitive-root-regex-guard) stops that
+search from falling through to regex matching once the literal prefix
+matches.
+
+Refs: #1043, #1502, #1598
+
+### nginx-repo-photon-case-sensitive-root-bare-path
+
+Neither trailing-slash location (nginx-repo-photon-case-sensitive-root) is
+a prefix of a request with no trailing slash, so a bare `/photon` or
+`/Photon` fell through both and reached the SPA catch-all, answering 200
+with `index.html` (#1598).
+
+Refs: #1043, #1502, #1598
+
+### nginx-repo-photon-case-sensitive-root-bare-path-guard
+
+Two more locations close the bare-path gap
+(nginx-repo-photon-case-sensitive-root-bare-path):
+`location = /photon { return 301 /photon/; }` (exact match, so only the
+literal lowercase spelling with no trailing slash) and
+`location ~* ^/photon$ { return 404; }` for every other bare
+capitalization.
+
+Refs: #1043, #1502, #1598
+
+### nginx-repo-photon-case-sensitive-root-bare-path-precedence
+
+Exact-match locations (nginx-repo-photon-case-sensitive-root-bare-path-guard)
+are checked before any other kind, so the redirect always wins for the
+one spelling that must serve.
 
 Refs: #1043, #1502, #1598
 
@@ -866,15 +1029,27 @@ Refs: #1043, #1502, #1598
 design (VMware's own UMDS layout), and must never be dereferenced outside
 the store root through this proxy. `disable_symlinks on` costs an extra
 `stat` per path component nginx resolves, which is acceptable for a
-read-only, moderate-traffic repo location. Every repo store location
-carries the guard, not only `/repo/umds/`: all six alias into the one
-runner-owned store root (nginx-repo-store-subtree-aliases), so a symlink
-written anywhere under it must be inert on whichever location reaches
-it, and `/repo/depot/` -- which aliases that root itself -- needs the
-guard most. Both absolute and relative escapes are covered; the guard is
-broader than escapes (in-store symlinks 403, symlinked directory
-components 404) and no lane creates symlinks inside a store. Hardlinks
-are unaffected, so #1490's hardlinked view trees still serve.
+read-only, moderate-traffic repo location.
+
+Refs: #1043, #1502
+
+### nginx-repo-umds-disable-symlinks-coverage
+
+Every repo store location carries the guard (nginx-repo-umds-disable-symlinks),
+not only `/repo/umds/`: all six alias into the one runner-owned store root
+(nginx-repo-store-subtree-aliases), so a symlink written anywhere under it
+must be inert on whichever location reaches it, and `/repo/depot/` --
+which aliases that root itself -- needs the guard most.
+
+Refs: #1043, #1502
+
+### nginx-repo-umds-disable-symlinks-scope
+
+Both absolute and relative escapes are covered by the guard
+(nginx-repo-umds-disable-symlinks-coverage); the guard is broader than
+escapes (in-store symlinks 403, symlinked directory components 404) and
+no lane creates symlinks inside a store. Hardlinks are unaffected, so
+#1490's hardlinked view trees still serve.
 
 Refs: #1043, #1502
 
@@ -887,19 +1062,35 @@ any of the five. The map lives in one `include`d file rather than repeated
 per repo location, so every store shares one definition instead of five
 copies that can drift.
 
+Refs: #1043, #1502
+
+### nginx-repo-vcsp-mime-map-replace-not-extend
+
 An nginx `types { }` block **replaces** the compiled-in default MIME
 table for the location it is included into, it does not extend it
 (#1591). Today that is benign: `tdnf` never validates `Content-Type`
-(the sibling README says so explicitly) and the VCSP consumer only
-cares about the five entries above, so every extension the six-entry
-map didn't know was a latent trap, not a live gap. The decision:
-re-include the handful of compiled-in `mime.types` entries a future
-store is likely to need explicitly (`.html`, `.xml`, `.gz`, `.rpm`,
-`.deb`, `.zip`, plus `.txt` alongside `.mf`) rather than leave them
-implicit, so a future editor adding a store doesn't rediscover the
-replace-not-extend trap the hard way. `.ova` has no compiled-in or
-IANA-registered type and stays on `default_type`
-(`application/octet-stream`) deliberately.
+(the sibling README says so explicitly) and the VCSP consumer only cares
+about the five entries in nginx-repo-vcsp-mime-map, so every extension
+the six-entry map didn't know was a latent trap, not a live gap.
+
+Refs: #1043, #1502, #1591
+
+### nginx-repo-vcsp-mime-map-reincluded-defaults
+
+The decision (nginx-repo-vcsp-mime-map-replace-not-extend): re-include
+the handful of compiled-in `mime.types` entries a future store is likely
+to need explicitly (`.html`, `.xml`, `.gz`, `.rpm`, `.deb`, `.zip`, plus
+`.txt` alongside `.mf`) rather than leave them implicit, so a future
+editor adding a store doesn't rediscover the replace-not-extend trap the
+hard way.
+
+Refs: #1043, #1502, #1591
+
+### nginx-repo-vcsp-mime-map-ova-default-type
+
+`.ova` has no compiled-in or IANA-registered type and stays on
+`default_type` (`application/octet-stream`) deliberately
+(nginx-repo-vcsp-mime-map-reincluded-defaults).
 
 Refs: #1043, #1502, #1591
 
@@ -1099,24 +1290,44 @@ The depot mount (`/vcf`) is only ever read by catalog-index; a real depot is
 frequently bind-mounted read-only (an NFS/SMB vendor export is a common,
 safe choice), and the entrypoint's own `set -eu` used to abort the whole
 container on the unconditional `chown` that case hits, crash-looping it
-forever. The chown now runs only after a real write succeeds — a
-`touch`+`rm` probe, not `-w`, which is unreliable for root and for
-read-only bind mounts alike — and logs one line either way so an operator
-can see the depot was detected read-only from the container's own log
-without guessing why no chown ran.
+forever. The chown now runs only after a real write succeeds.
+
+Refs: #614
+
+### depot-chown-write-probe-mechanism
+
+The write check (depot-chown-write-probe) is a `touch`+`rm` probe, not
+`-w`, which is unreliable for root and for read-only bind mounts alike —
+and logs one line either way so an operator can see the depot was
+detected read-only from the container's own log without guessing why no
+chown ran.
 
 Refs: #614
 
 ### content-libraries-nested-mount-readonly-depot-precondition
 
-`content-libraries-own-volume` (above) nests the `content-libraries` volume
-at `/vcf/ContentLibrary`, INSIDE the depot mount. Docker must create that
-nested mountpoint inside the parent filesystem at container-create time; on
-a read-only depot mount whose tree does not already contain a
-`ContentLibrary/` directory, the daemon cannot create it and the container
-fails to start — before this entrypoint, or any check it could run, ever
-executes. A read-only depot export used with this stack must therefore
-carry a pre-existing (even if empty) `ContentLibrary/` directory. This is a
+`content-libraries-nested-mount` (`deploy/compose.yaml` above) nests the
+`content-libraries` volume at `/vcf/ContentLibrary`, INSIDE the depot
+mount. Docker must create that nested mountpoint inside the parent
+filesystem at container-create time.
+
+Refs: #1753, ADR-0029
+
+### content-libraries-nested-mount-readonly-depot-precondition-failure-mode
+
+On a read-only depot mount whose tree does not already contain a
+`ContentLibrary/` directory
+(content-libraries-nested-mount-readonly-depot-precondition), the daemon
+cannot create it and the container fails to start — before this
+entrypoint, or any check it could run, ever executes.
+
+Refs: #1753, ADR-0029
+
+### content-libraries-nested-mount-readonly-depot-precondition-remediation
+
+A read-only depot export used with this stack must therefore carry a
+pre-existing (even if empty) `ContentLibrary/` directory
+(content-libraries-nested-mount-readonly-depot-precondition). This is a
 precondition of the nested-mount design (ADR-0029), not a defect this
 entrypoint can guard against; see ADR-0029's consequences for the
 alternative considered and rejected.

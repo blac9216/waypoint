@@ -136,7 +136,7 @@ docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
 # Repo path-space: ONE volume (download-runner's /vcf), seeded at exactly
 # the paths the runner writes, so the isolation assertions in step 14 probe
 # the real overlap and not a pair of trivially-separate volumes.
-# why: docs/rationale/deploy.md#smoke-repo-path-space
+# why: docs/rationale/deploy.md#smoke-repo-path-space-isolation-fidelity
 docker volume create "${PROJECT}_depot" >/dev/null
 docker run --rm -v "${PROJECT}_depot:/x" alpine sh -c "
 	# Depot proper: the VCF artifact tree at the store root.
@@ -734,7 +734,7 @@ if [[ "${UMDS_BODY}" == "umds-marker" ]]; then ok "UMDS store served through its
 
 # Absolute AND relative escapes, on the store location and on the depot
 # location that aliases the store root itself.
-# why: docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks
+# why: docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks-coverage
 for probe in \
 	"/repo/umds/vmware-updates/symlink-hostupdate:absolute symlink on /repo/umds/" \
 	"/repo/umds/vmware-updates/symlink-relative:relative symlink on /repo/umds/" \
@@ -818,7 +818,7 @@ done
 # renamed there is caught here too; NewStore is deliberately NOT derived --
 # it must never appear in that file, or it stops proving the allowlist
 # claim.
-# why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases
+# why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases-depot-allowlist
 RUNNER_COMMON="${REPO_ROOT}/runners/download-runner/powershell/project/vcf-download-manager.common.ps1"
 mapfile -t RUNNER_STORE_NAMES < <(grep -oP "(?<=\?\? '/vcf/)[^/']+" "${RUNNER_COMMON}" | sort -u)
 if [[ "${#RUNNER_STORE_NAMES[@]}" -eq 0 ]]; then
