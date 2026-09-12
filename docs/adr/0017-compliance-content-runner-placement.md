@@ -20,6 +20,41 @@ It shares no dependency, credential type, or storage mount with the download dom
 depot/tool/bundle concerns — `download-runner` has no reason to host git or parse
 InSpec profile metadata.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from this ADR's own Context and Rationale (present since
+the bootstrap commit `d3ab2c05`, 2026-08-23T18:44:10+02:00); corroborated by PR #566
+(refs #40), which introduced this ADR._
+
+- Compliance content (the VMware DoD compliance-automation repo) is consumed
+  exclusively by compliance execution (`scan` reads profiles from it) and produces the
+  `profiles` inventory that only the compliance domain interprets.
+- It shares no dependency, credential type, or storage mount with the download
+  domain's depot/tool/bundle concerns.
+- ADR-0014 §7's storage-follows-least-privilege rule assigns mounts per domain;
+  colocating the compliance-content mount with its sole consumer keeps that
+  assignment intact rather than cutting across it.
+- Grouping job types by domain rather than by "some future admin screen might list
+  them together" keeps the placement architectural rather than organizational.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own Context and Rationale (present since
+the bootstrap commit `d3ab2c05`, 2026-08-23T18:44:10+02:00); the rejected option is
+[ADR-0013](0013-control-plane-and-runners.md) §2's own provisional placement.
+Corroborated by PR #566 (refs #40), which introduced this ADR._
+
+- **`content-pull`/`content-import` as `download-runner` job types**
+  ([ADR-0013](0013-control-plane-and-runners.md) §2's provisional "later
+  content-library, repository, and managed-content jobs" bullet) — rejected. Written
+  before either job type had a design; `download-runner` has no reason to host git or
+  parse InSpec profile metadata, and no shared dependency, credential type, or mount
+  ties compliance content to the download domain's depot/tool/bundle concerns.
+- **`content-pull`/`content-import` as `compliance-runner` job types** (this
+  decision) — chosen. Colocates the mount, the consuming job type (`scan`), and the
+  producing job type (`content-pull`) in one process's trust boundary, per
+  ADR-0014 §7's per-domain mount assignment.
+
 ## Decision
 
 `content-pull` and `content-import` are `compliance-runner` job types, claimed under
