@@ -12,4 +12,11 @@
     <PackageReference Include="YamlDotNet" Version="16.2.1" />
   </ItemGroup>
 
+  <!-- Issue #1437: shipped preset resolver data (component tool-family classification,
+       per-generation SKU-family membership), loaded via PresetDataCatalog. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Subscriptions\Presets\PresetData\componentCatalog.json" />
+    <EmbeddedResource Include="Subscriptions\Presets\PresetData\Generations\*.json" />
+  </ItemGroup>
+
 </Project>

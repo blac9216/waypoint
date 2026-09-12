@@ -1,0 +1,159 @@
+{
+  "version": "1.0",
+  "sequenceNumber": 1,
+  "creationTime": "2026-01-01T00:00:00Z",
+  "publishedDate": "2026-01-01T00:00:00Z",
+  "releases": [
+    {
+      "product": "VCF",
+      "version": "9.9.0.0-fixture",
+      "description": "Sanitized fixture release -- invented values, not a real depot pull.",
+      "releaseDate": "2026-01-01",
+      "eol": false,
+      "bom": [
+        { "name": "VCENTER", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-1", "publicName": "Fixture vCenter Server", "releaseURL": "https://example.internal/fixture/vcenter" },
+        { "name": "SDDC_MANAGER_VCF", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-2", "publicName": "Fixture SDDC Manager", "releaseURL": "https://example.internal/fixture/sddc-manager" },
+        { "name": "VCF_FLEET_LCM", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-3", "publicName": "Fixture Fleet LCM", "releaseURL": "https://example.internal/fixture/fleet-lcm" },
+        { "name": "DEPOT_SERVICE", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-4", "publicName": "Fixture Depot Service", "releaseURL": "https://example.internal/fixture/depot-service" },
+        { "name": "ESX_HOST", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-5", "publicName": "Fixture ESX", "releaseURL": "https://example.internal/fixture/esx" },
+        { "name": "NSX_T_MANAGER", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-6", "publicName": "Fixture NSX Manager", "releaseURL": "https://example.internal/fixture/nsx" },
+        { "name": "VKR", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-7", "publicName": "Fixture Kubernetes Release", "releaseURL": "https://example.internal/fixture/vkr" },
+        { "name": "SUPERVISOR", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-8", "publicName": "Fixture Supervisor", "releaseURL": "https://example.internal/fixture/supervisor" },
+        { "name": "SUPERVISOR_SERVICE_HARBOR", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-9", "publicName": "Fixture Supervisor Harbor Service", "releaseURL": "https://example.internal/fixture/supervisor-harbor" },
+        { "name": "VMTOOLS", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-10", "publicName": "Fixture VM Tools", "releaseURL": "https://example.internal/fixture/vmtools" },
+        { "name": "VCF_LICENSE_SERVER", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-11", "publicName": "Fixture License Server", "releaseURL": "https://example.internal/fixture/license-server" },
+        { "name": "VSP", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-12", "publicName": "Fixture VSP", "releaseURL": "https://example.internal/fixture/vsp" },
+        { "name": "VLR", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-13", "publicName": "Fixture VLR add-on", "releaseURL": "https://example.internal/fixture/vlr" },
+        { "name": "VLR_EDGE", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-14", "publicName": "Fixture VLR Edge add-on", "releaseURL": "https://example.internal/fixture/vlr-edge" },
+        { "name": "DLVM", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-15", "publicName": "Fixture DLVM add-on", "releaseURL": "https://example.internal/fixture/dlvm" },
+        { "name": "DSM", "version": "9.9.0.1000-fixture", "changeId": "fixture-change-16", "publicName": "Fixture DSM add-on", "releaseURL": "https://example.internal/fixture/dsm" }
+      ],
+      "sku": [
+        {
+          "name": "VCF",
+          "description": "Fixture VCF stack SKU",
+          "bom": [
+            { "name": "VCENTER", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "SDDC_MANAGER_VCF", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VCF_FLEET_LCM", "automatedInstall": true, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "DEPOT_SERVICE", "automatedInstall": true, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "ESX_HOST", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "NSX_T_MANAGER", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VKR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "SUPERVISOR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "SUPERVISOR_SERVICE_HARBOR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "VMTOOLS", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VCF_LICENSE_SERVER", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VSP", "automatedInstall": false, "lifecycleManagedBy": "SELF" }
+          ]
+        },
+        {
+          "name": "VVF",
+          "description": "Fixture VVF stack SKU -- must be a proper subset of the VCF SKU above at this generation",
+          "bom": [
+            { "name": "VCENTER", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "SDDC_MANAGER_VCF", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VCF_FLEET_LCM", "automatedInstall": true, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "DEPOT_SERVICE", "automatedInstall": true, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "ESX_HOST", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VKR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "SUPERVISOR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "SUPERVISOR_SERVICE_HARBOR", "automatedInstall": false, "lifecycleManagedBy": "VCF_FLEET_LCM" },
+            { "name": "VMTOOLS", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VCF_LICENSE_SERVER", "automatedInstall": true, "lifecycleManagedBy": "SDDC_MANAGER_VCF" },
+            { "name": "VSP", "automatedInstall": false, "lifecycleManagedBy": "SELF" }
+          ]
+        },
+        {
+          "name": "VSPHERE_STANDARD",
+          "description": "Fixture vSphere Standard edition SKU",
+          "bom": [
+            { "name": "VCENTER", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "ESX_HOST", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VMTOOLS", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VCF_LICENSE_SERVER", "automatedInstall": true, "lifecycleManagedBy": "SELF" }
+          ]
+        },
+        {
+          "name": "VSPHERE_ESSENTIAL_PLUS",
+          "description": "Fixture vSphere Essentials Plus edition SKU -- identical component set to Standard/Enterprise Plus",
+          "bom": [
+            { "name": "VCENTER", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "ESX_HOST", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VMTOOLS", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VCF_LICENSE_SERVER", "automatedInstall": true, "lifecycleManagedBy": "SELF" }
+          ]
+        },
+        {
+          "name": "VSPHERE_ENT_PLUS",
+          "description": "Fixture vSphere Enterprise Plus edition SKU -- identical component set to Standard/Essentials Plus",
+          "bom": [
+            { "name": "VCENTER", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "ESX_HOST", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VMTOOLS", "automatedInstall": true, "lifecycleManagedBy": "SELF" },
+            { "name": "VCF_LICENSE_SERVER", "automatedInstall": true, "lifecycleManagedBy": "SELF" }
+          ]
+        },
+        {
+          "name": "VLR",
+          "description": "Fixture standalone add-on SKU",
+          "bom": [ { "name": "VLR", "automatedInstall": true, "lifecycleManagedBy": "SELF" } ]
+        },
+        {
+          "name": "VLR_EDGE",
+          "description": "Fixture standalone add-on SKU -- only present at this generation",
+          "bom": [ { "name": "VLR_EDGE", "automatedInstall": true, "lifecycleManagedBy": "SELF" } ]
+        },
+        {
+          "name": "DLVM",
+          "description": "Fixture standalone add-on SKU",
+          "bom": [ { "name": "DLVM", "automatedInstall": true, "lifecycleManagedBy": "SELF" } ]
+        },
+        {
+          "name": "DSM",
+          "description": "Fixture standalone add-on SKU",
+          "bom": [ { "name": "DSM", "automatedInstall": true, "lifecycleManagedBy": "SELF" } ]
+        }
+      ],
+      "catalogArtifacts": {
+        "VCENTER": [ "fixture-vcenter-9.9.0-updaterepo.zip" ],
+        "SDDC_MANAGER_VCF": [ "fixture-sddc-manager-9.9.0.tar" ],
+        "VCF_FLEET_LCM": [ "fixture-fleet-lcm-9.9.0.tar" ],
+        "DEPOT_SERVICE": [ "fixture-depot-service-9.9.0.tar" ],
+        "ESX_HOST": [ "fixture-esx-9.9.0-offline-bundle.zip" ],
+        "NSX_T_MANAGER": [ "fixture-nsx-manager-9.9.0.tar" ],
+        "VKR": [ "fixture-vkr-9.9.0-bundle.tar" ],
+        "SUPERVISOR": [ "fixture-supervisor-9.9.0-bundle.tar" ],
+        "SUPERVISOR_SERVICE_HARBOR": [ "fixture-supervisor-harbor-9.9.0-bundle.tar" ],
+        "VMTOOLS": [],
+        "VCF_LICENSE_SERVER": [ "fixture-license-server-9.9.0.tar" ],
+        "VLR": [ "fixture-vlr-9.9.0.ova" ],
+        "VLR_EDGE": [ "fixture-vlr-edge-9.9.0.ova" ],
+        "DLVM": [ "fixture-dlvm-9.9.0.ova" ],
+        "DSM": [ "fixture-dsm-9.9.0.tar" ]
+      }
+    },
+    {
+      "product": "VCF",
+      "version": "9.0.2.0-fixture",
+      "description": "Sanitized fixture prior-generation release -- VLR_EDGE does not exist as a SKU here.",
+      "releaseDate": "2025-06-01",
+      "eol": false,
+      "bom": [
+        { "name": "VCENTER", "version": "9.0.2.1000-fixture", "changeId": "fixture-change-old-1", "publicName": "Fixture vCenter Server", "releaseURL": "https://example.internal/fixture/vcenter-old" },
+        { "name": "ESX_HOST", "version": "9.0.2.1000-fixture", "changeId": "fixture-change-old-2", "publicName": "Fixture ESX", "releaseURL": "https://example.internal/fixture/esx-old" },
+        { "name": "VLR", "version": "9.0.2.1000-fixture", "changeId": "fixture-change-old-3", "publicName": "Fixture VLR add-on", "releaseURL": "https://example.internal/fixture/vlr-old" }
+      ],
+      "sku": [
+        {
+          "name": "VLR",
+          "description": "Fixture standalone add-on SKU, prior generation",
+          "bom": [ { "name": "VLR", "automatedInstall": true, "lifecycleManagedBy": "SELF" } ]
+        }
+      ],
+      "catalogArtifacts": {
+        "VLR": [ "fixture-vlr-9.0.2.ova" ]
+      }
+    }
+  ]
+}
