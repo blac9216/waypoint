@@ -15,8 +15,8 @@ original evaluation session — this ADR was authored in the repo's initial skel
 commit ("Add architecture docs, ADRs, Claude workflow skills, and repo skeleton"),
 which predates any tracked issue or PR. #2 is the earliest tracked issue that names
 ADR-0003, and confirms the drivers below by consuming them directly. The bullets
-themselves are drawn from this ADR's own original Context and Rationale text, not
-invented:
+themselves are drawn from this ADR's own original Context, Rationale, and Decision
+text, not invented:
 
 - A single TLS entry point is needed, serving the static frontend, proxying `/api` to
   the backend and auth paths to Keycloak (Context, above).
