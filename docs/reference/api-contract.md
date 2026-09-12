@@ -763,6 +763,24 @@ separately as issue #1040 (not yet landed).
 | `/download-retention/review-list` | GET, DELETE | ✅ Issue #1453 (PR #1758): the union of orphaned (no longer matched by any subscription) and out-of-scope (never subscribed) content — per ADR-0034, never auto-removed by the sweep, surfaced here for explicit operator deletion only. Read Viewer+, DELETE Admin-only. |
 | `/repo-credentials` · `/repo-credentials/{store}` | GET, PUT, DELETE | ✅ Issue #1517: per-store (ADR-0029's store name vocabulary) binding to an existing `repo-basic-auth`-type credential — this controller owns only the binding record; creating/rotating the underlying credential is the existing `/credentials` surface, reused unmodified (no new rotation mechanism, issue #1517 AC). **Admin-only for every verb, including read** — stricter than the generic `/credentials` surface's Viewer-readable metadata, per issue #1517's explicit AC that a non-Admin cannot "create, read, or rotate a repo-serving credential." 400 `invalid_store`/`credential_not_found`/`incompatible_credential_type`; 404 when a valid store has no binding yet. |
 
+### Subscriptions & presets
+
+Issue #1450 (epic #1182, split from design record #1045; ADR-0028; domain model +
+migration 0104 from #1421; `IPresetResolver` from #1437). Reconciles the resource this
+issue's own AC names against whatever #1034 (API contract reconciliation, docs-only,
+open at merge time) eventually lands — treat #1034 as the still-open cross-reference,
+not this section, if the two ever disagree. **Distinct from** `/downloads/esx/subscriptions`
+above (issue #1470's own ESX-platform-selection CRUD, a separate table with no
+relationship to this resource) — the name collision is coincidental, not a shared
+concept.
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/subscriptions` · `/subscriptions/{id}` | GET, POST, PUT, DELETE | ✅ A durable per-`product`/`lane` "keep this scope current" expression (ADR-0028): `line_granularity` (`subminor`\|`minor`\|`major`), `anchor_version`, optional `preset_id`, `refresh_window_days`/`retention_override_days` dial overrides, `is_enabled`. Read Viewer+, write Admin-only (decision R2-10). `POST` with a `preset_id` is the adopt-a-preset path — `line_granularity`/`anchor_version` are always taken from the preset at adopt time (any value also supplied for those two fields is ignored), and the preset itself is never mutated. Creating, updating, or adopting never enqueues a download or evaluation — that is the still-open evaluation job's (#1046) own slice. |
+| `/presets` · `/presets/{id}` | GET | ✅ Read-only listing of every preset, shipped and custom: `stack` (`VCF`\|`VVF`), `generation` (data, never a literal), `name`, `line_granularity`, `anchor_version` (nullable for a from-scratch custom preset), `is_custom`, `source_preset_id`. Viewer+. |
+| `/presets/{id}/clone` | POST | ✅ Clone-to-custom: copies a shipped (or custom) preset into a new, independent custom row with `source_preset_id` set to the source's id — editing the clone never mutates the source, and a later shipped-preset content update (an appliance update) never touches an existing clone. Admin-only. Optional `name`; defaults to "`<source name>` (custom)". |
+| `/presets/{id}` | PUT | ✅ Edits a custom clone's `name`/`line_granularity`/`anchor_version` in place. A write to a shipped preset (`is_custom: false`) is rejected with 409 `preset_not_custom` — shipped content updates only via appliance updates, never through this API. Admin-only. |
+
 ### ESX patch store — what is and is not built
 
 ADR-0032 replaced the original owner-grill UMDS-binary design (decisions 9–10: a
