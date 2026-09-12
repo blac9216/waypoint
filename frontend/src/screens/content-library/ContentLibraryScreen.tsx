@@ -240,12 +240,19 @@ export function ContentLibraryScreen() {
 		return counts;
 	}, [searchedAndSorted]);
 
+	// One panel backs every type tab (the tab only narrows what's displayed
+	// within it, per AC1 above) — each tab still links to it via
+	// `aria-controls` so assistive tech can associate a tab with the table it
+	// governs (issue #1971).
+	const itemsPanelId = "content-library-items-panel";
+
 	const typeTabs = (
 		<div className="content-library-tabs" role="tablist" aria-label="Filter by type">
 			<button
 				type="button"
 				role="tab"
 				aria-selected={type === "all"}
+				aria-controls={itemsPanelId}
 				className={`content-library-tab ${type === "all" ? "is-active" : ""}`}
 				onClick={() => setView({ type: "all" })}
 			>
@@ -257,6 +264,7 @@ export function ContentLibraryScreen() {
 					type="button"
 					role="tab"
 					aria-selected={type === t}
+					aria-controls={itemsPanelId}
 					className={`content-library-tab ${type === t ? "is-active" : ""}`}
 					onClick={() => setView({ type: t })}
 				>
@@ -351,6 +359,7 @@ export function ContentLibraryScreen() {
 					emptyMessage={loading ? "Loading…" : "No items match the current filters."}
 					toolbarExtra={typeTabs}
 					headerExtra={libraryPicker}
+					panelId={itemsPanelId}
 				/>
 			</div>
 		</div>

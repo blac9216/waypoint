@@ -25,6 +25,14 @@ const LIBRARY = {
 	updated_at: "2026-09-01T00:00:00Z",
 };
 
+const LIBRARY_2 = {
+	id: "lib-2",
+	name: "secondary",
+	disk_path: "/data/content-libraries/secondary",
+	created_at: "2026-09-01T00:00:00Z",
+	updated_at: "2026-09-01T00:00:00Z",
+};
+
 const OVF_ITEM = {
 	id: "item-1",
 	library_id: "lib-1",
@@ -86,7 +94,13 @@ function buildTree(rows: FolderRow[]): unknown[] {
  * create/assign/repair-survival round trip end to end, per this issue's AC1
  * ("trigger a repair, or its test double").
  */
-function installFetchMock(options?: { libraries?: unknown[]; items?: unknown[]; folders?: FolderRow[] }) {
+function installFetchMock(options?: {
+	libraries?: unknown[];
+	items?: unknown[];
+	folders?: FolderRow[];
+	itemsStatus?: number;
+	librariesStatus?: number;
+}) {
 	const libraries = options?.libraries ?? [LIBRARY];
 	const items = options?.items ?? [OVF_ITEM, ISO_ITEM];
 	const folderRows: FolderRow[] = options?.folders ?? [];
@@ -98,13 +112,28 @@ function installFetchMock(options?: { libraries?: unknown[]; items?: unknown[]; 
 		const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : undefined;
 
 		if (url === "/api/v1/content-libraries") {
+			if (options?.librariesStatus && options.librariesStatus >= 400) {
+				return new Response(JSON.stringify({ error: { code: "server_error", message: "Could not load content libraries." } }), {
+					status: options.librariesStatus,
+				});
+			}
 			return jsonResponse(libraries);
 		}
-		if (url === `/api/v1/content-libraries/${LIBRARY.id}/items`) {
-			return jsonResponse(items);
+		// Any library id gets a response — a switch to a library other than the
+		// primary fixture (e.g. the #1977 re-fetch test's `LIBRARY_2`) simply
+		// sees an empty items/folders set rather than 404ing.
+		const itemsMatch = url.match(/^\/api\/v1\/content-libraries\/([^/]+)\/items$/);
+		if (itemsMatch) {
+			if (options?.itemsStatus && options.itemsStatus >= 400) {
+				return new Response(JSON.stringify({ error: { code: "server_error", message: "Could not load this library's items." } }), {
+					status: options.itemsStatus,
+				});
+			}
+			return jsonResponse(itemsMatch[1] === LIBRARY.id ? items : []);
 		}
-		if (url === `/api/v1/content-libraries/${LIBRARY.id}/folders` && method === "GET") {
-			return jsonResponse(buildTree(folderRows));
+		const foldersGetMatch = url.match(/^\/api\/v1\/content-libraries\/([^/]+)\/folders$/);
+		if (foldersGetMatch && method === "GET") {
+			return jsonResponse(foldersGetMatch[1] === LIBRARY.id ? buildTree(folderRows) : []);
 		}
 		if (url === `/api/v1/content-libraries/${LIBRARY.id}/folders` && method === "POST") {
 			const id = `folder-${nextFolderId++}`;
@@ -220,9 +249,38 @@ describe("ContentLibraryScreen", () => {
 		await waitFor(() => expect(screen.getByText("No content libraries yet.")).toBeInTheDocument());
 	});
 
+	it("renders the load-error message and no item rows when the items fetch fails (issue #1970)", async () => {
+		installFetchMock({ itemsStatus: 404 });
+		render(<ContentLibraryScreen />);
+
+		await waitFor(() => expect(screen.getByText("Could not load this library's items.")).toBeInTheDocument());
+		expect(screen.queryByText("vcsa-appliance")).not.toBeInTheDocument();
+		expect(screen.queryByText("esxi-install")).not.toBeInTheDocument();
+	});
+
+	it("renders the load-error message when the libraries fetch fails", async () => {
+		installFetchMock({ librariesStatus: 500 });
+		render(<ContentLibraryScreen />);
+		await waitFor(() => expect(screen.getByText("Could not load content libraries.")).toBeInTheDocument());
+	});
+
+	it("each type tab links to a role=tabpanel region via aria-controls (issue #1971)", async () => {
+		installFetchMock();
+		render(<ContentLibraryScreen />);
+		await waitFor(() => expect(screen.getByText("vcsa-appliance")).toBeInTheDocument());
+
+		const panel = screen.getByRole("tabpanel");
+		expect(panel).toHaveAttribute("id");
+		const panelId = panel.getAttribute("id");
+
+		for (const tab of screen.getAllByRole("tab")) {
+			expect(tab).toHaveAttribute("aria-controls", panelId);
+		}
+	});
+
 	describe("virtual folders (issue #1422)", () => {
-		it("creates a folder, assigns an item to it, and the assignment survives a repair (its test double: a plain re-fetch)", async () => {
-			installFetchMock();
+		it("creates a folder, assigns an item to it, and the assignment survives a genuine re-fetch (issue #1977)", async () => {
+			installFetchMock({ libraries: [LIBRARY, LIBRARY_2] });
 			render(<ContentLibraryScreen />);
 			await waitFor(() => expect(screen.getByText("vcsa-appliance")).toBeInTheDocument());
 
@@ -236,11 +294,19 @@ describe("ContentLibraryScreen", () => {
 			fireEvent.change(screen.getByLabelText("Move vcsa-appliance to folder"), { target: { value: "folder-1" } });
 			await waitFor(() => expect(screen.getByLabelText("Move vcsa-appliance to folder")).toHaveValue("folder-1"));
 
-			// "Trigger a repair, or its test double" (AC1): re-fetch items+folders
-			// from the server exactly as a post-repair reload would, and confirm
-			// the assignment is still there — folders are DB-only metadata that
-			// never touch disk_path, so a repair cannot disturb it.
-			fireEvent.click(screen.getByRole("tab", { name: /All/ }));
+			// "Trigger a repair, or its test double" (AC1): `load()` keys only off
+			// `activeLibraryId` (see ContentLibraryScreen.tsx), so a genuine
+			// re-fetch means actually changing it — switching the active library
+			// away (to the empty `LIBRARY_2` fixture) and back forces two real
+			// `GET .../items` + `GET .../folders` round trips against the mock
+			// server, exactly as a post-repair reload's re-fetch would. A mere
+			// type-tab click does NOT change `activeLibraryId` and would prove
+			// only that local React state survives a re-render.
+			fireEvent.change(screen.getByLabelText("Select content library"), { target: { value: LIBRARY_2.id } });
+			await waitFor(() => expect(screen.queryByText("vcsa-appliance")).not.toBeInTheDocument());
+
+			fireEvent.change(screen.getByLabelText("Select content library"), { target: { value: LIBRARY.id } });
+			await waitFor(() => expect(screen.getByText("vcsa-appliance")).toBeInTheDocument());
 			await waitFor(() => expect(screen.getByLabelText("Move vcsa-appliance to folder")).toHaveValue("folder-1"));
 
 			// Selecting the folder narrows the visible items to what's assigned to it.

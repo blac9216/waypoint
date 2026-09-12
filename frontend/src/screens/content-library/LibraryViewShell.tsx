@@ -58,6 +58,12 @@ export interface LibraryViewShellProps<T, S extends string> {
 	/** Rendered above the toolbar (e.g. a library picker) — a second, higher
 	 * seam for chrome that belongs above search/sort rather than beside it. */
 	headerExtra?: ReactNode;
+	/** When set, marks the table region as `role="tabpanel"` with this `id`,
+	 * so a caller's own `role="tab"` controls (this screen's type tabs) can
+	 * link to it via `aria-controls`, per issue #1971. Optional — a caller
+	 * with no tabs of its own (a future #1429 family view without tab chrome)
+	 * simply omits it and gets a plain, unmarked table region. */
+	panelId?: string;
 }
 
 export function LibraryViewShell<T, S extends string>({
@@ -76,6 +82,7 @@ export function LibraryViewShell<T, S extends string>({
 	emptyMessage = "No items match the current filters.",
 	toolbarExtra,
 	headerExtra,
+	panelId,
 }: LibraryViewShellProps<T, S>) {
 	return (
 		<div className="library-view-shell">
@@ -105,7 +112,7 @@ export function LibraryViewShell<T, S extends string>({
 				{toolbarExtra && <div className="library-view-shell__toolbar-extra">{toolbarExtra}</div>}
 			</div>
 
-			<div className="library-view-shell__table-wrap">
+			<div className="library-view-shell__table-wrap" role={panelId ? "tabpanel" : undefined} id={panelId}>
 				<table className="library-view-shell__table">
 					<thead>
 						<tr>
