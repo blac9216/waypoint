@@ -37,6 +37,9 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 {
 	private readonly string _root = Directory.CreateTempSubdirectory("wp-metadata-puller-").FullName;
 
+	/// <summary>Issue #790: <c>PullAsync</c> now takes an explicit caller-owned identity home -- a single-caller fixture path here.</summary>
+	private string DefaultIdentityHome() => Path.Combine(_root, "identity");
+
 	public void Dispose()
 	{
 		if (Directory.Exists(_root))
@@ -156,7 +159,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.True(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -219,7 +222,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.True(result.IsAuthFailure);
@@ -239,7 +242,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -257,7 +260,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -274,7 +277,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		};
 		ManagedToolMetadataPuller puller = new(Options.Create(options), new NeverPresent());
 
-		CatalogPullResult result = await puller.PullAsync(Path.Combine(_root, "depot"), Path.Combine(_root, "code.txt"), CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(Path.Combine(_root, "depot"), Path.Combine(_root, "code.txt"), DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -290,7 +293,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -321,7 +324,7 @@ public sealed class ManagedToolMetadataPullerTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, CancellationToken.None);
+		CatalogPullResult result = await puller.PullAsync(depotDir, codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);

@@ -39,10 +39,11 @@ public sealed class ManagedToolMetadataPuller : IManagedToolMetadataPuller
 		_presenceChecker = presenceChecker;
 	}
 
-	public async Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken)
+	public async Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, string identityHome, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(depotPath);
 		ArgumentException.ThrowIfNullOrWhiteSpace(activationCodePath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(identityHome);
 
 		if (!_presenceChecker.IsPresent())
 		{
@@ -51,7 +52,7 @@ public sealed class ManagedToolMetadataPuller : IManagedToolMetadataPuller
 		}
 
 		ManagedToolOptions options = _options.Value;
-		string identityHome = PrepareIdentityHome(options);
+		Directory.CreateDirectory(identityHome);
 
 		// Issue #791: the real 9.1.0.0400 `metadata download --help` documents
 		// `-d, --depot-store=<dir>`, `--depot-download-activation-code-file=<file>`, and
@@ -89,13 +90,6 @@ public sealed class ManagedToolMetadataPuller : IManagedToolMetadataPuller
 			DownloadToolFailureClassifier.FailureClass.Auth => CatalogPullResult.AuthFailed(summary),
 			_ => CatalogPullResult.Failed($"metadata download failed: {summary}"),
 		};
-	}
-
-	private static string PrepareIdentityHome(ManagedToolOptions options)
-	{
-		string identityHome = Path.Combine(options.ToolStatePath, options.IdentityStatePath);
-		Directory.CreateDirectory(identityHome);
-		return identityHome;
 	}
 
 	private static string ExecutablePath(ManagedToolOptions options) =>

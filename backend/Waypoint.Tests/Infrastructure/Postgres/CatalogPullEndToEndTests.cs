@@ -200,16 +200,18 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	private sealed class RecordingIdentityTool : IDepotIdentityTool
 	{
 		public List<string> SeededAssetIds { get; } = [];
+		public List<string> SeededIdentityHomes { get; } = [];
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
 
-		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+		public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken)
 		{
 			SeededAssetIds.Add(assetId);
+			SeededIdentityHomes.Add(identityHome);
 			return Task.CompletedTask;
 		}
 
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
 	private sealed class FakeMetadataPuller(
@@ -221,7 +223,7 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		public List<string> DepotPaths { get; } = [];
 		public List<string> StagedContents { get; } = [];
 
-		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken)
+		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, string identityHome, CancellationToken cancellationToken)
 		{
 			DepotPaths.Add(depotPath);
 			StagedContents.Add(File.Exists(activationCodePath) ? File.ReadAllText(activationCodePath) : "<missing>");

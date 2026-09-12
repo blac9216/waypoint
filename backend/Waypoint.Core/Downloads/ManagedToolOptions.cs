@@ -220,6 +220,20 @@ public sealed class ManagedToolOptions
 	/// </summary>
 	public string IdentityStatePath { get; set; } = "identity";
 
+	/// <summary>
+	/// Directory, under <see cref="ToolStatePath"/> (same persistent volume), that a
+	/// <c>depot-enrollment</c> <c>validate-code</c> job's job-scoped identity home is
+	/// created under (issue #790: the shared <see cref="IdentityStatePath"/> home has no
+	/// lock/mutex, so two concurrent depot jobs seeding DIFFERENT asset_ids could
+	/// otherwise collide on <c>machine_id</c>). Distinct from
+	/// <see cref="IdentityStatePath"/> (used only by the never-seeding
+	/// <c>generate-depot-id</c> operation): every <c>validate-code</c> run gets its own
+	/// <c>&lt;this&gt;/job-&lt;job id&gt;</c> subdirectory, seeded and torn down for that one
+	/// invocation only -- mirroring <see cref="BinariesDownloadIdentityDirectoryName"/>'s
+	/// identical convention from issue #1482.
+	/// </summary>
+	public string DepotEnrollmentIdentityDirectoryName { get; set; } = "depot-enrollment-identity";
+
 	/// <summary>Wall-clock budget for a bounded noninteractive <c>vcf-download-tool</c> Depot ID query/generation call -- neither may prompt interactively or hang the job indefinitely. Activation-code validation uses <see cref="ActivationCodeValidationTimeout"/> instead, since it is a real WAN metadata fetch.</summary>
 	public TimeSpan EnrollmentCommandTimeout { get; set; } = TimeSpan.FromSeconds(30);
 

@@ -14,6 +14,7 @@
 
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -34,6 +35,14 @@ namespace Waypoint.Infrastructure.Downloads;
 /// job-scoped temp file (never argv, never an environment variable, never a log line),
 /// and always deletes that file in <c>finally</c> regardless of outcome.
 ///
+/// Concurrency (issue #790): <c>validate-code</c> seeds <c>machine_id</c> into its own
+/// job-scoped identity home (<c>&lt;ManagedTool:ToolStatePath&gt;/&lt;DepotEnrollmentIdentityDirectoryName&gt;/job-&lt;job id&gt;</c>),
+/// never the single shared identity home, so two concurrent depot jobs seeding
+/// DIFFERENT asset_ids can never cause a tool invocation to authenticate under
+/// another job's <c>machine_id</c> -- mirroring the job-scoped-identity-home contract
+/// issue #1482's <c>BinariesDownloadJobHandler</c> already established. That identity
+/// home is always removed in <c>finally</c> alongside the staging file.
+///
 /// Payload contract: <c>{"operation": "generate-depot-id"|"validate-code"}</c>.
 /// </summary>
 public sealed class DepotEnrollmentJobHandler : IJobHandler
@@ -48,24 +57,28 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 	private readonly ICredentialSecretStore _secrets;
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly ISecretRedactor _redactor;
+	private readonly IOptions<ManagedToolOptions> _toolOptions;
 
 	public DepotEnrollmentJobHandler(
 		IDepotIdentityTool tool,
 		IDepotEnrollmentRepository enrollment,
 		ICredentialSecretStore secrets,
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
-		ISecretRedactor redactor)
+		ISecretRedactor redactor,
+		IOptions<ManagedToolOptions> toolOptions)
 	{
 		ArgumentNullException.ThrowIfNull(tool);
 		ArgumentNullException.ThrowIfNull(enrollment);
 		ArgumentNullException.ThrowIfNull(secrets);
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(redactor);
+		ArgumentNullException.ThrowIfNull(toolOptions);
 		_tool = tool;
 		_enrollment = enrollment;
 		_secrets = secrets;
 		_credentials = credentials;
 		_redactor = redactor;
+		_toolOptions = toolOptions;
 	}
 
 	public string JobType => "depot-enrollment";
@@ -163,10 +176,16 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 				"The stored Activation Code could not be decoded to an asset_id; store a structurally valid code before validating.");
 		}
 
+		// Issue #790: a fresh, job-scoped identity home -- never the shared enrollment
+		// identity home -- so two concurrent depot-enrollment validate-code jobs
+		// seeding DIFFERENT asset_ids can never collide on machine_id. Removed in
+		// finally below regardless of outcome, mirroring the staging file's lifetime.
+		string identityHome = Path.Combine(
+			_toolOptions.Value.ToolStatePath, _toolOptions.Value.DepotEnrollmentIdentityDirectoryName, $"job-{context.Job.Id:N}");
 		try
 		{
-			await _tool.SeedMachineIdentityAsync(assetId, cancellationToken).ConfigureAwait(false);
-			DepotValidationResult result = await _tool.ValidateActivationCodeAsync(stagingPath, cancellationToken).ConfigureAwait(false);
+			await _tool.SeedMachineIdentityAsync(assetId, identityHome, cancellationToken).ConfigureAwait(false);
+			DepotValidationResult result = await _tool.ValidateActivationCodeAsync(stagingPath, identityHome, cancellationToken).ConfigureAwait(false);
 
 			if (result.Succeeded)
 			{
@@ -197,6 +216,27 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 		finally
 		{
 			TryDelete(stagingPath);
+			TryDeleteDirectory(identityHome);
+		}
+	}
+
+	private static void TryDeleteDirectory(string path)
+	{
+		try
+		{
+			if (Directory.Exists(path))
+			{
+				Directory.Delete(path, recursive: true);
+			}
+		}
+		catch (IOException)
+		{
+			// Best-effort cleanup only, matching CatalogPullJobHandler's identical
+			// convention -- a stray job-scoped identity directory is not a correctness
+			// issue once the job's outcome is recorded.
+		}
+		catch (UnauthorizedAccessException)
+		{
 		}
 	}
 

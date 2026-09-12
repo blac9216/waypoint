@@ -26,6 +26,20 @@ namespace Waypoint.Core.Downloads;
 /// (matching the sibling reference's <c>--depot-download-activation-code-file</c>
 /// convention) rather than argv or an environment variable, and that file is always
 /// deleted in the caller's <c>finally</c> -- never left behind, never logged.
+///
+/// Issue #790: <see cref="SeedMachineIdentityAsync"/> and
+/// <see cref="ValidateActivationCodeAsync"/> both take an explicit, caller-owned
+/// <c>identityHome</c> -- mirroring the job-scoped-identity-home contract issue #1482's
+/// <see cref="IBinariesDownloadTool"/> already established -- rather than deriving a
+/// single shared path from <see cref="ManagedToolOptions.IdentityStatePath"/>
+/// internally. Two concurrent depot jobs seeding DIFFERENT asset_ids into the same
+/// shared home could otherwise race: one job's tool invocation could authenticate
+/// under a <c>machine_id</c> another job just seeded. Every caller MUST pass its own
+/// job-scoped directory (e.g. <c>&lt;ToolStatePath&gt;/.../job-&lt;job id&gt;</c>); it is
+/// created if absent and never shared across concurrently running jobs.
+/// <see cref="GetDepotIdAsync"/> is unaffected -- it never seeds <c>machine_id</c>, so
+/// it keeps using the single persistent identity home under
+/// <see cref="ManagedToolOptions.IdentityStatePath"/>.
 /// </summary>
 public interface IDepotIdentityTool
 {
@@ -33,28 +47,33 @@ public interface IDepotIdentityTool
 	Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Seeds the isolated identity home's <c>machine_id</c> from the decoded
+	/// Seeds <paramref name="identityHome"/>'s <c>machine_id</c> from the decoded
 	/// <paramref name="assetId"/> of the Activation Code a run is about to use (issue #787).
 	/// <c>machine_id</c> is DERIVED state, not a durable managed identity: every run that
 	/// uses the code re-derives it from that code and OVERWRITES whatever is there, so
 	/// swapping in a different working code just works with no reset ceremony (owner
 	/// decision 2026-08-25 -- "identity follows the code"). Atomic and restrictive
 	/// (write-temp-then-rename, 0600). The code value itself is never touched -- only its
-	/// non-secret <paramref name="assetId"/> is written.
+	/// non-secret <paramref name="assetId"/> is written. <paramref name="identityHome"/>
+	/// MUST be a job-scoped directory (issue #790) -- never a home shared with another
+	/// concurrently running job.
 	/// </summary>
-	Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken);
+	Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken);
 
 	/// <summary>
 	/// Runs the bounded noninteractive validation of <paramref name="activationCodePath"/>
 	/// (a job-scoped temp file containing the decrypted code, never the code value itself)
-	/// against the tool's current <c>machine_id</c>. Validation means only "the tool
-	/// accepts this code"; the caller seeds <c>machine_id</c> from the code's own decoded
-	/// asset_id via <see cref="SeedMachineIdentityAsync"/> immediately before this call, so
-	/// any structurally valid code is asked as-is. A non-auth-failure error (tool missing,
-	/// timeout) is distinguished from a real portal/auth rejection so callers never
-	/// misclassify a runner problem as "the code is bad."
+	/// against <paramref name="identityHome"/>'s current <c>machine_id</c>. Validation means
+	/// only "the tool accepts this code"; the caller seeds <c>machine_id</c> from the code's
+	/// own decoded asset_id via <see cref="SeedMachineIdentityAsync"/> against the SAME
+	/// <paramref name="identityHome"/> immediately before this call, so any structurally
+	/// valid code is asked as-is. A non-auth-failure error (tool missing, timeout) is
+	/// distinguished from a real portal/auth rejection so callers never misclassify a
+	/// runner problem as "the code is bad." <paramref name="identityHome"/> MUST be the
+	/// same job-scoped directory (issue #790) the matching
+	/// <see cref="SeedMachineIdentityAsync"/> call used.
 	/// </summary>
-	Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken);
+	Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken);
 }
 
 /// <summary>Outcome of <see cref="IDepotIdentityTool.GetDepotIdAsync"/>. <see cref="DepotId"/> is non-secret and safe to display/copy/log.</summary>

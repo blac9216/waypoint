@@ -50,14 +50,14 @@ public sealed class CatalogPullJobHandlerTests
 	private sealed class UnreachableIdentityTool : IDepotIdentityTool
 	{
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
-		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) =>
+		public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
 	private sealed class UnreachablePuller : IManagedToolMetadataPuller
 	{
-		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken) =>
+		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, string identityHome, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
 	}
 
