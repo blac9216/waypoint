@@ -25,6 +25,54 @@ security boundary, and makes a fresh Compose deployment appear healthy while bei
 unable to execute its principal workflows. The intended product shape is a control
 plane dispatching to execution containers dedicated to their domains.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #431, #432._ #431 requests recording the
+owner-approved move from backend-hosted execution to dedicated runner services and
+lists the documents whose Context/Decision this ADR's own text draws on; #432 is the
+PR that authored this ADR (commit 95163887, "AI: document dedicated runner
+architecture"). No separate issue or PR debates the drivers themselves — they are
+drawn from this ADR's own Context and Rationale, which #431/#432 record as the
+approved outcome.
+
+- The API container must not double as an execution environment: PowerCLI, InSpec,
+  SAF, and compliance content for compliance work, and the download modules, depot
+  storage, and an operator-installed entitled download tool for content work, are
+  substantial and unrelated toolchains that ADR-0006's single combined backend
+  container forced into one image.
+- Combining those responsibilities couples unrelated dependency lifecycles, expands
+  the control plane's security boundary, and lets a freshly deployed Compose stack
+  appear healthy while being unable to execute its principal workflows.
+- The C# concurrency, lease, cancellation, and database mechanics already
+  implemented for the job engine (ADR-0008) should be retained rather than
+  rebuilt, while PowerShell — where the product's domain knowledge lives — should
+  stay the execution language (per ADR-0006).
+- Health/readiness reporting must be able to distinguish control-plane health from
+  runner availability and capability, which a single combined container cannot
+  express.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #431, #432._ The sources record the chosen shape and
+its rejected predecessor explicitly (Context above); they do not record a distinct
+third alternative, so none is invented here.
+
+1. **Separate control plane and dedicated execution runners** (chosen) — `Waypoint.Api`
+   keeps REST/SSE, auth, validation, enqueueing, run controls, queries, and result
+   serving; `compliance-runner` and `download-runner` are long-lived .NET worker
+   services that claim jobs and host PowerShell in-process via
+   `Microsoft.PowerShell.SDK`. Each runner's dependency stack (PowerCLI/InSpec/SAF or
+   the download tool/depot storage) lives only in that runner's image. Realised by
+   #431/#432, which recorded this as the approved architecture, and ADR-0014/ADR-0015,
+   which detail runner job ownership and the operator-export packaging model this
+   decision assumes.
+2. **Keep the single combined backend container** — the ADR-0006/ADR-0008 status quo,
+   named in Context above: one ASP.NET image hosting the job dispatcher, PowerShell
+   runspace pools, and every execution dependency. Rejected: it couples unrelated
+   toolchain lifecycles into one image, expands the control plane's security
+   boundary, and allows the container to report healthy without being able to run
+   its principal workflows.
+
 ## Decision
 
 1. **ASP.NET is the control plane only.** `Waypoint.Api` owns REST/SSE, authentication
