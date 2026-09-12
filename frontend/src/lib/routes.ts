@@ -21,6 +21,7 @@ export type ScreenKey =
 	| "library"
 	| "content-library"
 	| "retention"
+	| "presets"
 	| "transfer"
 	| "configuration"
 	| "audit";
@@ -83,6 +84,13 @@ export const ROUTES: RouteDef[] = [
 	// applied in-screen (RetentionController's own RBAC), the same
 	// read-visible-but-action-gated shape `library` above already uses.
 	{ key: "retention", path: "/retention", title: "Retention Review", requiredRole: "Viewer" },
+	// Issue #1469 (epic #1182, split from design record #1048): the entry
+	// point of the subscription flow (adopt -> edit -> subscription), wired
+	// against #1450's `PresetsController`. Viewer+ can read the list; clone
+	// and edit are Admin-only gates applied in-screen (PresetsController's own
+	// RBAC), the same read-visible-but-action-gated shape `retention` above
+	// uses. Adopt navigates to the still-open subscription editor (#1473).
+	{ key: "presets", path: "/presets", title: "Presets", requiredRole: "Viewer" },
 	{ key: "transfer", path: "/transfer", title: "Transfer", requiredRole: "Viewer" },
 	{ key: "configuration", path: "/config", title: "Configuration", requiredRole: "Admin" },
 	// Top-level, not nested under /config (requiredRole: "Admin" at the route
