@@ -27,6 +27,7 @@ remediation from the baseline audit, not done here.
 - [explanation/compliance-parity.md](explanation/compliance-parity.md) — planned compliance execution parity contract (epic #726)
 - [explanation/compliance-content-shape-inventory.md](explanation/compliance-content-shape-inventory.md) — vendor-content parser shape inventory (issue #1077 guard)
 - [explanation/ui-design-brief.md](explanation/ui-design-brief.md) — screen inventory, reconciliation notes, data ledger
+- [explanation/download-domain-ia.md](explanation/download-domain-ia.md) — approved download-domain screen IA (issue #1035 owner rulings)
 
 ## Decisions and rationale
 - [Architecture Decision Records](adr/README.md) — read the index table first

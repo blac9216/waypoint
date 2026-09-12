@@ -43,15 +43,16 @@ Fixes required in the next design iteration:
 > hostnames, RFC 5737 IPs, invented finding counts. Never paste real inventory,
 > scan output, or depot account data into designs.
 
-## 🚧 Download-domain screen IA (epic #16, issue #1035) — proposal, not yet approved
+## Download-domain screen IA (epic #16, issue #1035) — approved
 
 Analogous to the compliance-domain reconciliation immediately below, but for the
-download domain: [`../ui/download-domain-ia.md`](../ui/download-domain-ia.md) is a **PROPOSAL**
-awaiting owner approval (decision R2-11 on epic #16) covering catalog browse/ad-hoc
-download, subscriptions/presets, per-lane store views (ESX patch store, Photon,
-VMware Tools, VKS dimensioned view), content-library per-type views + virtual
-folders, serving/auth dials, retention review lists, alert surfacing, and enrollment/
-tool-install state. This brief's compliance-domain sections below are unaffected.
+download domain: [`download-domain-ia.md`](download-domain-ia.md) is the **approved**
+IA (decision R2-11 on epic #16, ruled on #1035) covering catalog browse/ad-hoc
+download, subscriptions/presets, the Library home for per-lane store views (ESX
+patch store, Photon, VMware Tools, VKS dimensioned view), content-library per-type
+views + virtual folders, serving/auth dials, retention review lists, alert
+surfacing, and enrollment/tool-install state. This brief's compliance-domain
+sections below are unaffected.
 
 ## 🚧 Architecture realignment (epic #726) — read before designing any compliance screen
 
