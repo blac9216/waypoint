@@ -1,0 +1,13 @@
+{
+  "generation": "9.0.2",
+  "families": {
+    "Vcf": "VCF",
+    "Vvf": "VVF",
+    "VsphereStandard": "VSPHERE_STANDARD",
+    "VsphereEssentialPlus": "VSPHERE_ESSENTIAL_PLUS",
+    "VsphereEnterprisePlus": "VSPHERE_ENT_PLUS",
+    "Vlr": "VLR",
+    "Dlvm": "DLVM",
+    "Dsm": "DSM"
+  }
+}

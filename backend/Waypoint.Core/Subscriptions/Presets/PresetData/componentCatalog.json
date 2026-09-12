@@ -1,0 +1,19 @@
+[
+  { "name": "VCENTER", "toolFamily": "Binaries", "familyValue": "VCENTER" },
+  { "name": "SDDC_MANAGER_VCF", "toolFamily": "Binaries", "familyValue": "SDDC_MANAGER_VCF" },
+  { "name": "VCF_FLEET_LCM", "toolFamily": "Binaries", "familyValue": "VCF_FLEET_LCM" },
+  { "name": "VCF_SDDC_LCM", "toolFamily": "Binaries", "familyValue": "VCF_SDDC_LCM" },
+  { "name": "DEPOT_SERVICE", "toolFamily": "Binaries", "familyValue": "DEPOT_SERVICE" },
+  { "name": "ESX_HOST", "toolFamily": "Binaries", "familyValue": "ESX_HOST" },
+  { "name": "NSX_T_MANAGER", "toolFamily": "Binaries", "familyValue": "NSX_T_MANAGER" },
+  { "name": "VMTOOLS", "toolFamily": "Binaries", "familyValue": "VMTOOLS" },
+  { "name": "VCF_LICENSE_SERVER", "toolFamily": "Binaries", "familyValue": "VCF_LICENSE_SERVER" },
+  { "name": "VSP", "toolFamily": "Binaries", "familyValue": "VSP" },
+  { "name": "VLR", "toolFamily": "Binaries", "familyValue": "VLR" },
+  { "name": "VLR_EDGE", "toolFamily": "Binaries", "familyValue": "VLR_EDGE" },
+  { "name": "DLVM", "toolFamily": "Binaries", "familyValue": "DLVM" },
+  { "name": "DSM", "toolFamily": "Binaries", "familyValue": "DSM" },
+  { "name": "VKR", "toolFamily": "Artifacts", "familyValue": "VKS" },
+  { "name": "SUPERVISOR", "toolFamily": "Artifacts", "familyValue": "SUPERVISOR" },
+  { "name": "SUPERVISOR_SERVICE_HARBOR", "toolFamily": "Artifacts", "familyValue": "SUPERVISOR_SERVICE" }
+]
