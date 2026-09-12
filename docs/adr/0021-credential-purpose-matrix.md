@@ -66,6 +66,79 @@ is not a target-kind × operation binding and this ADR does not touch it.
 The system currently has no vocabulary for any of this beyond "the target's one
 credential." This ADR defines that vocabulary before #584 touches persistence.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #582, #583, #580, PR #606, PR #660 (closes #583)._
+
+- vSphere API access and VCSA OS-level SSH access are independently satisfiable
+  operations on the same `vsphere` target, proven in production by issue #580/PR #606's
+  `-SkipVCSACredential` fix: discovery and vSphere API credential-testing were failing
+  because the shared transport unconditionally prompted for a VCSA credential neither
+  operation uses.
+- A generic "one credential per target" model (`targets.credential_id`,
+  `runs.credential_id`) cannot represent a target that legitimately needs more than one,
+  unrelated credential at once (#582 epic goal: "Represent and resolve every credential
+  a target operation requires").
+- The vocabulary must be **explicit, named purpose identifiers**, not generic numbered
+  slots, so the model self-documents what each binding is for and does not degrade into
+  "credential #1, #2, #3" (#583 proposed changes: "without inventing generic numbered
+  slots").
+- Every purpose must trace to a currently-wired transport or wrapper — inventing a
+  purpose ahead of any consumer is out of scope (#583 Risks: "Do not encode a credential
+  requirement that the underlying transport does not actually use; verify against the
+  sibling scripts and current handlers").
+- Discovery must require only the vSphere API purpose, never the VCSA SSH purpose —
+  stated directly as an acceptance criterion (#583: "vSphere API and VCSA SSH are
+  distinct purposes and discovery requires only the API purpose").
+- The matrix must define defaulting, override, snapshot, audit, and missing-binding
+  behavior up front, and must be a machine-testable closed contract shared between
+  backend and frontend, so a future target kind or component added without a matching
+  matrix entry fails the build rather than silently under-resolving credentials (#583
+  acceptance criteria: "ADR defines defaulting, override, snapshot, audit, and
+  missing-binding behavior"; "Backend and frontend share a machine-testable closed
+  purpose contract").
+- The change is design/contracts-only at this stage: it must not touch persistence,
+  execution, or UI behavior, so later slices (#584 persistence, #585/#586 execution
+  resolution, #587 wizard UI) build on a stable model instead of a moving one (PR #660:
+  "Design/contracts-only slice… It explicitly does not change persistence or
+  execution").
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #582, #583, #580, PR #606, PR #660 (closes #583)._
+
+- **Generic numbered credential slots** (e.g. `credential_1`, `credential_2` per
+  target) — rejected. This is the status quo's natural extension and the failure mode
+  #583 was filed to prevent: a numbered slot carries no meaning of its own, so every
+  caller has to know out-of-band which number means "vSphere API" versus "VCSA SSH,"
+  and the model cannot express that a slot is required for one operation but not
+  another.
+- **Explicit, named credential purposes** (`vsphere-api`, `vcsa-ssh`, `nsx-api`,
+  `srg-ssh`) with a purpose → satisfying-credential-type compatibility map — chosen.
+  Each purpose is self-documenting, derived from a real, currently-wired transport or
+  wrapper, and independently overridable.
+- **Splitting `srg-ssh` further by SRG product** (a distinct purpose per Photon, Aria
+  Operations, Aria Automation, Aria Lifecycle, vIDM) — rejected. All four authenticate
+  identically (SSH login, optional sudo elevation); the only variation is a
+  credential-level flag (`sudo_enabled`/`sudo_requires_password`), not a distinct
+  transport or purpose, so a per-product split would multiply purposes without
+  representing any real difference in how the credential is used.
+- **A separate `esxi-ssh` purpose** for direct authenticated SSH to ESXi hosts —
+  rejected. Nothing in the current transport code opens such a session; ESXi hosts are
+  scanned over `vmware://` via `vsphere-api`, exactly like vCenter and VM targets, so
+  the purpose would have no wired consumer.
+- **A `vm-guest` purpose** for the sibling repo's `guest-ops` SSH-access-toggle
+  provider (`module.sshaccess.providers.ps1`, PowerCLI `Invoke-VMScript`) — rejected
+  for the same reason and stated explicitly in the Context: nothing in Waypoint's own
+  scan/discovery/credential-test modules calls that provider today, and inventing the
+  purpose ahead of any wired consumer is exactly the mistake #583's Risks section warns
+  against. Deferred to its own purpose and sub-issue if that flow is ever imported.
+- **Folding STIG Manager's connection into the matrix as a target-operation purpose**
+  — rejected. It is a site-level OIDC client-credentials connection used only for CKL
+  upload, resolved independently of any target, and already has its own `token`-type
+  credential slot; it is not a target-kind × operation binding and is out of this ADR's
+  scope.
+
 ## Decision
 
 ### 1. Credential purposes are explicit, named identifiers — never numbered slots
