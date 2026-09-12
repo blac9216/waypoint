@@ -35,6 +35,49 @@ records (that would defeat the "personal, ad hoc, not reusable" property ADR-001
 exists to preserve) or inventing a runner-to-API plaintext-secret transport (ADR-0014
 already rejected that shape for claimed-job credentials generally).
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #433, #434, PR #450 (closes #434)._
+
+- No shared memory between the API process and a dedicated compliance runner
+  (ADR-0013/0014): a cache living only in the API's memory is invisible to the runner
+  that actually needs the secret.
+- API restarts are ordinary, not exceptional, once control plane and runners are
+  separate processes; a memory-only cache loses the secret across a restart between
+  run creation and job claim, forcing credential re-entry (#434 acceptance criterion:
+  "A personal-credential scan completes after restarting the API before runner claim,
+  without credential re-entry").
+- The durable handoff must not turn personal credentials into reusable
+  credential-store records — preserving ADR-0011's "personal, ad hoc, not reusable"
+  property (#434 acceptance criterion: "Personal credentials never appear in reusable
+  credential APIs, responses, logs, artifacts, or process arguments").
+- The durable handoff must not invent a runner-to-API plaintext-secret transport,
+  matching the trust boundary ADR-0014 already rejected that shape for claimed-job
+  credentials generally.
+- Retry, cancellation, and lease-recovery must keep the secret available while the run
+  is non-terminal, so decrypt cannot be single-shot (#434 acceptance criterion: "A
+  runner restart/retry can resume while the run is non-terminal").
+- The exposure window should stay bounded even for abandoned/crashed runs that never
+  reach a terminal state (PR #450: "adds expiry and a cleanup sweep for
+  abandoned/crashed runs").
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #433, #434, PR #450 (closes #434); the sources record
+no separately-evaluated alternative — the comparison lives only in this ADR's own
+Context, which names the two shapes ruled out alongside the chosen design._
+
+- **Encrypted, run-scoped Postgres persistence, decrypted locally by the responsible
+  runner** (chosen). Reuses ADR-0005's existing envelope-encryption primitives and
+  ADR-0014's already-expanded runner trust boundary; durable across API restarts and
+  runner retries.
+- **Turn personal credentials into reusable credential-store records** — rejected.
+  Would defeat the "personal, ad hoc, not reusable" property ADR-0011 exists to
+  preserve.
+- **A runner-to-API plaintext-secret transport** — rejected. ADR-0014 already
+  rejected that shape for claimed-job credentials generally; introducing it here
+  would add a new plaintext-secret protocol these ADRs otherwise avoid.
+
 ## Decision
 
 1. **Personal credentials persist, encrypted, in a dedicated run-scoped table.** One
