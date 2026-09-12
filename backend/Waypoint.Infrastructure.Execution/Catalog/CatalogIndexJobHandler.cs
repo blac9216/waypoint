@@ -368,7 +368,7 @@ public sealed partial class CatalogIndexJobHandler : IJobHandler
 			_ => null,
 		};
 
-		if (result is null && value is not null)
+		if (result is null && value is not null && _logger.IsEnabled(LogLevel.Debug))
 		{
 			LogSizeDropped(_logger, value.ToString() ?? string.Empty, value.GetType().Name);
 		}
