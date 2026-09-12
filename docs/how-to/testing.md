@@ -538,7 +538,7 @@ timed-out connectivity is a **network** failure, never `auth_failing`.
 
 Download-lane parity coverage against the sibling `vcf-docker-download`'s own
 integration runbook is tracked separately as a living matrix:
-[`docs/testing/download-parity-matrix.md`](../testing/download-parity-matrix.md).
+[`docs/reference/download-parity-matrix.md`](../reference/download-parity-matrix.md).
 
 ## Live integration testing: the `*.local.md` convention
 

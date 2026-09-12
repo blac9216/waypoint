@@ -37,7 +37,7 @@ namespace Waypoint.Tests.Infrastructure.Downloads;
 /// <c>vcf-download-manager.common.ps1</c>'s <c>Save-WebFile</c> -- the status code and
 /// <c>Content-Range</c> header drive the append-vs-restart decision, not the body
 /// size -- against a real in-process <see cref="HttpListener"/>, never a mocked
-/// <c>Invoke-WebRequest</c>. Matrix rows: docs/testing/download-parity-matrix.md's
+/// <c>Invoke-WebRequest</c>. Matrix rows: docs/reference/download-parity-matrix.md's
 /// "Buildable-today subset: the resume protocol" section, RP-01..RP-06 (added by this
 /// PR).
 ///
@@ -589,7 +589,7 @@ public sealed class ResumeProtocolTests
 	}
 
 	/// <summary>
-	/// RP-05 (matrix): a 401/403 response is documented (docs/testing/download-parity-matrix.md,
+	/// RP-05 (matrix): a 401/403 response is documented (docs/reference/download-parity-matrix.md,
 	/// <c>vcf-download-manager.common.ps1</c>'s own "Auth errors - don't retry" comment)
 	/// as non-retryable. Driven with a REAL listener rather than the Pester suite's
 	/// mocks, this now passes: issue #1799 taught <c>Save-WebFile</c>'s auth-error

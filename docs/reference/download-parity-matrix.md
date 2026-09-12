@@ -1,14 +1,16 @@
 # Download parity fixture matrix: sibling contract catalog
 
+Kind: reference
+
 Split A of design record #16/#1036 (issue #1394), under the *Download & depot
 parity* milestone's docs/research/conformance epic (#1186). This is the living
 checklist that translates `vcf-docker-download`'s
 [`tests/INTEGRATION-RUNBOOK.md`](https://github.com/blac9216/vcf-docker-download/blob/main/tests/INTEGRATION-RUNBOOK.md)
 (TC-01…TC-30, EP-01…EP-06, ID-01…ID-03 — 39 cases) into Waypoint-side contract statements,
 each mapped to the owning lane epic. `vcf-docker-download` is a sibling
-repository under the same copyright holder — **owner-authored, not vendored** —
-being absorbed and retired as parity lands (see `AGENTS.md`'s License &
-Borrowing Policy).
+repository under the same copyright holder — **owner-authored, not
+third-party** — being absorbed and retired as parity lands (see `AGENTS.md`'s
+License & Borrowing Policy).
 
 Every row states what the **Waypoint** surface must do, not a restatement of
 the sibling's PowerShell steps — the sibling's CLI flags, log-line text, and
@@ -57,8 +59,8 @@ gap in that guard; see RP-05 below). `DownloadJobHandler.cs` is the C# caller th
 delegates resume/retry to this PowerShell layer entirely and layers its own
 independent sha256 verification on top (see the handler's own doc comment).
 `#1411` pins the PowerShell-layer behavior with concrete tests; every other
-lane below has no implementing code on `main` yet and is marked
-`not yet buildable`.
+lane-specific row below has no implementing code on `main` yet, except TC-01
+(the download-runner image), and is marked `not yet buildable`.
 
 | Case | Waypoint contract | Status | Issue |
 | --- | --- | --- | --- |
