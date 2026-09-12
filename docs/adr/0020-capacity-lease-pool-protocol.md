@@ -17,6 +17,53 @@ must never let coordination failure become silent overcommit, must keep a runner
 discovered/capped budget authoritative (ADR-0018 §5), and must prevent large-profile
 jobs from being starved indefinitely by streams of small ones.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #555, #569. The drivers below trace to the owner's
+Option B ruling on #555 (2026-08-23) and #569's own summary/proposed-changes text,
+restated as a bullet list:_
+
+- Coordination failure must never become silent overcommit — any pool-claim failure
+  must deny rather than guess (#555 ruling: "Explicit cgroup/container limits and
+  operator caps remain authoritative upper bounds"; #569 Proposed Changes: "Tests …
+  DB-unavailable behavior").
+- A runner's own discovered/capped budget must stay the authoritative upper bound on
+  what it may contribute or claim, unchanged by the pool (#555 ruling; ADR-0018 §5).
+- Idle capacity in one runner should benefit a busy sibling instead of being
+  statically stranded — the reason Option B was preferred over static partitioning
+  (#555: "Uses real appliance capacity dynamically" vs. Option A's "capacity is
+  statically split, so an idle download-runner's share can't help a busy
+  compliance-runner").
+- Large-profile jobs must not be starved indefinitely by streams of small ones —
+  fairness/starvation handling is a named requirement, not an afterthought (#569
+  Proposed Changes: "Fairness/starvation: prevent large-profile jobs from being
+  starved indefinitely by streams of small jobs (document the chosen policy)").
+- Lost workers must not leak or duplicate capacity accounting — leases must be
+  reaped consistently with existing job-lease recovery semantics (#569 Proposed
+  Changes: "Reaper for expired heartbeats (worker loss) consistent with existing
+  job-lease recovery semantics").
+- Pool state, active reservations, and starvation reasons must be operator-visible,
+  not just internally tracked (#569 Proposed Changes: "Surface pool capacity, active
+  reservations, and starvation reasons in logs and `GET /system` status").
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #555. The owner's ruling comment on #555 (2026-08-23)
+records exactly two mutually exclusive designs considered for the multi-runner
+overcommit acceptance criterion:_
+
+- **Option A — static partitions.** Ship explicit per-service
+  `deploy.resources.limits` in `deploy/docker-compose.yml`; each runner admits within
+  its own fixed limit. Simple, no new failure modes, deterministic — the issue author's
+  own recommendation. Rejected because capacity is statically split: an idle
+  download-runner's share cannot help a busy compliance-runner (#555).
+- **Option B — shared DB-coordinated capacity lease pool (chosen).** Runners
+  atomically claim weighted CPU/memory slots from a Postgres-coordinated pool before
+  executing work, heartbeat their leases, and release/reap on completion or worker
+  loss. Uses real appliance capacity dynamically, at the cost of new
+  fairness/starvation/lease-recovery machinery and a database-availability dependency
+  in the admission path (#555). The owner ruled for this option on 2026-08-23.
+
 ## Decision
 
 1. **Schema (migration 0036).** A singleton `capacity_pool` row holds the appliance's
