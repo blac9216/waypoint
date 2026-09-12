@@ -11,6 +11,48 @@ product/component behavior, but its paths and orchestration cannot become a Wayp
 runtime contract. Waypoint also needs vendor profile and XCCDF updates to cross an air
 gap without changing active scan content before review.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from this ADR's own Context and Decision (present since the
+bootstrap PR #809, closing #805); corroborated by issue #805 ("Define compliance
+catalog, content lifecycle, and parity contract"), whose acceptance criteria state
+these same requirements for the ADR it commissioned._
+
+- The shipped slice's mutable profile directories and caller-selected profile paths,
+  and the sibling `vmware-stig-docker` catalog's paths and orchestration, cannot
+  become a Waypoint runtime contract — unknown capabilities or layouts must fail
+  closed rather than execute.
+- Vendor profile and XCCDF updates must be able to cross an air gap and be reviewed
+  before they can change active scan content; content acquisition alone must never
+  mutate what a scan runs.
+- Functional equivalence between control revisions must be provable across the
+  complete execution closure, or treated as changed — official output must never mix
+  baseline versions or misrepresent compliance.
+- A STIG baseline must always activate as one complete, compatible, fully mapped
+  vendor-profile + XCCDF pair, atomically, with rollback to any retained
+  previously-approved complete baseline — never a partial or force-activated mix.
+- Cross-boundary content transfer must fit the signed transfer envelope already
+  planned in ADR-0015, not a separate zip or folder-copy mechanism.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own "Alternatives rejected" section
+(present since the bootstrap PR #809, closing #805); the sources record no dedicated
+debate beyond that section's own text, so the rejected alternatives are re-homed here
+verbatim under their original wording. Corroborated by issue #805, whose acceptance
+criteria specify the one-baseline-per-exact-version, complete-closure-equivalence, and
+atomic-activation properties that motivated rejecting these alternatives._
+
+1. **Closed, Waypoint-owned execution catalog with exact-version baselines, additive
+   content lifecycle, complete-closure equivalence, and atomic activation** (chosen) —
+   see Decision below.
+2. Treat every discovered `inspec.yml` or operator mapping as runnable: execution
+   semantics would be ambiguous and operator uploads could introduce code.
+3. Activate per-control revisions independently: official output could mix baseline
+   versions and misrepresent compliance.
+4. Use newest-arrival, profile hash alone, or version proximity: none proves functional
+   equivalence or exact benchmark compatibility.
+
 ## Decision
 
 ### Catalog authority and exact baselines
@@ -119,12 +161,3 @@ quarantined; import never overwrites history or auto-activates functional change
   (#728, #729, #730, #731); the signed transfer path delivered (#748);
   mutable-directory replacement removal delivered (#595). Still open: fixed-path
   fallback removal (#650), #625, and #567.
-
-## Alternatives rejected
-
-- Treat every discovered `inspec.yml` or operator mapping as runnable: execution
-  semantics would be ambiguous and operator uploads could introduce code.
-- Activate per-control revisions independently: official output could mix baseline
-  versions and misrepresent compliance.
-- Use newest-arrival, profile hash alone, or version proximity: none proves functional
-  equivalence or exact benchmark compatibility.
