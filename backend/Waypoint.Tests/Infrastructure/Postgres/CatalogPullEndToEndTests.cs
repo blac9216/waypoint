@@ -308,6 +308,9 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => _inner.GetByIdAsync(id, cancellationToken);
 
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) =>
+			_inner.GetByIdsAsync(ids, cancellationToken);
+
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, Waypoint.Core.Pagination.PageRequest page, CancellationToken cancellationToken) =>
 			_inner.ListAsync(filter, page, cancellationToken);
 	}

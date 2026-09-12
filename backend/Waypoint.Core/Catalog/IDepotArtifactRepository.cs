@@ -44,6 +44,20 @@ public interface IDepotArtifactRepository
 	Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Bounded-cost lookup for a set of ids, added for issues #1605/#1630:
+	/// <c>DownloadsController</c>'s <c>QueueDownloads</c>/<c>QueueBinariesDownload</c>
+	/// id-list branches used to resolve requested ids against a client-side dictionary
+	/// built from <see cref="ListAsync"/> -- either a single capped 200-row page (#1605,
+	/// so a valid id outside that window 404'd) or the whole table paged to completion
+	/// (#1630, one round trip per 200 rows plus a <c>COUNT</c> for what is really a
+	/// targeted-id-set membership check). This issues exactly one query regardless of
+	/// catalog size. Duplicate values in <paramref name="ids"/> are harmless (matched by
+	/// the underlying id primary key, so the result never carries a duplicate row).
+	/// An empty <paramref name="ids"/> returns an empty list without a query.
+	/// </summary>
+	Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Filtered, paginated list plus the filtered total (for <c>X-Total-Count</c> --
 	/// the count reflects the filter, not the whole table, per every other paginated
 	/// resource in this codebase).

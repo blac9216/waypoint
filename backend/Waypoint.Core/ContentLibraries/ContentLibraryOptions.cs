@@ -34,7 +34,13 @@ public sealed class ContentLibraryOptions
 	/// against this root) before it is ever combined with <c>RootPath</c>; a library
 	/// resolving outside this root is rejected, not merely undesired by convention.
 	/// Two libraries can never collide on the same directory either (the DB's own
-	/// unique constraint on <c>name</c> already forbids two rows sharing a leaf).
+	/// unique constraint on <c>name</c> forbids two rows sharing a byte-identical
+	/// name, and <see cref="Waypoint.Infrastructure.ContentLibraries.ContentLibraryRepository.CreateAsync"/>
+	/// additionally rejects a name that differs from an existing one only by case
+	/// (issue #1667) -- the case a byte-wise constraint alone would miss on a
+	/// case-insensitive mount (macOS APFS default, Windows NTFS, or a
+	/// case-insensitive SMB/NFS export an operator might point <see cref="RootPath"/>
+	/// at), since two such rows would otherwise resolve to the SAME directory.
 	/// </summary>
 	public string RootPath { get; set; } = "/var/lib/waypoint/content-libraries";
 }

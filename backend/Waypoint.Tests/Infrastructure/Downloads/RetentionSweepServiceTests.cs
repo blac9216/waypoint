@@ -207,6 +207,9 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
 			id == missing ? Task.FromResult<DepotArtifact?>(null) : inner.GetByIdAsync(id, cancellationToken);
 
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) =>
+			inner.GetByIdsAsync(ids, cancellationToken);
+
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			inner.ListAsync(filter, page, cancellationToken);
 	}

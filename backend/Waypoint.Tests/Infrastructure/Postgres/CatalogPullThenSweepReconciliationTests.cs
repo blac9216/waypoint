@@ -221,6 +221,9 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, ID
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
 			inner.GetByIdAsync(id, cancellationToken);
 
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) =>
+			inner.GetByIdsAsync(ids, cancellationToken);
+
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			inner.ListAsync(filter, page, cancellationToken);
 	}

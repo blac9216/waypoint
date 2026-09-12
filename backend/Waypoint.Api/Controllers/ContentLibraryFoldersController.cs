@@ -86,8 +86,10 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 			ContentLibraryFolderCreateOutcome.Created => CreatedAtAction(
 				nameof(GetTree), new { libraryId }, ContentLibraryFolderResponse.FromDomain(folder!)),
 			ContentLibraryFolderCreateOutcome.LibraryNotFound => throw LibraryNotFoundError(libraryId),
-			ContentLibraryFolderCreateOutcome.ParentNotFound => throw ApiException.Validation(
-				"'parent_folder_id' does not name a folder in this library."),
+			// Issue #1812: 404, not the 400 validation shape this arm used before -- one
+			// status code for "the folder id you referenced does not exist," matching
+			// Update's own ParentNotFound arm and AssignItem's FolderNotFound arm below.
+			ContentLibraryFolderCreateOutcome.ParentNotFound => throw FolderNotFoundError(request!.ParentFolderId!.Value),
 			_ => throw new ApiException(
 				HttpStatusCode.Conflict, "folder_name_taken", $"A sibling folder named '{name}' already exists."),
 		};
@@ -117,8 +119,10 @@ public sealed class ContentLibraryFoldersController : ControllerBase
 		throw outcome switch
 		{
 			ContentLibraryFolderUpdateOutcome.NotFound => FolderNotFoundError(folderId),
-			ContentLibraryFolderUpdateOutcome.ParentNotFound => ApiException.Validation(
-				"'parent_folder_id' does not name a folder in this library."),
+			// Issue #1812: same 404 shape as Create's own ParentNotFound arm above and
+			// AssignItem's FolderNotFound arm below -- one status code for "the folder id
+			// you referenced does not exist," regardless of which action referenced it.
+			ContentLibraryFolderUpdateOutcome.ParentNotFound => FolderNotFoundError(request!.ParentFolderId!.Value),
 			ContentLibraryFolderUpdateOutcome.CycleRejected => ApiException.Validation(
 				"A folder cannot be moved under itself or one of its own descendants."),
 			_ => new ApiException(HttpStatusCode.Conflict, "folder_name_taken", $"A sibling folder named '{name}' already exists."),

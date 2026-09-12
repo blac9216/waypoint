@@ -164,6 +164,9 @@ public sealed class ResumeProtocolTests
 
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult<DepotArtifact?>(Row);
 
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<DepotArtifact>>(ids.Contains(Row.Id) ? [Row] : []);
+
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(
 			DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			Task.FromResult<(IReadOnlyList<DepotArtifact>, long)>(([Row], 1));

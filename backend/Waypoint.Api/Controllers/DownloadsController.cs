@@ -172,19 +172,35 @@ public sealed class DownloadsController : ControllerBase
 
 		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
 
-		(IReadOnlyList<DepotArtifact> catalog, _) = await _artifacts
-			.ListAsync(new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, cancellationToken)
-			.ConfigureAwait(false);
-		Dictionary<Guid, DepotArtifact> byId = catalog.ToDictionary(item => item.Id);
+		// Issue #1605: resolve requested ids via a targeted GetByIdsAsync lookup, not a
+		// client-side dictionary over a single capped (MaxLimit 200) ListAsync page --
+		// a valid id outside that page used to 404 as if it did not exist. Guids parse
+		// first so GetByIdsAsync (which trusts every value is a real Guid) is called with
+		// exactly the ids this request could possibly mean; a malformed id still 404s,
+		// matching this endpoint's pre-existing behavior (not in scope here -- see
+		// QueueBinariesDownload's own 400-for-malformed-id handling, issue #1630).
+		List<Guid> parsedIds = [];
+		foreach (string rawId in request.DepotArtifactIds)
+		{
+			if (!Guid.TryParse(rawId, out Guid artifactId))
+			{
+				throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
+			}
+
+			parsedIds.Add(artifactId);
+		}
+
+		IReadOnlyList<DepotArtifact> found = await _artifacts.GetByIdsAsync(parsedIds, cancellationToken).ConfigureAwait(false);
+		Dictionary<Guid, DepotArtifact> byId = found.ToDictionary(item => item.Id);
 
 		// Resolve every requested artifact and stage its download row + job spec first, so
 		// an unknown id is a clean 404 before we create the run (no orphaned run/jobs).
 		List<DepotArtifact> resolved = [];
-		foreach (string rawId in request.DepotArtifactIds)
+		foreach (Guid artifactId in parsedIds)
 		{
-			if (!Guid.TryParse(rawId, out Guid artifactId) || !byId.TryGetValue(artifactId, out DepotArtifact? artifact))
+			if (!byId.TryGetValue(artifactId, out DepotArtifact? artifact))
 			{
-				throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
+				throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{artifactId}' does not exist.");
 			}
 
 			resolved.Add(artifact);
@@ -284,26 +300,48 @@ public sealed class DownloadsController : ControllerBase
 		}
 		else
 		{
-			List<DepotArtifact> catalog = await ListAllArtifactsAsync(
-				new DepotArtifactFilter(null, null, null), cancellationToken).ConfigureAwait(false);
-			Dictionary<Guid, DepotArtifact> byId = catalog.ToDictionary(item => item.Id);
-
-			// Dedupe by id, preserving first-seen order, so a duplicate entry in
-			// depot_artifact_ids (e.g. ["X","X"]) fans out exactly one job for that
-			// artifact rather than two jobs racing on the same TargetId.
-			resolved = [];
+			// Issue #1630: resolve the id-list via a bounded GetByIdsAsync lookup --
+			// exactly one query regardless of catalog size -- rather than materialising
+			// the entire depot_artifacts table into memory (one ListAsync round trip per
+			// 200 rows plus a COUNT) purely to check that a handful of ids exist. Guids
+			// are parsed and validated FIRST, before any query: a non-Guid entry is a
+			// client-side validation error (400), distinct from a well-formed-but-unknown
+			// id (404) -- the two used to be indistinguishable, both 404. Dedupe by id,
+			// preserving first-seen order, so a duplicate entry in depot_artifact_ids
+			// (e.g. ["X","X"]) fans out exactly one job for that artifact rather than two
+			// jobs racing on the same TargetId.
+			List<Guid> orderedIds = [];
 			HashSet<Guid> seen = [];
 			foreach (string rawId in request!.DepotArtifactIds!)
 			{
-				if (!Guid.TryParse(rawId, out Guid artifactId) || !byId.TryGetValue(artifactId, out DepotArtifact? artifact))
+				if (!Guid.TryParse(rawId, out Guid artifactId))
 				{
-					throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
+					throw ApiException.Validation($"'{rawId}' in depot_artifact_ids is not a valid id.");
 				}
 
 				if (seen.Add(artifactId))
 				{
-					resolved.Add(artifact);
+					orderedIds.Add(artifactId);
 				}
+			}
+
+			IReadOnlyList<DepotArtifact> found = await _artifacts.GetByIdsAsync(orderedIds, cancellationToken).ConfigureAwait(false);
+
+			// GetByIdsAsync's WHERE id = ANY($1) matches each row at most once (id is the
+			// table's primary key), so this can never throw on a duplicate key the way the
+			// prior client-side ToDictionary(catalog...) could when a paged walk raced a
+			// concurrent insert and returned an already-seen row twice.
+			Dictionary<Guid, DepotArtifact> byId = found.ToDictionary(item => item.Id);
+
+			resolved = [];
+			foreach (Guid artifactId in orderedIds)
+			{
+				if (!byId.TryGetValue(artifactId, out DepotArtifact? artifact))
+				{
+					throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{artifactId}' does not exist.");
+				}
+
+				resolved.Add(artifact);
 			}
 		}
 
