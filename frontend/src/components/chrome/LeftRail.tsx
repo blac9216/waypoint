@@ -42,6 +42,10 @@ const ICONS: Record<ScreenKey, ComponentType> = {
 	"content-library": ContentLibraryIcon,
 	retention: RetentionIcon,
 	presets: PresetsIcon,
+	// No nav entry (issue #1473 — reached via the presets screen's Adopt
+	// action or a direct link, not the left rail); reuses PresetsIcon purely
+	// to satisfy ICONS's exhaustive `Record<ScreenKey, ...>` typing.
+	"subscription-editor": PresetsIcon,
 	transfer: TransferIcon,
 	configuration: ConfigurationIcon,
 	audit: AuditIcon,

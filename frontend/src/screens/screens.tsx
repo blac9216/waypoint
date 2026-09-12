@@ -12,6 +12,7 @@ import { PresetsScreen as PresetsAdoptCloneEditScreen } from "./presets/PresetsS
 import { RetentionReviewScreen as RetentionReviewRoute } from "./retention/RetentionReviewScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
+import { SubscriptionEditorScreen as SubscriptionCreateEditScreen } from "./subscriptions/SubscriptionEditorScreen";
 
 export function DashboardScreen() {
 	return <DashboardAggregateScreen />;
@@ -55,6 +56,10 @@ export function RetentionScreen() {
 
 export function PresetsScreen() {
 	return <PresetsAdoptCloneEditScreen />;
+}
+
+export function SubscriptionEditorScreen() {
+	return <SubscriptionCreateEditScreen />;
 }
 
 export function TransferScreen() {
