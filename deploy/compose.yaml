@@ -35,7 +35,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      # why: docs/rationale/deploy.md#kcrealmreconcile-why-needed
+      # why: docs/rationale/deploy.md#kcrealmreconcile-every-boot-fix
       keycloak-realm-reconcile:
         condition: service_completed_successfully
     # Long syntax: published: aliases https-port.
