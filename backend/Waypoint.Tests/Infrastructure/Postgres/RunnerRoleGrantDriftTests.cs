@@ -1429,6 +1429,133 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #1472 (migration <c>subscription_evaluation_state</c>), added at authoring
+	/// time per this file's own standing convention (a new runner-executed table without
+	/// a role-contract test ships grant drift silently -- see this file's header and
+	/// 0036/0048/0049's companion tests). The <c>subscription-evaluate</c> job handler
+	/// (<c>SubscriptionEvaluationJobHandler</c>, download-runner domain) resolves the
+	/// subscription via <see cref="Waypoint.Core.Subscriptions.ISubscriptionRepository.GetAsync"/>
+	/// (needs the migration's new <c>SELECT</c> on <c>subscriptions</c>) and then, through
+	/// <see cref="Waypoint.Core.Subscriptions.ISubscriptionEvaluationStateRepository"/>,
+	/// reads prior state (<c>SELECT</c>), upserts the evaluation facts (<c>INSERT ... ON
+	/// CONFLICT DO UPDATE</c> needs both <c>INSERT</c> and <c>UPDATE</c>), and persists the
+	/// fetch set (<c>UPDATE</c>) -- all as the real <c>waypoint_download_runner</c> role.
+	/// Proves the migration's <c>SELECT</c> on <c>subscriptions</c> and
+	/// <c>SELECT, INSERT, UPDATE</c> on <c>subscription_evaluation_state</c> actually land,
+	/// not just that the GRANT statements ran without error.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_EvaluatesSubscriptionState_WithoutPermissionDenied()
+	{
+		Guid subscriptionId = await SeedSubscriptionAsync();
+
+		// SELECT on subscriptions -- the handler's first step (resolve the subscription).
+		Waypoint.Infrastructure.Subscriptions.SubscriptionRepository runnerSubscriptions = new(_downloadRunnerConnectionString);
+		Waypoint.Core.Subscriptions.Subscription? resolved = await runnerSubscriptions.GetAsync(subscriptionId, CancellationToken.None);
+		Assert.NotNull(resolved);
+
+		Waypoint.Infrastructure.Subscriptions.SubscriptionEvaluationStateRepository runnerState = new(_downloadRunnerConnectionString);
+
+		// SELECT on subscription_evaluation_state -- prior-state read, no row yet.
+		Assert.Null(await runnerState.GetAsync(subscriptionId, CancellationToken.None));
+
+		// INSERT path (UpsertAsync's ON CONFLICT INSERT branch).
+		await runnerState.UpsertAsync(
+			new Waypoint.Core.Subscriptions.SubscriptionEvaluationState(subscriptionId, 41L, DateTimeOffset.UtcNow, 0, null),
+			CancellationToken.None);
+		Waypoint.Core.Subscriptions.SubscriptionEvaluationState? afterInsert = await runnerState.GetAsync(subscriptionId, CancellationToken.None);
+		Assert.NotNull(afterInsert);
+		Assert.Equal(41L, afterInsert!.LastSeenLibVersionCounter);
+
+		// UPDATE path (UpsertAsync's ON CONFLICT DO UPDATE branch on the now-existing row).
+		await runnerState.UpsertAsync(
+			new Waypoint.Core.Subscriptions.SubscriptionEvaluationState(subscriptionId, 42L, DateTimeOffset.UtcNow, 2, 4096L),
+			CancellationToken.None);
+		Waypoint.Core.Subscriptions.SubscriptionEvaluationState? afterUpdate = await runnerState.GetAsync(subscriptionId, CancellationToken.None);
+		Assert.NotNull(afterUpdate);
+		Assert.Equal(42L, afterUpdate!.LastSeenLibVersionCounter);
+		Assert.Equal(2, afterUpdate.LastFetchSetCount);
+
+		// UPDATE path 2 (SetFetchSetAsync writes fetch_set_json + clears fanned_out_at).
+		await runnerState.SetFetchSetAsync(
+			subscriptionId,
+			[new Waypoint.Core.Subscriptions.SubscriptionFetchItem(Guid.NewGuid(), "external-1", "8.0.3", null, 4096L)],
+			CancellationToken.None);
+		IReadOnlyList<Waypoint.Core.Subscriptions.SubscriptionFetchItem>? pending =
+			await runnerState.GetPendingFetchSetAsync(subscriptionId, CancellationToken.None);
+		Assert.NotNull(pending);
+		Assert.Single(pending!);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for <c>subscription_evaluation_state</c> mirroring
+	/// <see cref="DownloadRunnerRole_CannotDeleteCatalogPullStateRows"/>: the migration
+	/// grants <c>SELECT, INSERT, UPDATE</c> only -- never <c>DELETE</c>. A row's lifetime
+	/// is bound to its subscription (<c>ON DELETE CASCADE</c> off <c>subscriptions.id</c>),
+	/// so no runner ever deletes one directly; a <c>DELETE</c> as the download-runner role
+	/// must still fail 42501.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotDeleteSubscriptionEvaluationState()
+	{
+		Guid subscriptionId = await SeedSubscriptionAsync();
+
+		Waypoint.Infrastructure.Subscriptions.SubscriptionEvaluationStateRepository runnerState = new(_downloadRunnerConnectionString);
+		await runnerState.UpsertAsync(
+			new Waypoint.Core.Subscriptions.SubscriptionEvaluationState(subscriptionId, null, DateTimeOffset.UtcNow, 0, null),
+			CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand delete = new("DELETE FROM subscription_evaluation_state WHERE subscription_id = $1", connection);
+		delete.Parameters.AddWithValue(subscriptionId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for the migration's new <c>subscriptions</c> grant:
+	/// it is <c>SELECT</c> only (the runner reads a subscription to evaluate it; authoring
+	/// stays API-only, <c>SubscriptionsController</c>). Representative prohibited write --
+	/// an <c>UPDATE</c> flipping <c>is_enabled</c> must still fail 42501 as the
+	/// download-runner role, proving the grant did not accidentally widen past SELECT.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotWriteSubscriptions()
+	{
+		Guid subscriptionId = await SeedSubscriptionAsync();
+
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new("UPDATE subscriptions SET is_enabled = false WHERE id = $1", connection);
+		update.Parameters.AddWithValue(subscriptionId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Seeds a minimal enabled subscription (issue #1472 grant-drift tests) via the owner connection -- the FK parent every subscription_evaluation_state row cascades from.</summary>
+	private async Task<Guid> SeedSubscriptionAsync()
+	{
+		Waypoint.Infrastructure.Subscriptions.SubscriptionRepository ownerSubscriptions = new(_fixture.ConnectionString);
+		return await ownerSubscriptions.CreateAsync(
+			new Waypoint.Core.Subscriptions.Subscription(
+				Guid.NewGuid(),
+				"VCENTER",
+				Waypoint.Core.Secrets.RepoStores.ContentLibraries,
+				Waypoint.Core.Subscriptions.SubscriptionLineGranularity.Minor,
+				"8.0",
+				PresetId: null,
+				RefreshWindowDays: null,
+				RetentionOverrideDays: null,
+				IsEnabled: true,
+				CreatedAt: DateTimeOffset.UtcNow,
+				UpdatedAt: DateTimeOffset.UtcNow),
+			CancellationToken.None);
+	}
+
 	/// <summary>Seeds a minimal catalog execution profile (full 0050 identity tree) for baseline tests that only need a valid FK target, not the catalog's own semantics.</summary>
 	private async Task<Guid> SeedCatalogExecutionProfileAsync(string suffix)
 	{
