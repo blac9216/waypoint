@@ -12,6 +12,39 @@ this split as a `Transfer/` staging directory. The planned estate: **one
 internet-connected enclave using all features, plus disconnected enclaves consuming
 its exports.**
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from this ADR's own Context and Rationale (present since
+the bootstrap commit `2fef4614`, 2026-08-02T09:43:45Z); corroborated same-day by epic
+#17, which restates the connected/disconnected split as this ADR's decision._
+
+- The predecessor tools already split along the air gap: the download manager needs
+  Broadcom depot access (connected side); the STIG runner has to operate inside
+  enclaves with no such access (disconnected side).
+- The real user base spans both sides — one internet-connected enclave plus
+  disconnected enclaves consuming its exports — not a connected-only audience.
+- A connected-only product would exclude most of that user base; two separate products
+  would double maintenance for what is otherwise a feature-flag's worth of difference
+  between them.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own Rationale (present since the bootstrap
+commit `2fef4614`, 2026-08-02T09:43:45Z); the sources record no issue or PR that
+separately evaluated these alternatives — the comparison lives only in this ADR's own
+text. Corroborated same-day by epic #17._
+
+- **Connected-only product** — rejected. Shrinks the audience to a fraction of the
+  real user base, most of whom operate disconnected enclaves.
+- **Two separate products** (one per side of the air gap) — rejected. Doubles
+  maintenance for a feature-flag's worth of difference between the two.
+- **One appliance image with an instance-level connected/disconnected mode** (this
+  decision) — chosen. Connected mode exposes STIG, downloads/catalog browser,
+  content-library and Photon repo management, export bundle composition, and optional
+  online update check; disconnected mode exposes STIG features plus import bundle
+  handling, with download/depot features hidden or disabled. One codebase, one image,
+  never a fork; tracked for implementation in epic #17.
+
 ## Decision
 
 One appliance image, deployed per enclave, with an instance-level **mode**:
