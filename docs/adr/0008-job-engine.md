@@ -12,6 +12,48 @@ catalog indexing. The STIG runner currently owns its own runspace-pool orchestra
 (`module.parallelism.ps1`); the download tool runs sequentially. A UI demands shared
 job history, live progress, and scheduling.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from this ADR's own Rationale (present since the bootstrap
+commit `2fef4614`, 2026-08-02T09:43:45Z); corroborated by epic #5 ("Epic: backend job
+engine core — queue, dispatcher, state machine, run controls"), which implemented the
+claim/lease queue, dispatcher, and run controls this ADR decided._
+
+- Every product — and every future feature — is a long-running operation against
+  infrastructure (scans, remediations, downloads, discovery, bundle export/import,
+  catalog indexing); a UI demands shared job history, live progress, and scheduling
+  across all of them, which no per-product orchestrator gives it.
+- This is the proven AWX/Rundeck/Semaphore shape for "credentials + jobs against
+  infrastructure." Building it once means the download manager, transfer, and updater
+  get progress/history/streaming for free.
+- Postgres-as-queue removes an entire infrastructure component; the project's
+  concurrency is dozens of targets, not thousands of messages, so a broker's added
+  throughput is not a driver here.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own Context and Decision; the sources
+record no issue or PR debating these alternatives — the comparison lives only in the
+ADR's own text. Option 1 is additionally corroborated by epic #5, which implemented
+it._
+
+1. **One central Postgres-backed job engine for all job types** (chosen) — one queue
+   claimed with `SELECT … FOR UPDATE SKIP LOCKED`, one Run → Jobs fan-out, one state
+   machine, and one SSE/event stream, serving scans, remediations, downloads,
+   discovery, and bundle work alike. Realised by epic #5 (#127–#130, PRs
+   #134/#139/#143/#144).
+2. **Keep each predecessor's own per-product orchestrator** — the STIG runner's
+   existing runspace-pool orchestrator (`module.parallelism.ps1`) and the download
+   tool's sequential execution, both named in Context as the status quo. Rejected:
+   neither gives the UI shared job history, live progress, or scheduling, and every
+   future feature would need to build its own version.
+3. **A message-broker-backed queue (e.g. Redis/RabbitMQ)** — named in the Decision's
+   own "Queue" bullet ("No Redis/broker at this scale") as a rejected alternative to
+   the Postgres queue. The sources record no dedicated comparison beyond that
+   dismissal: at dozens of concurrent targets rather than thousands of messages, a
+   broker's added infrastructure and operational surface were judged not worth the
+   throughput it buys.
+
 ## Decision
 
 One **job engine** in the backend serves all job types:
