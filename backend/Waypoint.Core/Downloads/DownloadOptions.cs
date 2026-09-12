@@ -27,4 +27,13 @@ public sealed class DownloadOptions
 	/// verification (see <see cref="Waypoint.Infrastructure.Downloads.DownloadJobHandler"/>).
 	/// </summary>
 	public string ArtifactStorePath { get; set; } = "/var/lib/waypoint/artifacts";
+
+	/// <summary>
+	/// Issue #1041: how often <c>DownloadJobHandler</c> samples
+	/// <see cref="ArtifactStorePath"/>'s destination file size while a download is in
+	/// flight to compute byte progress/rate/ETA. Bounds sampling overhead to one stat
+	/// call per interval regardless of how large the transfer is (AC: "sampling
+	/// overhead bounded").
+	/// </summary>
+	public TimeSpan ProgressSampleInterval { get; set; } = TimeSpan.FromSeconds(5);
 }

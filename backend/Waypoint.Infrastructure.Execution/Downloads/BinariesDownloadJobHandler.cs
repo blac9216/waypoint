@@ -230,13 +230,32 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 				return JobExecutionOutcome.Failed("The configured Activation Code does not decode a usable asset_id; cannot seed identity.");
 			}
 
-			BinariesDownloadResult result = await _tool
-				.DownloadAsync(payload.BundleId, depotStorePath, activationCodePath, identityHome, assetId, cancellationToken)
-				.ConfigureAwait(false);
+			// Issue #1041: sample the destination path's size on disk while the tool
+			// runs -- never parse its (buffered, no-TTY) stdout for progress (issue
+			// #719). depotArtifactId was already validated as a well-formed GUID above;
+			// a lookup miss here just means an unknown total (sampling still reports
+			// bytes-only progress, never a divide-by-zero).
+			DepotArtifact? sizingHint = await _artifacts.GetByIdAsync(depotArtifactId, cancellationToken).ConfigureAwait(false);
+			long? knownSizeBytes = sizingHint?.SizeBytes;
+			string? destinationPath = ResolveDestinationPath(depotStorePath, payload.ExternalId);
+
+			await DownloadProgressEvents.EmitAsync(
+				context, DownloadStates.Downloading, depotArtifactId, bytesDownloaded: 0, bytesTotal: knownSizeBytes,
+				downloadRateBps: null, etaSeconds: null, downloadId: null, retries: null, cancellationToken).ConfigureAwait(false);
+
+			BinariesDownloadResult result = await FileGrowthProgressSampler.RunAsync(
+				measureBytes: () => destinationPath is null ? 0 : FileGrowthProgressSampler.MeasurePathSize(destinationPath),
+				bytesTotal: knownSizeBytes,
+				onSample: (sample, sampleToken) => DownloadProgressEvents.EmitAsync(
+					context, DownloadStates.Downloading, depotArtifactId, sample.BytesDownloaded, sample.BytesTotal,
+					sample.DownloadRateBps, sample.EtaSeconds, downloadId: null, retries: null, sampleToken),
+				operation: token => _tool.DownloadAsync(payload.BundleId, depotStorePath, activationCodePath, identityHome, assetId, token),
+				cancellationToken: cancellationToken,
+				interval: toolOptions.ProgressSampleInterval).ConfigureAwait(false);
 
 			// Issue #1482 AC: tool stdout is captured verbatim in job logs, never parsed
-			// for control flow -- actual progress/rate/ETA computation is #1041's later
-			// concern, not this handler's job.
+			// for control flow -- issue #1041 (above) is what actually computes
+			// progress/rate/ETA, from sampled file size, not from this stdout.
 			if (!string.IsNullOrEmpty(result.Stdout))
 			{
 				await EmitLogAsync(context, result.Succeeded ? "information" : "warning", result.Stdout, cancellationToken)
@@ -445,6 +464,25 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		});
 		await context.Events.EmitAsync(JobEventTypes.SystemNotice, context.Job.Id, context.Job.RunId, payload, cancellationToken)
 			.ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #1041: resolves the tool's eventual destination path under
+	/// <paramref name="depotStorePath"/> for progress sampling, purely so the sampler
+	/// has something to stat before <see cref="IBinaryDownloadVerifier"/> ever runs --
+	/// mirrors <c>BinaryDownloadVerifier.ResolveConfinedPath</c>'s identical confinement
+	/// guard rather than exposing that private helper. Null (never throws) when
+	/// <paramref name="externalId"/> would resolve outside the depot store root; the
+	/// sampler then reports zero bytes until the path exists (or, in the escape case,
+	/// forever) rather than tracking an untrusted or out-of-root location.
+	/// </summary>
+	private static string? ResolveDestinationPath(string depotStorePath, string externalId)
+	{
+		string fullRoot = Path.GetFullPath(depotStorePath);
+		string fullPath = Path.GetFullPath(Path.Combine(depotStorePath, externalId));
+		bool confined = fullPath.StartsWith(fullRoot, StringComparison.Ordinal)
+			&& (fullPath.Length == fullRoot.Length || fullPath[fullRoot.Length] == Path.DirectorySeparatorChar);
+		return confined ? fullPath : null;
 	}
 
 	/// <summary>Issue #760: atomic 0700 <c>mkdir</c>, never create-then-chmod -- mirrors <c>CatalogPullJobHandler</c>'s identical helper.</summary>

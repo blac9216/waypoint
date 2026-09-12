@@ -113,14 +113,31 @@ public sealed class DownloadJobHandler : IJobHandler
 
 		string storeRoot = _options.Value.ArtifactStorePath;
 		string destinationPath = Path.Combine(storeRoot, SanitizeFileName(artifact.ExternalId));
+		long? knownSizeBytes = artifact.SizeBytes;
 
 		await _downloads.UpdateProgressAsync(
-			payload.DownloadId, DownloadStates.Downloading, bytesTotal: null, bytesDownloaded: null,
+			payload.DownloadId, DownloadStates.Downloading, bytesTotal: knownSizeBytes, bytesDownloaded: null,
 			downloadRateBps: null, etaSeconds: null, failureReason: null, cancellationToken).ConfigureAwait(false);
-		await EmitProgressAsync(context, payload.DownloadId, DownloadStates.Downloading, 0, null, cancellationToken).ConfigureAwait(false);
+		await EmitProgressAsync(context, payload, DownloadStates.Downloading, 0, knownSizeBytes, null, null, cancellationToken).ConfigureAwait(false);
 
-		PowerShellExecutionOutput invocation = await InvokeDownloadWithRetryAsync(
-			payload, destinationPath, context, cancellationToken).ConfigureAwait(false);
+		RetryTracker retries = new();
+		PowerShellExecutionOutput invocation = await FileGrowthProgressSampler.RunAsync(
+			measureBytes: () => FileGrowthProgressSampler.MeasurePathSize(destinationPath),
+			bytesTotal: knownSizeBytes,
+			onSample: async (sample, sampleToken) =>
+			{
+				long? rounded = sample.DownloadRateBps is double rate ? (long)Math.Round(rate) : null;
+				int? etaRounded = sample.EtaSeconds is double eta ? (int)Math.Round(eta) : null;
+				await _downloads.UpdateProgressAsync(
+					payload.DownloadId, DownloadStates.Downloading, bytesTotal: sample.BytesTotal, bytesDownloaded: sample.BytesDownloaded,
+					downloadRateBps: rounded, etaSeconds: etaRounded, failureReason: null, sampleToken).ConfigureAwait(false);
+				await EmitProgressAsync(
+					context, payload, DownloadStates.Downloading, sample.BytesDownloaded, sample.BytesTotal,
+					sample.DownloadRateBps, sample.EtaSeconds, sampleToken, retries.Count).ConfigureAwait(false);
+			},
+			operation: token => InvokeDownloadWithRetryAsync(payload, destinationPath, context, retries, token),
+			cancellationToken: cancellationToken,
+			interval: _options.Value.ProgressSampleInterval).ConfigureAwait(false);
 
 		if (!invocation.Succeeded)
 		{
@@ -131,7 +148,7 @@ public sealed class DownloadJobHandler : IJobHandler
 		await _downloads.UpdateProgressAsync(
 			payload.DownloadId, DownloadStates.Verifying, bytesTotal: invocation.Size, bytesDownloaded: invocation.Size,
 			downloadRateBps: null, etaSeconds: 0, failureReason: null, cancellationToken).ConfigureAwait(false);
-		await EmitProgressAsync(context, payload.DownloadId, DownloadStates.Verifying, invocation.Size, invocation.Size, cancellationToken).ConfigureAwait(false);
+		await EmitProgressAsync(context, payload, DownloadStates.Verifying, invocation.Size, invocation.Size, null, 0, cancellationToken).ConfigureAwait(false);
 
 		bool verified = await VerifyChecksumAsync(destinationPath, artifact.Sha256, cancellationToken).ConfigureAwait(false);
 		if (!verified)
@@ -145,7 +162,7 @@ public sealed class DownloadJobHandler : IJobHandler
 		await _downloads.UpdateProgressAsync(
 			payload.DownloadId, DownloadStates.Verified, bytesTotal: invocation.Size, bytesDownloaded: invocation.Size,
 			downloadRateBps: null, etaSeconds: 0, failureReason: null, cancellationToken).ConfigureAwait(false);
-		await EmitProgressAsync(context, payload.DownloadId, DownloadStates.Verified, invocation.Size, invocation.Size, cancellationToken).ConfigureAwait(false);
+		await EmitProgressAsync(context, payload, DownloadStates.Verified, invocation.Size, invocation.Size, null, 0, cancellationToken).ConfigureAwait(false);
 		await _artifacts.UpsertAsync(
 			new DepotArtifactUpsert(artifact.ExternalId, artifact.Sha256, DepotArtifactStatuses.Present, artifact.MetadataJson), cancellationToken).ConfigureAwait(false);
 
@@ -161,7 +178,7 @@ public sealed class DownloadJobHandler : IJobHandler
 	/// ledger: "rate, ETA, retries").
 	/// </summary>
 	private async Task<PowerShellExecutionOutput> InvokeDownloadWithRetryAsync(
-		DownloadPayload payload, string destinationPath, JobExecutionContext context, CancellationToken cancellationToken)
+		DownloadPayload payload, string destinationPath, JobExecutionContext context, RetryTracker retries, CancellationToken cancellationToken)
 	{
 		string? lastFailureReason = null;
 		for (int attempt = 0; attempt < MaxHandlerRetries; attempt++)
@@ -169,6 +186,7 @@ public sealed class DownloadJobHandler : IJobHandler
 			if (attempt > 0)
 			{
 				await _downloads.IncrementRetryCountAsync(payload.DownloadId, cancellationToken).ConfigureAwait(false);
+				retries.Count++;
 			}
 
 			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
@@ -274,21 +292,18 @@ public sealed class DownloadJobHandler : IJobHandler
 		return items.FirstOrDefault(item => item.Id == depotArtifactId);
 	}
 
-	private static async Task EmitProgressAsync(
-		JobExecutionContext context, Guid downloadId, string state, long bytesDownloaded, long? bytesTotal, CancellationToken cancellationToken)
-	{
-		string payload = JsonSerializer.Serialize(new
-		{
-			download_id = downloadId,
-			state,
-			bytes_downloaded = bytesDownloaded,
-			bytes_total = bytesTotal,
-			percent = bytesTotal is > 0 ? Math.Clamp((int)(bytesDownloaded * 100 / bytesTotal.Value), 0, 100) : (int?)null,
-		});
+	/// <summary>Issue #1041: routes through the shared <see cref="DownloadProgressEvents"/> payload shape, filling in this lane's <c>download_id</c>/<c>artifact_id</c> pair.</summary>
+	private static Task EmitProgressAsync(
+		JobExecutionContext context, DownloadPayload payload, string state, long bytesDownloaded, long? bytesTotal,
+		double? downloadRateBps, double? etaSeconds, CancellationToken cancellationToken, int retries = 0) =>
+		DownloadProgressEvents.EmitAsync(
+			context, state, payload.DepotArtifactId, bytesDownloaded, bytesTotal, downloadRateBps, etaSeconds,
+			payload.DownloadId, retries, cancellationToken);
 
-		await context.Events
-			.EmitAsync(JobEventTypes.DownloadProgress, context.Job.Id, context.Job.RunId, payload, cancellationToken)
-			.ConfigureAwait(false);
+	/// <summary>Mutable retry count threaded into the sampling loop's per-sample <c>download.progress</c> emission (issue #1041: the queue view's existing "rate, ETA, retries" ledger stays accurate while a download is still in flight, not just at its terminal state).</summary>
+	private sealed class RetryTracker
+	{
+		public int Count { get; set; }
 	}
 
 	private static string SanitizeFileName(string externalId)
