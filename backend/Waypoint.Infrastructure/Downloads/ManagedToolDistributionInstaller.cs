@@ -395,8 +395,23 @@ public sealed class ManagedToolDistributionInstaller : IManagedToolDistributionI
 		throw new InvalidOperationException("StartWithTextFileBusyRetryAsync exhausted its attempts without returning or throwing.");
 	}
 
-	private static bool IsTextFileBusy(Win32Exception exception) =>
-		exception.Message.Contains("Text file busy", StringComparison.OrdinalIgnoreCase);
+	/// <summary>
+	/// Issue #1893: <see cref="Win32Exception.Message"/> is populated from
+	/// <c>strerror</c> on Linux, which is locale-dependent -- a non-English
+	/// <c>LC_MESSAGES</c> renders a different string (e.g. German
+	/// "Textdatei beschäftigt") and a text-based match silently stops matching.
+	/// <see cref="Win32Exception.NativeErrorCode"/> carries the raw <c>errno</c>
+	/// (26 == ETXTBSY on Linux), which is locale-independent.
+	/// </summary>
+	private const int ETXTBSY = 26;
+
+	/// <summary>
+	/// Internal (rather than <c>private</c>) so <c>Waypoint.Tests</c>
+	/// (<c>InternalsVisibleTo</c>) can prove the errno-based match directly, without
+	/// needing to fabricate a real ETXTBSY-raising <c>Process.Start</c> call.
+	/// </summary>
+	internal static bool IsTextFileBusy(Win32Exception exception) =>
+		exception.NativeErrorCode == ETXTBSY;
 
 	/// <summary>
 	/// Runs the extracted candidate executable once, noninteractively, with its managed
