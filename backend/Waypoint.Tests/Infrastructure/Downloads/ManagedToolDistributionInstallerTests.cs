@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.ComponentModel;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 using Waypoint.Infrastructure.Downloads;
@@ -287,5 +288,35 @@ public sealed class ManagedToolDistributionInstallerTests : IDisposable
 		{
 			Assert.Empty(Directory.GetDirectories(StagingRoot));
 		}
+	}
+
+	/// <summary>
+	/// Issue #1893: the ETXTBSY retry must key off the locale-independent
+	/// <c>NativeErrorCode</c> (26 == ETXTBSY on Linux), not the localized
+	/// <see cref="Win32Exception.Message"/> text produced by <c>strerror</c>. A
+	/// pre-fix implementation that matched on the English "Text file busy" substring
+	/// returns <c>false</c> here, since this exception's message is deliberately a
+	/// non-English rendering of the same errno.
+	/// </summary>
+	[Fact]
+	public void IsTextFileBusy_MatchesOnErrno_RegardlessOfLocalizedMessageText()
+	{
+		const int etxtbsy = 26;
+		Win32Exception germanLocaleException = new(etxtbsy, "Textdatei beschäftigt");
+
+		Assert.True(ManagedToolDistributionInstaller.IsTextFileBusy(germanLocaleException));
+	}
+
+	/// <summary>
+	/// A different errno must not be mistaken for ETXTBSY even if some other
+	/// platform's localized string happened to contain the English phrase.
+	/// </summary>
+	[Fact]
+	public void IsTextFileBusy_DoesNotMatch_OnUnrelatedErrnoWithMatchingEnglishText()
+	{
+		const int unrelatedErrno = 13; // EACCES
+		Win32Exception unrelatedException = new(unrelatedErrno, "Text file busy");
+
+		Assert.False(ManagedToolDistributionInstaller.IsTextFileBusy(unrelatedException));
 	}
 }
