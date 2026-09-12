@@ -37,10 +37,33 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 		new Dictionary<string, object>(0, StringComparer.Ordinal);
 
 	private readonly TimeProvider _clock;
+	private readonly Action<string> _onDocumentWritten;
+	private readonly Action<string> _onTempFileWritten;
 
-	public VcspContentLibraryWriter(TimeProvider? clock = null)
+	/// <param name="clock">Defaults to the real system clock.</param>
+	/// <param name="onDocumentWritten">
+	/// Test-only seam (issues #1680, #1691): invoked synchronously the instant each
+	/// document's write-then-rename completes, in write order -- once per item with
+	/// that item's <see cref="ContentLibraryItemWrite.DirectoryName"/>, then once with
+	/// <c>"items.json"</c>, then once with <c>"lib.json"</c>. Defaults to a no-op, so
+	/// production callers are unaffected. Gives tests a deterministic point to observe
+	/// write order or to cancel after a specific document, instead of racing a
+	/// filesystem poll against this method's own async I/O.
+	/// </param>
+	/// <param name="onTempFileWritten">
+	/// Test-only seam (issue #1691): invoked with the target path synchronously right
+	/// after that document's temp file is fully written but strictly BEFORE the
+	/// cancellation check that guards its rename. Unlike <paramref name="onDocumentWritten"/>,
+	/// cancelling from inside this callback lands genuinely mid-write -- the temp file
+	/// exists, the rename has not happened -- which is the one window
+	/// <see cref="WriteJsonAtomicAsync{T}"/>'s own cleanup `finally` exists to guard.
+	/// Defaults to a no-op.
+	/// </param>
+	public VcspContentLibraryWriter(TimeProvider? clock = null, Action<string>? onDocumentWritten = null, Action<string>? onTempFileWritten = null)
 	{
 		_clock = clock ?? TimeProvider.System;
+		_onDocumentWritten = onDocumentWritten ?? (_ => { });
+		_onTempFileWritten = onTempFileWritten ?? (_ => { });
 	}
 
 	public async Task WriteAsync(ContentLibrary library, IReadOnlyList<ContentLibraryItemWrite> items, CancellationToken cancellationToken)
@@ -159,10 +182,13 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 			string itemDirectory = Path.Combine(library.DiskPath, directoryName);
 			Directory.CreateDirectory(itemDirectory);
 			await WriteJsonAtomicAsync(Path.Combine(itemDirectory, "item.json"), document, cancellationToken).ConfigureAwait(false);
+			_onDocumentWritten(directoryName);
 		}
 
 		await WriteJsonAtomicAsync(itemsJsonPath, itemsDocument, cancellationToken).ConfigureAwait(false);
+		_onDocumentWritten("items.json");
 		await WriteJsonAtomicAsync(libJsonPath, lib, cancellationToken).ConfigureAwait(false);
+		_onDocumentWritten("lib.json");
 	}
 
 	private static void ValidateItem(ContentLibraryItemWrite item)
@@ -250,7 +276,7 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 	/// was there before this call (or nothing, if this is the first write) survives
 	/// exactly as it was, and no partial temp artifact is left behind either.
 	/// </summary>
-	private static async Task WriteJsonAtomicAsync<T>(string targetPath, T document, CancellationToken cancellationToken)
+	private async Task WriteJsonAtomicAsync<T>(string targetPath, T document, CancellationToken cancellationToken)
 	{
 		cancellationToken.ThrowIfCancellationRequested();
 
@@ -265,6 +291,7 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 				await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 			}
 
+			_onTempFileWritten(targetPath);
 			cancellationToken.ThrowIfCancellationRequested();
 			File.Move(tempPath, targetPath, overwrite: true);
 		}
