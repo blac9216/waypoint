@@ -15,9 +15,9 @@ import { RouterProvider } from "../../lib/router";
 import { SubscriptionEditorScreen } from "./SubscriptionEditorScreen";
 
 const ARTIFACTS = [
-	{ id: "a1", name: "vcsa-8.0.3.rpm", sha256: "s1", product: "VCENTER", version: "8.0.3.100", size_bytes: 1_000_000, status: "indexed" },
-	{ id: "a2", name: "vcsa-8.0.3b.rpm", sha256: "s2", product: "VCENTER", version: "8.0.3.200", size_bytes: 2_000_000, status: "indexed" },
-	{ id: "a3", name: "vcsa-8.0.2.rpm", sha256: "s3", product: "VCENTER", version: "8.0.2.100", size_bytes: 4_000_000, status: "indexed" },
+	{ id: "a1", name: "vcsa-8.0.3.rpm", sha256: "s1", product: "VCENTER", version: "8.0.3.9100", size_bytes: 1_000_000, status: "indexed" },
+	{ id: "a2", name: "vcsa-8.0.3b.rpm", sha256: "s2", product: "VCENTER", version: "8.0.3.9200", size_bytes: 2_000_000, status: "indexed" },
+	{ id: "a3", name: "vcsa-8.0.2.rpm", sha256: "s3", product: "VCENTER", version: "8.0.2.9100", size_bytes: 4_000_000, status: "indexed" },
 ];
 
 const SUBSCRIPTION = {
@@ -25,7 +25,7 @@ const SUBSCRIPTION = {
 	product: "VCENTER",
 	lane: "depot",
 	line_granularity: "subminor",
-	anchor_version: "8.0.3.100",
+	anchor_version: "8.0.3.9100",
 	preset_id: null,
 	refresh_window_days: null,
 	retention_override_days: null,
@@ -120,7 +120,7 @@ describe("SubscriptionEditorScreen", () => {
 		fireEvent.change(screen.getByLabelText("Product"), { target: { value: "VCENTER" } });
 		expect(screen.getByText("Projected size: 0 B")).toBeInTheDocument();
 
-		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.100" } });
+		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.9100" } });
 		// subminor granularity (default form state is "minor" — set it to
 		// subminor so only the two 8.0.3.* artifacts are in-line, not the
 		// 8.0.2.* one too).
@@ -128,7 +128,7 @@ describe("SubscriptionEditorScreen", () => {
 
 		await waitFor(() => expect(screen.getByTestId("projected-size")).toHaveTextContent("2.9 MiB"));
 
-		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.2.100" } });
+		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.2.9100" } });
 		await waitFor(() => expect(screen.getByTestId("projected-size")).toHaveTextContent("3.8 MiB"));
 	});
 
@@ -139,7 +139,7 @@ describe("SubscriptionEditorScreen", () => {
 
 		await waitFor(() => expect(screen.getByLabelText("Product")).toBeInTheDocument());
 		fireEvent.change(screen.getByLabelText("Product"), { target: { value: "VCENTER" } });
-		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.100" } });
+		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.9100" } });
 
 		fireEvent.click(screen.getByText("Remove line"));
 
@@ -154,7 +154,7 @@ describe("SubscriptionEditorScreen", () => {
 
 		await waitFor(() => expect(screen.getByLabelText("Product")).toBeInTheDocument());
 		fireEvent.change(screen.getByLabelText("Product"), { target: { value: "VCENTER" } });
-		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.100" } });
+		fireEvent.change(screen.getByLabelText("Anchor version"), { target: { value: "8.0.3.9100" } });
 
 		const postSpy = vi.spyOn(globalThis, "fetch");
 		fireEvent.click(screen.getByText("Save"));
@@ -171,7 +171,7 @@ describe("SubscriptionEditorScreen", () => {
 		renderWithProviders();
 
 		await waitFor(() => expect((screen.getByLabelText("Product") as HTMLInputElement).value).toBe("VCENTER"));
-		expect((screen.getByLabelText("Anchor version") as HTMLInputElement).value).toBe("8.0.3.100");
+		expect((screen.getByLabelText("Anchor version") as HTMLInputElement).value).toBe("8.0.3.9100");
 		expect((screen.getByLabelText("Line granularity") as HTMLSelectElement).value).toBe("subminor");
 
 		const putSpy = vi.spyOn(globalThis, "fetch");

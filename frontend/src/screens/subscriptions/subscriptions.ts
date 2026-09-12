@@ -68,7 +68,7 @@ export function updateSubscription(id: string, fields: SubscriptionWriteFields):
 }
 
 /** First `count` dot-separated numeric segments of `version`, e.g.
- * `versionPrefix("8.0.3.100", 3) === "8.0.3"`. Missing trailing segments are
+ * `versionPrefix("8.0.3.9100", 3) === "8.0.3"`. Missing trailing segments are
  * simply absent from the joined result rather than padded — a version with
  * fewer segments than `count` never spuriously matches a longer anchor. */
 function versionPrefix(version: string, count: number): string {
