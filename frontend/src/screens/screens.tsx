@@ -3,6 +3,7 @@ import { AuditScreen as AuditLogScreen } from "./audit/AuditScreen";
 import { BenchmarksScreen as BenchmarksProfileScreen } from "./benchmarks/BenchmarksScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
+import { ContentLibraryScreen as ContentLibraryViewShellScreen } from "./content-library/ContentLibraryScreen";
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
 import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
 import { LiveJobsRoute } from "./livejobs/LiveJobsScreen";
@@ -41,6 +42,10 @@ export function CatalogScreen() {
 
 export function LibraryScreen() {
 	return <RepositoryLibraryScreen />;
+}
+
+export function ContentLibraryScreen() {
+	return <ContentLibraryViewShellScreen />;
 }
 
 export function RetentionScreen() {
