@@ -98,13 +98,53 @@ public sealed class DiscoveryVersionBoundaryTests : IDisposable
 		// re-diagnose from scratch. #1868's process-wide module-import gate is the
 		// believed fix for the underlying race (see that issue); this message is the
 		// belt-and-suspenders diagnostic in case it is ever hit again regardless.
-		string diagnostic = result.Succeeded
-			? string.Empty
-			: (result.FailureReason?.Contains("is not recognized", StringComparison.OrdinalIgnoreCase) == true
-				? $"{result.FailureReason} -- this is the #1321/#1868 module-registration-race shape: " +
-				  "WaypointDiscoveryStubModule was not (yet) importable in the runspace this call drew " +
-				  "when the command was invoked, not a behavioral failure in discovery itself."
-				: result.FailureReason ?? string.Empty);
+		//
+		// Issue #1895: the substring match on "is not recognized" alone does not
+		// discriminate a genuine registration/asset regression (the stub module
+		// renamed, ModulePreloadPaths misconfigured, the .psm1 asset dropped from the
+		// build output, the cmdlet renamed) from the transient #1321/#1868 race --
+		// both produce the exact same PowerShell error text, since PowerShell raises
+		// "is not recognized" whenever a command name cannot currently be resolved,
+		// regardless of WHY. Probe `Get-Command` for the same command in a fresh call
+		// on the same executor before asserting: if it resolves now, the module IS
+		// registered and the earlier failure is consistent with the transient race
+		// (it just was not importable in the runspace the first call drew); if it
+		// still does not resolve, the failure is NOT the race and is reported as a
+		// candidate genuine regression instead.
+		string diagnostic;
+		if (result.Succeeded)
+		{
+			diagnostic = string.Empty;
+		}
+		else if (result.FailureReason?.Contains("is not recognized", StringComparison.OrdinalIgnoreCase) == true)
+		{
+			PowerShellExecutionResult probe = await executor.ExecuteAsync(
+				new PowerShellRequest(
+					"Get-Command",
+					Parameters: new Dictionary<string, object?>
+					{
+						["Name"] = "Invoke-WaypointDiscovery",
+						["ErrorAction"] = "SilentlyContinue",
+					}),
+				CancellationToken.None);
+			bool commandNowResolves = probe.Succeeded && probe.Output.Count > 0;
+
+			diagnostic = commandNowResolves
+				? $"{result.FailureReason} -- candidate cause: the #1321/#1868 module-registration-race " +
+				  "shape (a fresh Get-Command call now resolves Invoke-WaypointDiscovery, so " +
+				  "WaypointDiscoveryStubModule IS registered; it was not yet importable in the runspace " +
+				  "this call drew when the command was invoked, not a behavioral failure in discovery " +
+				  "itself)."
+				: $"{result.FailureReason} -- candidate cause: a genuine module-registration regression, " +
+				  "NOT the #1321/#1868 race (a fresh Get-Command call still cannot resolve " +
+				  "Invoke-WaypointDiscovery -- check WaypointDiscoveryStubModule's exported cmdlet name, " +
+				  "ModulePreloadPaths, and that the .psm1 asset shipped in the build output).";
+		}
+		else
+		{
+			diagnostic = result.FailureReason ?? string.Empty;
+		}
+
 		Assert.True(result.Succeeded, diagnostic);
 
 		System.Management.Automation.PSObject hostRow = System.Management.Automation.PSObject.AsPSObject(
