@@ -158,9 +158,14 @@ public sealed partial class NpgsqlSchemaMigrator : ISchemaMigrator
 
 	/// <summary>
 	/// Enumerates the embedded <c>Data/Migrations/*.sql</c> resources as
-	/// (version, resourceName) pairs, ordered by version. The zero-padded numeric
-	/// filename prefix (<c>0001_...</c>) makes ordinal string ordering the same as
-	/// migration order.
+	/// (version, resourceName) pairs, ordered by version. Legacy migrations use a
+	/// zero-padded numeric prefix (<c>0001_...</c>) and new ones a UTC timestamp prefix
+	/// (<c>YYYYMMDDHHMMSS_...</c>, see <c>docs/reference/schema-migrations.md</c>); a
+	/// numeric prefix sorts ordinally before any <c>2026...</c> timestamp, so the mixed
+	/// set orders legacy-then-new under this one ordinal comparison. Ordering only makes
+	/// application deterministic — <see cref="ApplyAsync"/> applies by set difference
+	/// against <c>schema_migrations</c>, so a lexically-lower file added and applied after
+	/// a higher one has already been recorded is still applied correctly.
 	/// </summary>
 	private IEnumerable<(string Version, string ResourceName)> GetOrderedMigrations()
 	{

@@ -26,9 +26,9 @@ namespace Waypoint.Tests.Parity;
 /// <see cref="CatalogDerivationMatrix.OwnerLiveOnlyRows"/> allow-list entry. If a future
 /// doc edit adds, removes, or reshapes a row, this test fails until
 /// <c>CatalogDerivationMatrix</c> is updated to match -- mirroring the repository's
-/// existing drift-guard idiom (e.g. <c>SchemaMigrationTests</c>'
-/// <c>ExpectedMigrationCount</c>/<c>ExpectedTables</c> ledger that must be bumped
-/// alongside a new migration file).
+/// existing drift-guard idiom (e.g. <c>SchemaMigrationTests</c>' <c>ExpectedTables</c>
+/// ledger and its set-equality migration guard, which fail when the tree and the
+/// expectation diverge).
 ///
 /// This test reads the markdown table itself rather than hand-copying "13" as a magic
 /// number, so a row added/removed in the doc is caught even if nobody updates this

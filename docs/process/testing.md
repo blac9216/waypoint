@@ -71,6 +71,19 @@ covers everything unconditionally) falls through to Path 2/3 per `evidence-paths
 | e2e (synthetic, Playwright) | `cd deploy && ./scripts/e2e-playwright.sh <slug> <port>` | unique slug + port; tears down itself |
 | smoke | `cd deploy && ./scripts/fresh-stack-smoke-test.sh <slug> <port>` | same |
 
+## Database migrations
+New SQL migrations under `backend/Waypoint.Infrastructure/Data/Migrations/` use a UTC
+timestamp prefix — `YYYYMMDDHHMMSS_<slug>.sql`, generated with `date -u +%Y%m%d%H%M%S`
+— not a hand-picked sequential number. Independently-authored branches therefore pick
+distinct prefixes without a shared counter, removing the slot-collision failure mode
+(issue #1845). Existing `0001`–`0134` keep their numeric prefixes untouched; a numeric
+prefix sorts ordinally before any timestamp prefix, so the mixed set orders
+legacy-then-new and `NpgsqlSchemaMigrator` applies by set difference regardless of
+order. `SchemaMigrationTests` no longer keeps an `ExpectedMigrationCount`: its guard is
+now (a) set equality between the `.sql` files on disk and the versions recorded in
+`schema_migrations` after a fresh apply, and (b) duplicate-prefix detection. There is no
+counter to bump when adding a migration. Full scheme: `docs/reference/schema-migrations.md`.
+
 ## Isolation on a shared host
 Every bring-up uses its own Compose project name (`-p <slug>`) and host port well away from 8443; verify isolation before trusting a result; `down -v` when done. Docker cannot see `/tmp` — bind mounts live under `/workspaces`. Full recipe: ../how-to/testing.md §The recipe.
 
