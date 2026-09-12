@@ -48,6 +48,10 @@ namespace Waypoint.DownloadRunner;
 /// <c>photon-image-discovery</c> (issue #1790, migration 0135): the sibling
 /// image-tree discovery job, same convention -- handler registration and this
 /// allowlist entry land together in this change.
+/// <c>subscription-evaluate</c> (issue #1472, epic #1182): the subscription
+/// evaluation job -- fetch-set diff, lib.json version-counter pre-check, and per-item
+/// <c>binaries-download</c> fan-out -- same convention, handler registration and this
+/// entry land together.
 /// </summary>
 public static class DownloadRunnerJobTypes
 {
@@ -61,6 +65,7 @@ public static class DownloadRunnerJobTypes
 		"retention-sweep",
 		"binaries-download",
 		"photon-repo-discovery",
-		"photon-image-discovery"
+		"photon-image-discovery",
+		"subscription-evaluate"
 	};
 }

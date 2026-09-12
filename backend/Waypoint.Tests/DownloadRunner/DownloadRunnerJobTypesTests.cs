@@ -39,7 +39,9 @@ namespace Waypoint.Tests.DownloadRunner;
 /// this allowlist entry in the same change per <c>DownloadRunnerJobTypes</c>'s own
 /// doc comment; <c>photon-repo-discovery</c> joined in issue #1509 (the Photon
 /// RPM-repo metadata discovery job), same convention; <c>photon-image-discovery</c>
-/// joined in issue #1790 (the sibling image-tree discovery job), same convention.
+/// joined in issue #1790 (the sibling image-tree discovery job), same convention;
+/// <c>subscription-evaluate</c> joined in issue #1472 (the subscription-evaluation
+/// job), same convention.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
@@ -48,7 +50,10 @@ public sealed class DownloadRunnerJobTypesTests
 	{
 		Assert.Equal(
 			new HashSet<string>(StringComparer.Ordinal)
-				{ "catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep", "binaries-download", "photon-repo-discovery", "photon-image-discovery" },
+				{
+					"catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep",
+					"binaries-download", "photon-repo-discovery", "photon-image-discovery", "subscription-evaluate",
+				},
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}
 

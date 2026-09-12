@@ -166,6 +166,17 @@ public static class ServiceCollectionExtensions
 		// (issue #619's convention).
 		services.AddSingleton<IJobHandler, Downloads.Photon.PhotonImageDiscoveryJobHandler>();
 
+		// Issue #1472 (epic #1182): the subscription-evaluation job -- fetch-set diff,
+		// lib.json version-counter pre-check, results persistence. Registers in the
+		// SAME change that adds "subscription-evaluate" to
+		// DownloadRunnerJobTypes.Allowed, per that allowlist's own doc comment (issue
+		// #619's convention). ISubscriptionLineEvaluator/ISubscriptionEvaluationStateRepository/
+		// ILibraryVersionCounterGateway are registered by AddWaypointInfrastructure,
+		// already called before this method (this method's own doc comment).
+		services.AddSingleton<Waypoint.Core.Subscriptions.ISubscriptionFetchSetCalculator, Waypoint.Core.Subscriptions.SubscriptionFetchSetCalculator>();
+		services.AddSingleton<Waypoint.Core.Subscriptions.SubscriptionEvaluationService>();
+		services.AddSingleton<IJobHandler, Subscriptions.SubscriptionEvaluationJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 		// Issue #738: resolves a vCenter execution item's frozen catalog execution
