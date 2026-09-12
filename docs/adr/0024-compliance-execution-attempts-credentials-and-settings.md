@@ -19,6 +19,53 @@ independently retryable VCSA services, tens of thousands of VM components, or th
 approved per-control configuration model without either rewriting history or building
 a second scheduler beside the Postgres queue.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #811, #807._
+
+- Must represent independently retryable VCSA services and tens of thousands of VM
+  components without rewriting run history or building a second scheduler beside the
+  Postgres queue (Context above).
+- Retry history must remain immutable and auditable: prior attempts, failures, logs,
+  results, and artifacts can never be deleted or reset when a new attempt begins.
+- A stage-resume within one attempt (ADR-0012) must never be conflated with a new
+  attempt; only an operator Stop plus Start/retry/restart creates one (PR #811 Risk:
+  "the primary risk is downstream implementation conflating a stage resume with a new
+  attempt").
+- The compliance run projection must stay a domain-deep view over the same
+  runs/jobs/events ADR-0019's global Live Jobs already tracks, never a second
+  execution authority or scheduler (PR #811 Risk: "treating the compliance projection
+  as another scheduler").
+- A missing, incompatible, or ambiguous credential or required control input must fail
+  only the affected component job, never the whole run, preserving component failure
+  isolation.
+- Credential repair on retry must change access only — never the planned component,
+  scope, baseline, closure, selector, transport, control settings, trust policy, or
+  output semantics (PR #811 Risk: "rather than repairing configuration on retry").
+- The per-control configuration model (Input/Attestation/future Remediation) must
+  replace the profile-wide configuration-document shortcut while preserving
+  `Not_Reviewed` semantics and #15's remediation-execution boundary.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #811, #807; the sources record the four rejected
+alternatives named in this ADR's own "Alternatives rejected" section below alongside
+the chosen design — no separately-evaluated option beyond those is recorded._
+
+- **Immutable planned item → one Postgres component job → ordered-attempt hierarchy**
+  (chosen). Reuses the existing Postgres queue for ownership, leases, retry, and
+  capacity admission; ordered attempts express retry history directly without a
+  second scheduler.
+- **One job per run with hidden component tasks — rejected.** Duplicates leases,
+  retry, controls, and capacity admission outside Postgres.
+- **A new job for every retry — rejected.** Weakens stable component ownership and
+  makes current-result aggregation ambiguous; ordered attempts express history
+  directly instead.
+- **Resolve current configuration on retry — rejected.** The same run would cease to
+  be reproducible.
+- **Reject a whole run for one access/input gap — rejected.** Violates component
+  failure isolation and hides otherwise valid coverage.
+
 ## Decision
 
 ### Component job and ordered-attempt hierarchy
