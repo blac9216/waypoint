@@ -44,6 +44,13 @@ namespace Waypoint.Infrastructure.Catalog;
 /// temp files are always removed in <c>finally</c>, and a failure at any stage leaves
 /// the prior-good on-disk catalog and prior-good <c>catalog_pull_state.last_success_*</c>
 /// facts untouched (issue #687 AC).
+///
+/// Concurrency (issue #790): machine_id is seeded into a job-scoped identity home
+/// nested under this job's own <c>stagingRoot</c> (already unique per job), never the
+/// single shared enrollment identity home -- so two concurrent catalog-pull jobs
+/// seeding DIFFERENT asset_ids can never cause a tool invocation to authenticate under
+/// another job's <c>machine_id</c>. Mirrors the job-scoped-identity-home contract
+/// issue #1482's <c>BinariesDownloadJobHandler</c> already established.
 /// </summary>
 public sealed class CatalogPullJobHandler : IJobHandler
 {
@@ -133,6 +140,12 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		string activationCodePath = Path.Combine(stagingRoot, "activation-code.txt");
 		string metadataDepotPath = Path.Combine(stagingRoot, "depot");
 
+		// Issue #790: a fresh, job-scoped identity home nested under this job's own
+		// stagingRoot (already unique per job and torn down in finally below) -- never
+		// the shared enrollment identity home, so two concurrent catalog-pull jobs
+		// seeding DIFFERENT asset_ids can never collide on machine_id.
+		string identityHome = Path.Combine(stagingRoot, "identity");
+
 		string? assetId;
 		DecryptedSecret? decrypted = null;
 		try
@@ -169,12 +182,11 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		{
 			if (!string.IsNullOrWhiteSpace(assetId))
 			{
-				await _identityTool.SeedMachineIdentityAsync(assetId, cancellationToken).ConfigureAwait(false);
+				await _identityTool.SeedMachineIdentityAsync(assetId, identityHome, cancellationToken).ConfigureAwait(false);
 			}
 
-
 			CatalogPullResult pullResult = await _puller
-				.PullAsync(metadataDepotPath, activationCodePath, cancellationToken).ConfigureAwait(false);
+				.PullAsync(metadataDepotPath, activationCodePath, identityHome, cancellationToken).ConfigureAwait(false);
 
 			if (!pullResult.Succeeded)
 			{

@@ -263,17 +263,19 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		|| line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase)
 		|| line.StartsWith("Log file:", StringComparison.OrdinalIgnoreCase);
 
-	public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+	public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(assetId);
-		string identityHome = PrepareIdentityHome(_options.Value);
+		ArgumentException.ThrowIfNullOrWhiteSpace(identityHome);
+		Directory.CreateDirectory(identityHome);
 		SeedMachineId(identityHome, assetId);
 		return Task.CompletedTask;
 	}
 
-	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
+	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(activationCodePath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(identityHome);
 
 		if (!_presenceChecker.IsPresent())
 		{
@@ -282,7 +284,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		}
 
 		ManagedToolOptions options = _options.Value;
-		string identityHome = PrepareIdentityHome(options);
+		Directory.CreateDirectory(identityHome);
 
 		// Issue #791: the real 9.1.0.0400 tool has no lightweight "check code" subcommand --
 		// `configuration get` does NOT accept --depot-download-activation-code-file and exits
@@ -386,11 +388,16 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 	}
 
 	/// <summary>
-	/// Creates (if absent) and returns the isolated, persistent identity directory the
-	/// tool's <c>HOME</c>/<c>XDG_DATA_HOME</c> is pointed at -- same-volume as the
-	/// managed tool itself (<see cref="ManagedToolOptions.ToolStatePath"/>), so the
-	/// Depot ID the tool derives/persists there is stable across container rebuilds
-	/// without ever being a container-global root home.
+	/// Creates (if absent) and returns the single, shared, persistent identity
+	/// directory <see cref="GetDepotIdAsync"/> uses -- same-volume as the managed tool
+	/// itself (<see cref="ManagedToolOptions.ToolStatePath"/>), so the Depot ID the
+	/// tool derives/persists there is stable across container rebuilds without ever
+	/// being a container-global root home. Issue #790: this is deliberately NOT used
+	/// by <see cref="SeedMachineIdentityAsync"/> or
+	/// <see cref="ValidateActivationCodeAsync"/> any more -- <c>GetDepotIdAsync</c>
+	/// never seeds <c>machine_id</c>, so a single shared home carries no concurrent-job
+	/// collision risk for it, but the two seed/validate operations now require an
+	/// explicit job-scoped <c>identityHome</c> from the caller instead.
 	/// </summary>
 	private static string PrepareIdentityHome(ManagedToolOptions options)
 	{

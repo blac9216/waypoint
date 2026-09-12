@@ -262,14 +262,14 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, ID
 	private sealed class NoOpIdentityTool : IDepotIdentityTool
 	{
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
-		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) => Task.CompletedTask;
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
+		public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken) => Task.CompletedTask;
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken) => throw new InvalidOperationException("Not expected during a pull.");
 	}
 
 	/// <summary>Stands in for the vendor tool process: writes the fixture's own catalog document to the staged depot path the handler hands it.</summary>
 	private sealed class FakeMetadataPuller(string catalogJson) : IManagedToolMetadataPuller
 	{
-		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken)
+		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, string identityHome, CancellationToken cancellationToken)
 		{
 			string metadataDir = Path.Combine(depotPath, "PROD", "metadata", "productVersionCatalog", "v1");
 			Directory.CreateDirectory(metadataDir);

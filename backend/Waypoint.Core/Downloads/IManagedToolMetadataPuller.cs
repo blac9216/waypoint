@@ -19,11 +19,17 @@ namespace Waypoint.Core.Downloads;
 /// download</c> operation (issue #687) against a scratch depot path, mirroring the
 /// sibling reference's <c>vcf-download-tool metadata download -d &lt;depot-path&gt;
 /// --depot-download-activation-code-file=&lt;file&gt; --ceip=DISABLE</c> invocation.
-/// Bounded, never prompts, and reuses <see cref="IDepotIdentityTool"/>'s
-/// HOME/XDG_DATA_HOME identity isolation (<see cref="ManagedToolOptions.IdentityStatePath"/>)
-/// so the pull authenticates as the same stable machine identity issue #691's
-/// enrollment flow already established -- this interface does not re-derive
+/// Bounded, never prompts, and points <c>HOME</c>/<c>XDG_DATA_HOME</c> at a
+/// caller-owned <paramref name="identityHome"/> the same way
+/// <see cref="IDepotIdentityTool"/> does -- this interface does not re-derive
 /// <c>asset_id</c>/<c>machine_id</c> itself.
+///
+/// Issue #790: <paramref name="identityHome"/> MUST be a job-scoped directory the
+/// caller seeded via <see cref="IDepotIdentityTool.SeedMachineIdentityAsync"/>
+/// immediately before this call -- never the shared identity home
+/// <see cref="ManagedToolOptions.IdentityStatePath"/> names, since two concurrent
+/// catalog-pull jobs authenticating under different asset_ids could otherwise
+/// collide on the same <c>machine_id</c> file.
 /// </summary>
 public interface IManagedToolMetadataPuller
 {
@@ -32,11 +38,13 @@ public interface IManagedToolMetadataPuller
 	/// Activation Code staged at <paramref name="activationCodePath"/> (a job-scoped
 	/// temp file, never argv/env for the code value itself -- the file path is
 	/// argv-visible per the tool's own CLI contract, matching the sibling reference
-	/// and <see cref="IDepotIdentityTool"/>'s existing convention). Fails with an
-	/// actionable, auth-classified reason if the tool is not installed, the call
-	/// times out, or the tool exits non-zero.
+	/// and <see cref="IDepotIdentityTool"/>'s existing convention), with
+	/// <c>HOME</c>/<c>XDG_DATA_HOME</c> pointed at the caller's job-scoped
+	/// <paramref name="identityHome"/> (issue #790). Fails with an actionable,
+	/// auth-classified reason if the tool is not installed, the call times out, or
+	/// the tool exits non-zero.
 	/// </summary>
-	Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken);
+	Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, string identityHome, CancellationToken cancellationToken);
 }
 
 /// <summary>Outcome of <see cref="IManagedToolMetadataPuller.PullAsync"/>.</summary>

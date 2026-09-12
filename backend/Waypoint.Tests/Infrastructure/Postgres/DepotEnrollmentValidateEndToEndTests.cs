@@ -149,17 +149,19 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		public List<string> StagedPaths { get; } = [];
 		public List<string> StagedContents { get; } = [];
 		public List<string> SeededAssetIds { get; } = [];
+		public List<string> SeededIdentityHomes { get; } = [];
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called by this file's validate-code scenarios.");
 
-		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+		public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken)
 		{
 			SeededAssetIds.Add(assetId);
+			SeededIdentityHomes.Add(identityHome);
 			return Task.CompletedTask;
 		}
 
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken)
 		{
 			StagedPaths.Add(activationCodePath);
 			StagedContents.Add(File.Exists(activationCodePath) ? File.ReadAllText(activationCodePath) : "<missing>");
@@ -197,7 +199,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 	public async Task ValidateCode_NoActivationCodeConfigured_FailsCleanly()
 	{
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -214,7 +216,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		// fails cleanly by class (never echoing the code) and never reaches the tool.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -234,7 +236,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		// and reach the tool -- identity follows the code (owner decision 2026-08-25).
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -255,7 +257,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 	{
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.AuthFailed("Activation Code rejected: expired or revoked."));
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -275,7 +277,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 	{
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Failed("vcf-download-tool is not installed."));
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -298,7 +300,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		// asset_id and asks the tool -- the stored Depot ID is disposable and never seeded.
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -320,7 +322,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		await SetEmptyPairingStateAsync();
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -346,7 +348,7 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		await SetEmptyPairingStateAsync();
 		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
 		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
-		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor, Options.Create(new ManagedToolOptions()));
 		ClaimedJob job = await EnqueueValidateJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);

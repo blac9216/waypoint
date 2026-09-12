@@ -417,9 +417,13 @@ public sealed class DepotIdentityToolTests : IDisposable
 	}
 
 	// ---- Issue #787: machine_id seeding from a code's decoded asset_id ----
+	// ---- Issue #790: seed/validate now take an explicit caller-owned identityHome ----
+
+	/// <summary>A single-caller identity home fixture path (issue #790's job-scoped contract, degenerate to one caller here).</summary>
+	private string DefaultIdentityHome() => Path.Combine(_root, "identity");
 
 	private string MachineIdPath() =>
-		Path.Combine(_root, "identity", ".local", "share", "vmware", "vdt", "machine_id");
+		Path.Combine(DefaultIdentityHome(), ".local", "share", "vmware", "vdt", "machine_id");
 
 	private const string InventedAssetId = "wpt-787-asset-0001"; // invented pairing/asset id fixture
 
@@ -430,7 +434,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		// the tool, it only writes the identity file the tool will later check.
 		DepotIdentityTool tool = CreateTool(Script("exit 0\n"), out _);
 
-		await tool.SeedMachineIdentityAsync(InventedAssetId, CancellationToken.None);
+		await tool.SeedMachineIdentityAsync(InventedAssetId, DefaultIdentityHome(), CancellationToken.None);
 
 		string path = MachineIdPath();
 		Assert.True(File.Exists(path));
@@ -458,7 +462,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		// Owner decision 2026-08-25: machine_id is DERIVED state -- identity follows the
 		// code, so seeding overwrites whatever is there with the current code's asset_id
 		// (swapping in a different working code just works, no reset ceremony).
-		await tool.SeedMachineIdentityAsync(InventedAssetId, CancellationToken.None);
+		await tool.SeedMachineIdentityAsync(InventedAssetId, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.Equal(InventedAssetId, File.ReadAllText(path));
 		if (!OperatingSystem.IsWindows())
@@ -468,6 +472,57 @@ public sealed class DepotIdentityToolTests : IDisposable
 
 		// No stray temp files were left behind by the overwrite.
 		Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(path)!, ".machine_id.*"));
+	}
+
+	// ---- Issue #790: job-scoped identity homes are safe under concurrency ----
+
+	/// <summary>
+	/// The issue #790 regression this AC names verbatim: two concurrent
+	/// <c>SeedMachineIdentityAsync</c> calls for DIFFERENT asset_ids, each against its
+	/// own job-scoped identity home, must never let either invocation observe the
+	/// other's <c>machine_id</c>. Before this fix, both calls shared the single
+	/// <c>PrepareIdentityHome(options)</c> path and could race on the SAME
+	/// <c>machine_id</c> file; now each caller supplies its own
+	/// <c>&lt;root&gt;/job-&lt;n&gt;</c> home, so the two seeds are writing to two entirely
+	/// distinct files and cannot collide no matter how they interleave.
+	/// </summary>
+	[Fact]
+	public async Task SeedMachineIdentity_TwoConcurrentJobsWithDifferentAssetIds_EachSeesOnlyItsOwnMachineId()
+	{
+		DepotIdentityTool tool = CreateTool(Script("exit 0\n"), out _);
+
+		const string firstAssetId = "wpt-790-asset-job-a";
+		const string secondAssetId = "wpt-790-asset-job-b";
+		string firstIdentityHome = Path.Combine(_root, "jobs", "job-a");
+		string secondIdentityHome = Path.Combine(_root, "jobs", "job-b");
+
+		// Barrier-synchronised start: both seeds are released at the same instant so a
+		// shared-home implementation would have every opportunity to race, not just a
+		// lucky non-overlapping schedule.
+		using SemaphoreSlim barrier = new(0, 2);
+		async Task<string> SeedThenReadAsync(string assetId, string identityHome)
+		{
+			await barrier.WaitAsync();
+			await tool.SeedMachineIdentityAsync(assetId, identityHome, CancellationToken.None);
+			string machineIdPath = Path.Combine(identityHome, ".local", "share", "vmware", "vdt", "machine_id");
+			return File.ReadAllText(machineIdPath);
+		}
+
+		Task<string> firstTask = SeedThenReadAsync(firstAssetId, firstIdentityHome);
+		Task<string> secondTask = SeedThenReadAsync(secondAssetId, secondIdentityHome);
+		barrier.Release(2);
+		string[] observed = await Task.WhenAll(firstTask, secondTask);
+
+		// Each invocation's read-back is EXACTLY its own asset_id -- never the other
+		// job's, and never a torn/mixed value.
+		Assert.Equal(firstAssetId, observed[0]);
+		Assert.Equal(secondAssetId, observed[1]);
+
+		// The two identity homes are provably distinct directories on disk, each
+		// holding only its own job's machine_id.
+		Assert.NotEqual(firstIdentityHome, secondIdentityHome);
+		Assert.Equal(firstAssetId, File.ReadAllText(Path.Combine(firstIdentityHome, ".local", "share", "vmware", "vdt", "machine_id")));
+		Assert.Equal(secondAssetId, File.ReadAllText(Path.Combine(secondIdentityHome, ".local", "share", "vmware", "vdt", "machine_id")));
 	}
 
 	[Fact]
@@ -482,7 +537,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "irrelevant-code-body");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.True(result.Succeeded);
 		Assert.False(File.Exists(MachineIdPath()));
@@ -501,7 +556,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.True(result.Succeeded);
 		string invocation = File.ReadAllText(callLogPath);
@@ -520,12 +575,12 @@ public sealed class DepotIdentityToolTests : IDisposable
 		DepotIdentityTool okTool = CreateTool(RealContractStub(metadataDownloadExit: 0), out _);
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
-		Assert.True((await okTool.ValidateActivationCodeAsync(codeFile, CancellationToken.None)).Succeeded);
+		Assert.True((await okTool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None)).Succeeded);
 		Assert.Empty(Directory.Exists(scratchRoot) ? Directory.GetDirectories(scratchRoot) : []);
 
 		DepotIdentityTool failTool = CreateTool(
 			RealContractStub(metadataDownloadExit: 4, metadataDownloadStdout: "Activation Code rejected: expired."), out _);
-		Assert.False((await failTool.ValidateActivationCodeAsync(codeFile, CancellationToken.None)).Succeeded);
+		Assert.False((await failTool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None)).Succeeded);
 		Assert.Empty(Directory.Exists(scratchRoot) ? Directory.GetDirectories(scratchRoot) : []);
 	}
 
@@ -538,7 +593,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.True(result.IsAuthFailure);
@@ -555,7 +610,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);
@@ -571,7 +626,7 @@ public sealed class DepotIdentityToolTests : IDisposable
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "a-code");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, DefaultIdentityHome(), CancellationToken.None);
 
 		Assert.False(result.Succeeded);
 		Assert.False(result.IsAuthFailure);

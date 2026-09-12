@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -47,10 +48,10 @@ public sealed class DepotEnrollmentJobHandlerTests
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => Task.FromResult(_result);
 
-		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) =>
+		public Task SeedMachineIdentityAsync(string assetId, string identityHome, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
 
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string identityHome, CancellationToken cancellationToken)
 		{
 			ValidateCalls.Add(activationCodePath);
 			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
@@ -111,7 +112,8 @@ public sealed class DepotEnrollmentJobHandlerTests
 			enrollment,
 			new UnreachableCredentialSecretStore(),
 			new CredentialRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
-			new InPlaySecretRedactor());
+			new InPlaySecretRedactor(),
+			Options.Create(new ManagedToolOptions()));
 	}
 
 	private sealed class UnreachableCredentialSecretStore : ICredentialSecretStore
