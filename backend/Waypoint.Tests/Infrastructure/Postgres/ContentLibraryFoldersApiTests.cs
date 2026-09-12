@@ -194,7 +194,12 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 		Assert.Equal(itemId, itemIds[0].GetGuid());
 	}
 
-	/// <summary>F3 (round 2): an unknown folder_id is a 404 not_found, matching Update's own NotFound arm -- not the 400 validation shape ParentNotFound uses on Create/Update.</summary>
+	/// <summary>
+	/// F3 (round 2), settled by issue #1812: an unknown folder_id is a 404 not_found,
+	/// matching Update's own ParentNotFound arm and Create's own ParentNotFound arm --
+	/// one status code for "the folder id you referenced does not exist" across every
+	/// action in this controller.
+	/// </summary>
 	[Fact]
 	public async Task AssignItem_UnknownFolderId_Is404()
 	{
@@ -203,6 +208,39 @@ public sealed class ContentLibraryFoldersApiTests : IAsyncLifetime
 
 		HttpResponseMessage response = await SendAsync(
 			HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/items/{itemId}/folder", "Admin", new { folder_id = Guid.NewGuid() });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1812: Create's ParentNotFound outcome used to map to a 400 validation
+	/// error -- now the same 404 not_found shape AssignItem's FolderNotFound uses.
+	/// </summary>
+	[Fact]
+	public async Task Create_UnknownParentFolderId_Is404()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-api-create-badparent");
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Post, $"/api/v1/content-libraries/{libraryId}/folders", "Admin",
+			new { name = "Orphan", parent_folder_id = Guid.NewGuid() });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1812: Update's ParentNotFound outcome used to map to a 400 validation
+	/// error -- now the same 404 not_found shape AssignItem's FolderNotFound uses.
+	/// </summary>
+	[Fact]
+	public async Task Update_UnknownParentFolderId_Is404()
+	{
+		Guid libraryId = await SeedLibraryAsync("vcsp-api-update-badparent");
+		Guid folderId = await CreateFolderAsync(libraryId, "Movable", null);
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Patch, $"/api/v1/content-libraries/{libraryId}/folders/{folderId}", "Admin",
+			new { name = "Movable", parent_folder_id = Guid.NewGuid() });
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}

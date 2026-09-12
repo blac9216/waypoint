@@ -247,6 +247,13 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 		return Task.FromResult(_items.FirstOrDefault(item => item.Id == id));
 	}
 
+	public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		HashSet<Guid> idSet = [.. ids];
+		return Task.FromResult((IReadOnlyList<DepotArtifact>)_items.Where(item => idSet.Contains(item.Id)).ToArray());
+	}
+
 	public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(
 		DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken)
 	{

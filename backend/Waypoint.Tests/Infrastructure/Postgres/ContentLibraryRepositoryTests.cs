@@ -101,6 +101,26 @@ public sealed class ContentLibraryRepositoryTests : IAsyncLifetime, IDisposable
 		Assert.True(Directory.Exists(first!.DiskPath));
 	}
 
+	/// <summary>
+	/// Issue #1667: <c>content_libraries_name_key</c> is a byte-wise UNIQUE constraint,
+	/// so "Foo" and "foo" are two distinct rows under it -- but they derive the SAME
+	/// leaf directory name on a case-insensitive filesystem. CreateAsync's own
+	/// case-insensitive pre-check rejects the second as NameTaken regardless of what
+	/// the underlying mount's case sensitivity actually is.
+	/// </summary>
+	[Fact]
+	public async Task CreateAsync_RejectsANameDifferingOnlyByCaseFromAnExistingOne()
+	{
+		(ContentLibraryCreateOutcome firstOutcome, ContentLibrary? first) = await _libraries.CreateAsync("Foo", CancellationToken.None);
+		Assert.Equal(ContentLibraryCreateOutcome.Created, firstOutcome);
+
+		(ContentLibraryCreateOutcome secondOutcome, ContentLibrary? second) = await _libraries.CreateAsync("foo", CancellationToken.None);
+
+		Assert.Equal(ContentLibraryCreateOutcome.NameTaken, secondOutcome);
+		Assert.Null(second);
+		Assert.True(Directory.Exists(first!.DiskPath));
+	}
+
 	[Fact]
 	public async Task ListAsync_returns_multiple_libraries_as_independent_rows()
 	{

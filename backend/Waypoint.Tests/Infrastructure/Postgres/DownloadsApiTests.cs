@@ -242,6 +242,35 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1605: QueueDownloads used to resolve requested ids against a client-side
+	/// dictionary built from a single ListAsync page capped at MaxLimit (200 rows,
+	/// ordered indexed_at DESC), so a valid id indexed BEFORE 200 newer artifacts fell
+	/// outside that page and 404'd as if it did not exist. Seed the target artifact
+	/// first (oldest indexed_at), then 200 newer ones, so the pre-fix client-side page
+	/// would exclude it, and assert it still resolves.
+	/// </summary>
+	[Fact]
+	public async Task PostDownloads_ArtifactBeyondFirstCappedPage_StillResolves()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid targetArtifact = await SeedArtifactAsync($"{tag}-target");
+		for (int i = 0; i < 200; i++)
+		{
+			await SeedArtifactAsync($"{tag}-{i}");
+		}
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { targetArtifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+	}
+
+	/// <summary>
 	/// Issue #1479: <c>POST /downloads/binaries</c> with explicit depot artifact ids
 	/// creates ONE run of type <c>binaries-download</c> containing one queued
 	/// <c>binaries-download</c> job per artifact (the same scan-style fanout
@@ -483,6 +512,57 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1630: the id-list branch used to resolve requested ids by paging the
+	/// ENTIRE catalog to completion (one round trip per 200 rows plus a COUNT) purely
+	/// to build a client-side membership dictionary. Now it issues a single bounded
+	/// GetByIdsAsync lookup regardless of catalog size. Seeds 200 unrelated artifacts
+	/// plus the one actually requested and asserts it still resolves -- the same
+	/// beyond-first-page shape #1605's own proving test uses, but for the bounded-cost
+	/// fix rather than the correctness fix.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_IdListAgainstLargeCatalog_ResolvesTheRequestedArtifact()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid targetArtifact = await SeedArtifactAsync($"{tag}-target");
+		for (int i = 0; i < 200; i++)
+		{
+			await SeedArtifactAsync($"{tag}-{i}");
+		}
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { targetArtifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1630: a non-Guid depot_artifact_ids entry used to fall into the same
+	/// "unknown id" branch as a well-formed-but-absent one and return 404, conflating a
+	/// client typo with a deleted artifact. It is now a 400 validation error naming the
+	/// offending value.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_MalformedArtifactId_Returns400()
+	{
+		string[] malformedIds = ["not-a-guid"];
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = malformedIds }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
 
 	/// <summary>Neither selection mode supplied is an ambiguous, rejected request -- never a silent empty no-op run.</summary>

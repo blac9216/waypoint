@@ -69,6 +69,7 @@ public sealed class BinariesDownloadJobHandlerTests
 		public Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, Waypoint.Core.Pagination.PageRequest page, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 

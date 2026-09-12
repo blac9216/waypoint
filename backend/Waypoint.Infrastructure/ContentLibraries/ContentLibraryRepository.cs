@@ -41,6 +41,31 @@ public sealed class ContentLibraryRepository : IContentLibraryRepository
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Issue #1667: content_libraries_name_key is a byte-wise UNIQUE constraint, but
+		// `name` derives a plain filesystem leaf (ResolveDiskPath), and a name differing
+		// only by case ("Foo" vs "foo") is a DISTINCT row under that constraint while
+		// resolving to the SAME directory on a case-insensitive mount an operator might
+		// point ContentLibraryOptions.RootPath at (see its doc comment). This check-then-
+		// insert query is a best-effort guard, not an atomic one -- unlike the `name`
+		// column's own UNIQUE constraint, there is no DB-level arbiter for "case-
+		// insensitively equal" without a new index (out of this fix's scope: no migration
+		// added), so a genuine concurrent create/create race on two names differing only
+		// by case is not closed by this check, the same documented-not-fixed shape as
+		// RekeyManyAsync's own narrow concurrent-commit race above. It closes the
+		// sequential case (an operator naming a second library "foo" after "Foo" already
+		// exists), which is what issue #1667 was filed against.
+		await using (NpgsqlCommand caseInsensitiveCheck = new(
+			"SELECT 1 FROM content_libraries WHERE lower(name) = lower($1)", connection))
+		{
+			caseInsensitiveCheck.Parameters.AddWithValue(name);
+			object? collision = await caseInsensitiveCheck.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (collision is not null)
+			{
+				return (ContentLibraryCreateOutcome.NameTaken, null);
+			}
+		}
+
 		await using NpgsqlCommand command = new(
 			"""
 			INSERT INTO content_libraries (name, disk_path)

@@ -142,6 +142,9 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) =>
 			Task.FromResult<DepotArtifact?>(null);
 
+		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("not needed for this test");
+
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			throw new NotSupportedException("not needed for this test");
 
