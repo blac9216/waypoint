@@ -58,13 +58,33 @@ const TYPE_OPTIONS: { value: ProductType | ""; label: string }[] = [
 // that already, while the labels underneath were still hand-written
 // literals that could drift from the table's own copy) so the dropdown's
 // text can never drift from `ArtifactTable`'s.
-const STATUS_ORDER: ArtifactStatus[] = ["indexed", "downloading", "present", "failed", "missing"];
+//
+// Issue #1802: `STATUS_ORDER` used to be a second, unguarded copy of the
+// `ArtifactStatus` union — a new member could be added to the union (and
+// picked up by artifactStatus.test.ts's backend-parity guard) without this
+// list ever being told, silently dropping it from the operator's filter.
+// Keying the order off a `Record<ArtifactStatus, true>` instead makes an
+// omitted member a compile error: TypeScript requires every union member as
+// a property of an exhaustive `Record`.
+const STATUS_ORDER_MEMBERSHIP: Record<ArtifactStatus, true> = {
+	indexed: true,
+	downloading: true,
+	present: true,
+	failed: true,
+	missing: true,
+};
+const STATUS_ORDER = Object.keys(STATUS_ORDER_MEMBERSHIP) as ArtifactStatus[];
 const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	{ value: "", label: "Any status" },
-	...STATUS_ORDER.map((value) => ({
-		value,
-		label: DISPLAY_STATUS_LABELS[displayStatus(value) ?? "not_downloaded"],
-	})),
+	...STATUS_ORDER.map((value) => {
+		// Issue #1802 (gap 2): mirror ArtifactTable.tsx's handling of an
+		// unmapped status — surface the raw wire value rather than the
+		// `?? "not_downloaded"` coercion this dropdown used to apply, which
+		// mislabeled an unmapped value as its opposite (the same trap review
+		// round 1 finding F2 removed from ArtifactTable's own rendering path).
+		const display = displayStatus(value);
+		return { value, label: display !== null ? DISPLAY_STATUS_LABELS[display] : value };
+	}),
 ];
 
 // Run-level terminal states (docs/reference/api-contract.md's `run.progress` `state`
@@ -195,7 +215,13 @@ export function DownloadCatalogScreen() {
 				setLoadError(err instanceof ApiError ? err.message : "Could not load the download catalog.");
 			})
 			.finally(() => {
-				if (isCurrent()) {
+				// Issue #1803: unmount does not bump `loadGenerationRef`, so
+				// `isCurrent()` alone stays true on the unmount path and
+				// `setLoading(false)` ran after the component had already
+				// unmounted — the one callback of the three the effect's
+				// cleanup below didn't also guard via the abort signal, unlike
+				// `.catch`'s `controller.signal.aborted` check above.
+				if (isCurrent() && !controller.signal.aborted) {
 					setLoading(false);
 				}
 			});
