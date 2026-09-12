@@ -13,6 +13,41 @@ names, while partial discovery and temporary absence must never be reported as f
 coverage. Plans must also remain reproducible after content, configuration, or
 inventory changes.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #806, #727, PR #810._
+
+- The parity model in ADR-0022 requires exact product-version catalog matches and
+  exact active baselines for concrete components, so component identity must be
+  authoritative rather than inferred.
+- Selection must survive refresh without relying on names, addresses, paths, tree
+  positions, or sibling family keys, since infrastructure objects can be renamed or
+  relocated without changing what they are.
+- Partial discovery and temporary absence must never be reported as full coverage —
+  #806 requires "honest partial-refresh behavior" and explicit lifecycle/coverage
+  semantics for unsupported, conflicted, unreachable, absent, retired, and purged
+  components.
+- Plans must remain reproducible after content, configuration, or inventory changes,
+  so a retry or audit can trust what actually ran — #727 requires the architecture to
+  describe "immutable component plans" and "ordered attempts" rather than re-resolving
+  state after the fact.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from this ADR's own Decision and "Alternatives rejected"
+sections; PR #810 records no separate issue or PR debating these alternatives — the
+comparison lives only in the ADR's own text._
+
+1. **Component identity from parent target, catalog component key, and authoritative
+   vendor object identity (chosen)** — survives rename/relocation and supports
+   catalog-declared services with no independent upstream object via parent identity
+   plus catalog component key.
+2. **Use the cache after a failed refresh** — rejected: it cannot prove current
+   existence or complete `all` coverage.
+3. **Join by name/address, or prefer configured/discovered version on conflict** —
+   rejected: both can silently scan the wrong subject or baseline.
+4. **Rewrite plan rows on rediscovery or content change** — rejected: retries and
+   audit would cease to be reproducible.
 ## Decision
 
 ### Identity and provenance
