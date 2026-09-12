@@ -1,11 +1,16 @@
 /**
  * Deep-link view state for `/content-library` (issue #1399 AC3: "Deep links
  * to a specific view/type survive a page reload — state in the URL, not only
- * component state"). `?library=<id>&type=<type>&q=<term>&sort=<key>`,
+ * component state"). `?library=<id>&type=<type>&q=<term>&sort=<key>&folder=<id>`,
  * following the same "ride the existing path's query string, write via
  * `pushState`" shape `livejobs/useSelectionFromQuery.ts` established (issue
  * #590 AC4) rather than graduating the hand-rolled router
  * (`lib/router.tsx`) to param routes for one screen.
+ *
+ * `folder` (issue #1422 AC2: "deep links to a folder's contents are stable
+ * across reload") carries the selected folder tree node's id — `undefined`
+ * means "library root / no folder narrowing", mirroring how `libraryId`
+ * itself is `undefined` rather than a sentinel string.
  */
 import { useCallback, useEffect, useState } from "react";
 import type { ContentLibraryItemType } from "./content-library";
@@ -16,6 +21,7 @@ export interface ContentLibraryView {
 	type: ContentLibraryItemType | "all";
 	search: string;
 	sort: ContentLibrarySortKey;
+	folderId: string | undefined;
 }
 
 const DEFAULT_SORT: ContentLibrarySortKey = "name";
@@ -37,6 +43,7 @@ function readView(): ContentLibraryView {
 		type: isTypeFilter(type) ? type : "all",
 		search: params.get("q") ?? "",
 		sort: isSortKey(sort) ? sort : DEFAULT_SORT,
+		folderId: params.get("folder") ?? undefined,
 	};
 }
 
@@ -78,6 +85,11 @@ export function useContentLibraryViewFromQuery(): UseContentLibraryViewFromQuery
 				params.delete("sort");
 			} else {
 				params.set("sort", merged.sort);
+			}
+			if (merged.folderId) {
+				params.set("folder", merged.folderId);
+			} else {
+				params.delete("folder");
 			}
 			const qs = params.toString();
 			const url = `${window.location.pathname}${qs ? `?${qs}` : ""}`;

@@ -18,6 +18,18 @@
 	font-size: 13px;
 }
 
+.content-library-screen__body {
+	display: flex;
+	gap: 20px;
+	align-items: flex-start;
+	flex: 1;
+	min-height: 0;
+}
+
+.content-library-item__move {
+	max-width: 160px;
+}
+
 .content-library-screen__error {
 	background: var(--danger-bg, #3a1c1c);
 	border: 1px solid var(--danger, #c0392b);

@@ -345,6 +345,12 @@ export function apiPut<T>(path: string, body?: unknown, options?: ApiRequestOpti
 	return apiFetch<T>(path, { ...options, method: "PUT", body });
 }
 
+/** Issue #1422: the folder API's rename/move and item-folder-assignment
+ * endpoints are `PATCH`, the first callers in this client to need it. */
+export function apiPatch<T>(path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
+	return apiFetch<T>(path, { ...options, method: "PATCH", body });
+}
+
 export function apiDelete<T = void>(path: string, options?: ApiRequestOptions): Promise<T> {
 	return apiFetch<T>(path, { ...options, method: "DELETE" });
 }

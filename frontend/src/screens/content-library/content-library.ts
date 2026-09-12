@@ -16,7 +16,7 @@
  * with a different envelope.
  */
 
-import { apiGet } from "../../lib/api";
+import { apiDelete, apiGet, apiPatch, apiPost } from "../../lib/api";
 
 /** Registry row (`ContentLibrariesController.List`, issue #1391 — shipped). */
 export interface ContentLibrary {
@@ -119,6 +119,109 @@ export function sortItems(items: ContentLibraryItem[], key: ContentLibrarySortKe
 		default:
 			return copy;
 	}
+}
+
+/**
+ * Virtual folder tree (`ContentLibraryFoldersController`, issue #1389 —
+ * merged). DB-only metadata layered over the flat on-disk library; never
+ * touches `disk_path` or the item's files, so a library repair (disk-driven,
+ * #1398) cannot disturb it (this issue's AC1). `item_ids` carries only items
+ * assigned DIRECTLY to this node, never a descendant's — mirrored server-side
+ * by `ContentLibraryFolderNode.BuildTree`.
+ */
+export interface ContentLibraryFolderNode {
+	id: string;
+	name: string;
+	created_at: string;
+	item_ids: string[];
+	children: ContentLibraryFolderNode[];
+}
+
+export function fetchContentLibraryFolders(libraryId: string): Promise<ContentLibraryFolderNode[]> {
+	return apiGet<ContentLibraryFolderNode[]>(`/content-libraries/${encodeURIComponent(libraryId)}/folders`);
+}
+
+export interface ContentLibraryFolderResponse {
+	id: string;
+	library_id: string;
+	parent_folder_id: string | null;
+	name: string;
+	created_at: string;
+}
+
+export function createContentLibraryFolder(
+	libraryId: string,
+	name: string,
+	parentFolderId: string | null,
+): Promise<ContentLibraryFolderResponse> {
+	return apiPost<ContentLibraryFolderResponse>(`/content-libraries/${encodeURIComponent(libraryId)}/folders`, {
+		name,
+		parent_folder_id: parentFolderId,
+	});
+}
+
+/** Rename and/or move in one call — the API always applies both fields (a full
+ * replace, not a partial patch); see `ContentLibraryFolderUpdateBody`. */
+export function renameContentLibraryFolder(
+	libraryId: string,
+	folderId: string,
+	name: string,
+	parentFolderId: string | null,
+): Promise<ContentLibraryFolderResponse> {
+	return apiPatch<ContentLibraryFolderResponse>(
+		`/content-libraries/${encodeURIComponent(libraryId)}/folders/${encodeURIComponent(folderId)}`,
+		{ name, parent_folder_id: parentFolderId },
+	);
+}
+
+/** Delete-when-empty (409 `folder_not_empty` if it still has a child folder or
+ * a directly-assigned item — this slice has no cascading delete). */
+export function deleteContentLibraryFolder(libraryId: string, folderId: string): Promise<void> {
+	return apiDelete<void>(`/content-libraries/${encodeURIComponent(libraryId)}/folders/${encodeURIComponent(folderId)}`);
+}
+
+/** Assigns/moves/unassigns one item; `folderId: null` returns it to the
+ * library root. Single-parent — an item has at most one folder. */
+export function assignContentLibraryItemFolder(libraryId: string, itemId: string, folderId: string | null): Promise<void> {
+	return apiPatch<void>(`/content-libraries/${encodeURIComponent(libraryId)}/items/${encodeURIComponent(itemId)}/folder`, {
+		folder_id: folderId,
+	});
+}
+
+/** Flattens the tree into a depth-carrying list for a flat picker (the
+ * move-item menu) and builds an itemId -> folderId lookup (a folder's
+ * `item_ids` names only DIRECT assignments, so this map is the client-side
+ * answer to "what folder is this item in, if any"). */
+export interface FlatContentLibraryFolder {
+	id: string;
+	name: string;
+	depth: number;
+}
+
+export function flattenFolderTree(nodes: ContentLibraryFolderNode[]): FlatContentLibraryFolder[] {
+	const result: FlatContentLibraryFolder[] = [];
+	const visit = (list: ContentLibraryFolderNode[], depth: number) => {
+		for (const node of list) {
+			result.push({ id: node.id, name: node.name, depth });
+			visit(node.children, depth + 1);
+		}
+	};
+	visit(nodes, 0);
+	return result;
+}
+
+export function buildItemFolderMap(nodes: ContentLibraryFolderNode[]): Map<string, string> {
+	const map = new Map<string, string>();
+	const visit = (list: ContentLibraryFolderNode[]) => {
+		for (const node of list) {
+			for (const itemId of node.item_ids) {
+				map.set(itemId, node.id);
+			}
+			visit(node.children);
+		}
+	};
+	visit(nodes);
+	return map;
 }
 
 export function formatBytes(bytes: number | null | undefined): string {

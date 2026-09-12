@@ -10,52 +10,127 @@
  * The list/detail rendering itself is delegated to `LibraryViewShell`
  * (AC2) — this screen supplies columns, the type-tab toolbar, and the
  * library picker; it bakes no folder or family logic into the shell.
+ *
+ * Virtual folders (issue #1422): `FolderTree` renders the folder panel from
+ * `GET .../folders` (issue #1389); the selected folder narrows `visibleItems`
+ * the same way the type tab does (search/sort still run over the FULL item
+ * set, per AC1), and its id rides the URL for deep-link stability (AC2). Item
+ * moves are a per-row menu (not drag-and-drop, per the issue's own Risks
+ * section) applied optimistically with rollback on `ApiError`, matching the
+ * existing screens' `ApiError` handling pattern.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
+import { roleAtLeast } from "../../lib/roles";
 import {
 	CONTENT_LIBRARY_ITEM_TYPES,
 	CONTENT_LIBRARY_SORT_OPTIONS,
 	CONTENT_LIBRARY_TYPE_LABELS,
+	assignContentLibraryItemFolder,
+	buildItemFolderMap,
+	createContentLibraryFolder,
+	deleteContentLibraryFolder,
 	fetchContentLibraries,
+	fetchContentLibraryFolders,
 	fetchContentLibraryItems,
+	flattenFolderTree,
 	formatBytes,
 	itemTotalSize,
 	matchesSearch,
 	matchesTypeFilter,
+	renameContentLibraryFolder,
 	sortItems,
 	type ContentLibrary,
+	type ContentLibraryFolderNode,
 	type ContentLibraryItem,
 } from "./content-library";
+import { FolderTree } from "./FolderTree";
 import { LibraryViewShell, type LibraryViewShellColumn } from "./LibraryViewShell";
 import { useContentLibraryViewFromQuery } from "./useContentLibraryViewFromQuery";
 import "./ContentLibraryScreen.css";
 
-const COLUMNS: LibraryViewShellColumn<ContentLibraryItem>[] = [
-	{
-		key: "name",
-		header: "ITEM",
-		className: "content-library-col-item",
-		render: (item) => (
-			<div>
-				<div className="mono content-library-item__name">{item.name}</div>
-				{item.description && <div className="content-library-item__description">{item.description}</div>}
-			</div>
-		),
-	},
-	{ key: "type", header: "TYPE", render: (item) => CONTENT_LIBRARY_TYPE_LABELS[item.type] },
-	{ key: "size", header: "SIZE", className: "mono", render: (item) => formatBytes(itemTotalSize(item)) },
-	{ key: "version", header: "VERSION", className: "mono", render: (item) => item.version },
-	{ key: "updated", header: "UPDATED", className: "mono", render: (item) => new Date(item.updated_at).toLocaleString() },
-];
+/** Removes `itemId` from wherever it currently sits in the tree's `item_ids`
+ * and adds it to `targetFolderId`'s node (a no-op add when `targetFolderId`
+ * is `null` — the library root has no node of its own). Returns a NEW tree
+ * (never mutates `nodes`), matching this codebase's "sort/filter return a new
+ * array" convention (`sortItems` above). */
+function applyOptimisticMove(
+	nodes: ContentLibraryFolderNode[],
+	itemId: string,
+	previousFolderId: string | null,
+	targetFolderId: string | null,
+): ContentLibraryFolderNode[] {
+	return nodes.map((node) => {
+		let itemIds = node.item_ids;
+		if (node.id === previousFolderId) {
+			itemIds = itemIds.filter((id) => id !== itemId);
+		}
+		if (node.id === targetFolderId && !itemIds.includes(itemId)) {
+			itemIds = [...itemIds, itemId];
+		}
+		return { ...node, item_ids: itemIds, children: applyOptimisticMove(node.children, itemId, previousFolderId, targetFolderId) };
+	});
+}
+
+function buildColumns(
+	itemFolderMap: Map<string, string>,
+	flatFolders: { id: string; name: string; depth: number }[],
+	canMove: boolean,
+	moving: string | null,
+	onMove: (itemId: string, folderId: string | null) => void,
+): LibraryViewShellColumn<ContentLibraryItem>[] {
+	return [
+		{
+			key: "name",
+			header: "ITEM",
+			className: "content-library-col-item",
+			render: (item) => (
+				<div>
+					<div className="mono content-library-item__name">{item.name}</div>
+					{item.description && <div className="content-library-item__description">{item.description}</div>}
+				</div>
+			),
+		},
+		{ key: "type", header: "TYPE", render: (item) => CONTENT_LIBRARY_TYPE_LABELS[item.type] },
+		{ key: "size", header: "SIZE", className: "mono", render: (item) => formatBytes(itemTotalSize(item)) },
+		{ key: "version", header: "VERSION", className: "mono", render: (item) => item.version },
+		{ key: "updated", header: "UPDATED", className: "mono", render: (item) => new Date(item.updated_at).toLocaleString() },
+		{
+			key: "folder",
+			header: "FOLDER",
+			render: (item) => (
+				<select
+					aria-label={`Move ${item.name} to folder`}
+					className="content-library-item__move"
+					value={itemFolderMap.get(item.id) ?? ""}
+					disabled={!canMove || moving === item.id}
+					onChange={(e) => onMove(item.id, e.target.value || null)}
+				>
+					<option value="">Unassigned</option>
+					{flatFolders.map((f) => (
+						<option key={f.id} value={f.id}>
+							{" ".repeat(f.depth * 2)}
+							{f.name}
+						</option>
+					))}
+				</select>
+			),
+		},
+	];
+}
 
 export function ContentLibraryScreen() {
-	const { libraryId, type, search, sort, setView } = useContentLibraryViewFromQuery();
+	const { user } = useAuth();
+	const { libraryId, type, search, sort, folderId, setView } = useContentLibraryViewFromQuery();
 
 	const [libraries, setLibraries] = useState<ContentLibrary[]>([]);
 	const [items, setItems] = useState<ContentLibraryItem[]>([]);
+	const [folders, setFolders] = useState<ContentLibraryFolderNode[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [loadError, setLoadError] = useState<string | null>(null);
+	const [moving, setMoving] = useState<string | null>(null);
+	const [moveError, setMoveError] = useState<string | null>(null);
 
 	useEffect(() => {
 		fetchContentLibraries()
@@ -74,16 +149,25 @@ export function ContentLibraryScreen() {
 
 	const activeLibraryId = libraryId ?? libraries[0]?.id;
 
+	// Also re-fetches the folder tree (issue #1422 AC1: a library repair — or
+	// its test double, a plain re-fetch here — must never disturb folder
+	// assignment, since folders are DB-only metadata that never touch
+	// `disk_path`; re-running `load()` after a repair is exactly how that gets
+	// proven end-to-end through the UI).
 	const load = useCallback(() => {
 		if (!activeLibraryId) {
 			setItems([]);
+			setFolders([]);
 			setLoading(false);
 			return;
 		}
 		setLoading(true);
 		setLoadError(null);
-		fetchContentLibraryItems(activeLibraryId)
-			.then((res) => setItems(res))
+		Promise.all([fetchContentLibraryItems(activeLibraryId), fetchContentLibraryFolders(activeLibraryId)])
+			.then(([resItems, resFolders]) => {
+				setItems(resItems);
+				setFolders(resFolders);
+			})
 			.catch((err: unknown) => {
 				setLoadError(err instanceof ApiError ? err.message : "Could not load this library's items.");
 			})
@@ -94,16 +178,58 @@ export function ContentLibraryScreen() {
 		load();
 	}, [load]);
 
+	const itemFolderMap = useMemo(() => buildItemFolderMap(folders), [folders]);
+	const flatFolders = useMemo(() => flattenFolderTree(folders), [folders]);
+
 	// Search/sort apply to the FULL fetched item set (AC1) — the active type
-	// tab only narrows what's DISPLAYED, never what's searched or sorted.
+	// tab (and the selected folder, issue #1422) only narrow what's DISPLAYED,
+	// never what's searched or sorted.
 	const searchedAndSorted = useMemo(() => {
 		const matched = items.filter((item) => matchesSearch(item, search));
 		return sortItems(matched, sort);
 	}, [items, search, sort]);
 
-	const visibleItems = useMemo(
+	const typeFiltered = useMemo(
 		() => searchedAndSorted.filter((item) => matchesTypeFilter(item, type)),
 		[searchedAndSorted, type],
+	);
+
+	const visibleItems = useMemo(() => {
+		if (!folderId) return typeFiltered;
+		return typeFiltered.filter((item) => itemFolderMap.get(item.id) === folderId);
+	}, [typeFiltered, folderId, itemFolderMap]);
+
+	const canMove = user ? roleAtLeast(user.role, "Operator") : false;
+
+	const handleMove = useCallback(
+		(itemId: string, targetFolderId: string | null) => {
+			if (!activeLibraryId) return;
+			const previousFolderId = itemFolderMap.get(itemId) ?? null;
+			if (previousFolderId === targetFolderId) return;
+
+			setMoveError(null);
+			setMoving(itemId);
+			// Optimistic update: patch the local folder tree's item_ids so the
+			// move menu and folder counts reflect it immediately, then roll back
+			// to the pre-move tree on an `ApiError` (matching the existing
+			// screens' `ApiError` handling pattern) rather than leaving the UI
+			// showing a move the server rejected.
+			const previousFolders = folders;
+			setFolders((current) => applyOptimisticMove(current, itemId, previousFolderId, targetFolderId));
+
+			assignContentLibraryItemFolder(activeLibraryId, itemId, targetFolderId)
+				.catch((err: unknown) => {
+					setFolders(previousFolders);
+					setMoveError(err instanceof ApiError ? err.message : "Could not move this item.");
+				})
+				.finally(() => setMoving(null));
+		},
+		[activeLibraryId, folders, itemFolderMap],
+	);
+
+	const columns = useMemo(
+		() => buildColumns(itemFolderMap, flatFolders, canMove, moving, handleMove),
+		[itemFolderMap, flatFolders, canMove, moving, handleMove],
 	);
 
 	const countsByType = useMemo(() => {
@@ -140,6 +266,36 @@ export function ContentLibraryScreen() {
 		</div>
 	);
 
+	const handleCreateFolder = useCallback(
+		async (name: string, parentFolderId: string | null) => {
+			if (!activeLibraryId) return;
+			await createContentLibraryFolder(activeLibraryId, name, parentFolderId);
+			load();
+		},
+		[activeLibraryId, load],
+	);
+
+	const handleRenameFolder = useCallback(
+		async (targetFolderId: string, name: string, parentFolderId: string | null) => {
+			if (!activeLibraryId) return;
+			await renameContentLibraryFolder(activeLibraryId, targetFolderId, name, parentFolderId);
+			load();
+		},
+		[activeLibraryId, load],
+	);
+
+	const handleDeleteFolder = useCallback(
+		async (targetFolderId: string) => {
+			if (!activeLibraryId) return;
+			await deleteContentLibraryFolder(activeLibraryId, targetFolderId);
+			if (folderId === targetFolderId) {
+				setView({ folderId: undefined });
+			}
+			load();
+		},
+		[activeLibraryId, folderId, load, setView],
+	);
+
 	const libraryPicker =
 		libraries.length > 0 ? (
 			<select
@@ -166,24 +322,37 @@ export function ContentLibraryScreen() {
 			</div>
 
 			{loadError && <div className="content-library-screen__error">{loadError}</div>}
+			{moveError && <div className="content-library-screen__error">{moveError}</div>}
 
-			<LibraryViewShell
-				items={visibleItems}
-				getId={(item) => item.id}
-				columns={COLUMNS}
-				search={search}
-				onSearchChange={(value) => setView({ search: value })}
-				searchPlaceholder="search name, description, type…"
-				searchAriaLabel="Search content library items"
-				sortOptions={CONTENT_LIBRARY_SORT_OPTIONS}
-				sortValue={sort}
-				onSortChange={(value) => setView({ sort: value })}
-				sortAriaLabel="Sort content library items"
-				loading={loading}
-				emptyMessage={loading ? "Loading…" : "No items match the current filters."}
-				toolbarExtra={typeTabs}
-				headerExtra={libraryPicker}
-			/>
+			<div className="content-library-screen__body">
+				<FolderTree
+					folders={folders}
+					selectedFolderId={folderId}
+					onSelect={(id) => setView({ folderId: id })}
+					role={user?.role}
+					onCreate={handleCreateFolder}
+					onRename={handleRenameFolder}
+					onDelete={handleDeleteFolder}
+				/>
+
+				<LibraryViewShell
+					items={visibleItems}
+					getId={(item) => item.id}
+					columns={columns}
+					search={search}
+					onSearchChange={(value) => setView({ search: value })}
+					searchPlaceholder="search name, description, type…"
+					searchAriaLabel="Search content library items"
+					sortOptions={CONTENT_LIBRARY_SORT_OPTIONS}
+					sortValue={sort}
+					onSortChange={(value) => setView({ sort: value })}
+					sortAriaLabel="Sort content library items"
+					loading={loading}
+					emptyMessage={loading ? "Loading…" : "No items match the current filters."}
+					toolbarExtra={typeTabs}
+					headerExtra={libraryPicker}
+				/>
+			</div>
 		</div>
 	);
 }
