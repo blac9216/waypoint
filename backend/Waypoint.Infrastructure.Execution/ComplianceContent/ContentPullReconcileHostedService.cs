@@ -40,35 +40,39 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// transient at either level, so both the pending-list call and the per-pull reconcile
 /// path log it once and stop the loop rather than repeating it per pull per tick.
 ///
-/// Known trade-off (PR #1745 round 1, deferred to issue #1762): when
+/// Issue #1762 (fixed; was a PR #1745 round 1 deferred trade-off): when
 /// <see cref="ExecuteAsync"/> stops the sweep loop after an
-/// <see cref="SweepOutcome.AuthorizationDenied"/> outcome, nothing downstream of that
-/// stop changes -- <c>RunnerHealthReportingHostedService</c>'s health/readiness report
-/// has no channel for "the sweep stopped" and keeps reporting healthy. Wiring that
-/// visibility through is a design change (a new degraded-state channel into the
-/// readiness report) beyond the scope of this fix; issue #1762 tracks doing it.
+/// <see cref="SweepOutcome.AuthorizationDenied"/> outcome, it publishes that through
+/// <see cref="ContentPullReconcileSweepStatus"/> so
+/// <c>Waypoint.ComplianceRunner.Readiness.ComplianceReadinessCheck</c> can reflect the
+/// stopped sweep as degraded instead of the health report continuing to report healthy
+/// indefinitely.
 /// </summary>
 public sealed partial class ContentPullReconcileHostedService : BackgroundService
 {
 	private readonly ContentPullReconcileService _reconcileService;
 	private readonly IContentPullCheckFanOutRepository _checkFanOut;
 	private readonly IOptions<ContentPullReconcileOptions> _options;
+	private readonly ContentPullReconcileSweepStatus _sweepStatus;
 	private readonly ILogger<ContentPullReconcileHostedService> _logger;
 
 	public ContentPullReconcileHostedService(
 		ContentPullReconcileService reconcileService,
 		IContentPullCheckFanOutRepository checkFanOut,
 		IOptions<ContentPullReconcileOptions> options,
+		ContentPullReconcileSweepStatus sweepStatus,
 		ILogger<ContentPullReconcileHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(reconcileService);
 		ArgumentNullException.ThrowIfNull(checkFanOut);
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(sweepStatus);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_reconcileService = reconcileService;
 		_checkFanOut = checkFanOut;
 		_options = options;
+		_sweepStatus = sweepStatus;
 		_logger = logger;
 	}
 
@@ -91,6 +95,11 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 				// AddContentPullReconcileSweep). Stop the loop entirely rather than
 				// flooding the log once per interval forever -- SweepOnceAsync already
 				// logged the single error above.
+				//
+				// Issue #1762: publish the stop so RunnerHealthReportingHostedService's
+				// health report (via ComplianceReadinessCheck) can reflect it as degraded
+				// instead of continuing to report healthy indefinitely.
+				_sweepStatus.MarkStopped();
 				return;
 			}
 		}
@@ -111,7 +120,7 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		}
 		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
 		{
-			LogAuthorizationDenied(exception);
+			LogAuthorizationDenied(ResolveDeniedTableName(exception), exception);
 			return SweepOutcome.AuthorizationDenied;
 		}
 		catch (Exception exception)
@@ -141,7 +150,7 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 				// pending pull per tick forever -- the exact flood shape issue #1707 is
 				// about. Log once, stop the loop with the same outcome, and let the rows
 				// stay for a sweep started by a correctly-granted role.
-				LogAuthorizationDenied(exception);
+				LogAuthorizationDenied(ResolveDeniedTableName(exception), exception);
 				return SweepOutcome.AuthorizationDenied;
 			}
 			catch (Exception exception)
@@ -153,6 +162,19 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 		return SweepOutcome.Completed;
 	}
 
+	/// <summary>
+	/// Issue #1772: the pending-list catch can only ever fail on <c>content_pull_checks</c>,
+	/// but the per-pull reconcile catch (PR #1745 round 2) can see a 42501 from any table
+	/// <see cref="ContentPullReconcileService.TryReconcileAsync"/> touches. Npgsql
+	/// populates <see cref="PostgresException.TableName"/> from the server's error field
+	/// whenever the error is associated with a specific table (true for
+	/// <c>insufficient_privilege</c>), so read it instead of hardcoding one table name
+	/// into the shared log message; the generic fallback only applies if a future Postgres
+	/// version ever omits it.
+	/// </summary>
+	private static string ResolveDeniedTableName(PostgresException exception) =>
+		string.IsNullOrEmpty(exception.TableName) ? "a content-pull table" : exception.TableName;
+
 	[LoggerMessage(Level = LogLevel.Information, Message = "Content-pull reconcile sweeping every {Interval}")]
 	private partial void LogSweepStarting(TimeSpan interval);
 
@@ -162,8 +184,8 @@ public sealed partial class ContentPullReconcileHostedService : BackgroundServic
 	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep could not list pending pulls")]
 	private partial void LogListFailed(Exception exception);
 
-	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep has no permission on content_pull_checks (42501) -- this process's database role lacks the grant migration 0073 gives waypoint_compliance_runner. Stopping the sweep instead of retrying forever; see issue #1707.")]
-	private partial void LogAuthorizationDenied(Exception exception);
+	[LoggerMessage(Level = LogLevel.Error, Message = "Content-pull reconcile sweep has no permission on {TableName} (42501) -- this process's database role lacks a required grant for waypoint_compliance_runner. Stopping the sweep instead of retrying forever; see issue #1707.")]
+	private partial void LogAuthorizationDenied(string tableName, Exception exception);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Reconcile failed for content-pull job {ContentPullJobId}; row remains for the next sweep")]
 	private partial void LogReconcileFailed(Guid contentPullJobId, Exception exception);

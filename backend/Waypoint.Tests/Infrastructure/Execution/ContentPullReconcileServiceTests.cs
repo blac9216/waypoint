@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
+using System.Reflection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -667,11 +669,11 @@ public sealed class ContentPullReconcileServiceTests
 	public async Task SweepOnceAsync_PermissionDenied_ReturnsAuthorizationDeniedAndLogsExactlyOnce()
 	{
 		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
-		checkFanOut.ThrowOnListPending = new PostgresException(
-			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
+		checkFanOut.ThrowOnListPending = CreatePostgresExceptionWithTable(
+			"permission denied for table content_pull_checks", PostgresErrorCodes.InsufficientPrivilege, "content_pull_checks");
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), new ContentPullReconcileSweepStatus(), logger);
 
 		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
 
@@ -696,7 +698,7 @@ public sealed class ContentPullReconcileServiceTests
 			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), new ContentPullReconcileSweepStatus(), logger);
 
 		await hostedService.StartAsync(CancellationToken.None);
 		Task executeTask = hostedService.ExecuteTask ?? throw new InvalidOperationException("expected ExecuteTask to be set after StartAsync.");
@@ -728,7 +730,7 @@ public sealed class ContentPullReconcileServiceTests
 			"terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown);
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), new ContentPullReconcileSweepStatus(), logger);
 
 		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
 
@@ -750,7 +752,7 @@ public sealed class ContentPullReconcileServiceTests
 			"terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown);
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), new ContentPullReconcileSweepStatus(), logger);
 
 		await hostedService.StartAsync(CancellationToken.None);
 
@@ -781,11 +783,11 @@ public sealed class ContentPullReconcileServiceTests
 		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
 		Guid pullJobId = Guid.NewGuid();
 		checkFanOut.AddFanOut(Guid.NewGuid(), pullJobId, Guid.NewGuid(), "commitA", [new ContentCheckProfileDirectory("p0", "/invented/p0")]);
-		checkFanOut.ThrowOnGetReadiness = new PostgresException(
-			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
+		checkFanOut.ThrowOnGetReadiness = CreatePostgresExceptionWithTable(
+			"permission denied for table content_pull_checks", PostgresErrorCodes.InsufficientPrivilege, "content_pull_checks");
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), new ContentPullReconcileSweepStatus(), logger);
 
 		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
 
@@ -810,7 +812,7 @@ public sealed class ContentPullReconcileServiceTests
 			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
 		CapturingLogger<ContentPullReconcileHostedService> logger = new();
 		ContentPullReconcileHostedService hostedService = new(
-			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), logger);
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), new ContentPullReconcileSweepStatus(), logger);
 
 		await hostedService.StartAsync(CancellationToken.None);
 		Task executeTask = hostedService.ExecuteTask ?? throw new InvalidOperationException("expected ExecuteTask to be set after StartAsync.");
@@ -822,5 +824,109 @@ public sealed class ContentPullReconcileServiceTests
 		Assert.Single(logger.EntriesAt(LogLevel.Error));
 
 		await hostedService.StopAsync(CancellationToken.None);
+	}
+
+	// --- issue #1762: sweep-stopped status published for the health report -------
+
+	/// <summary>
+	/// Issue #1762: before this fix, nothing downstream of <c>ExecuteAsync</c> stopping
+	/// its loop after a 42501 changed -- <see cref="ContentPullReconcileSweepStatus"/>
+	/// stayed <c>false</c> forever, which is exactly what let
+	/// <c>RunnerHealthReportingHostedService</c> keep reporting healthy. This proves the
+	/// hosted service now flips the shared status when (and only when) the loop actually
+	/// stops.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_PermissionDenied_MarksSweepStatusStopped()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"permission denied for table content_pull_checks", "ERROR", "ERROR", PostgresErrorCodes.InsufficientPrivilege);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileSweepStatus sweepStatus = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), sweepStatus, logger);
+
+		Assert.False(sweepStatus.Stopped);
+
+		await hostedService.StartAsync(CancellationToken.None);
+		Task executeTask = hostedService.ExecuteTask ?? throw new InvalidOperationException("expected ExecuteTask to be set after StartAsync.");
+		Task completedTask = await Task.WhenAny(executeTask, Task.Delay(TimeSpan.FromSeconds(5)));
+		Assert.Same(executeTask, completedTask);
+		await executeTask;
+
+		Assert.True(sweepStatus.Stopped);
+
+		await hostedService.StopAsync(CancellationToken.None);
+	}
+
+	/// <summary>
+	/// The negative half: a transient failure that keeps the loop ticking must never mark
+	/// the sweep stopped -- a bugged implementation that flipped the flag unconditionally
+	/// would falsely degrade the health report on every ordinary hiccup.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_NonAuthorizationPostgresException_DoesNotMarkSweepStatusStopped()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		checkFanOut.ThrowOnListPending = new PostgresException(
+			"terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown);
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileSweepStatus sweepStatus = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions { SweepInterval = TimeSpan.FromMilliseconds(20) }), sweepStatus, logger);
+
+		await hostedService.StartAsync(CancellationToken.None);
+		Task secondTick = checkFanOut.SecondListPendingCall.Task;
+		await Task.WhenAny(secondTick, Task.Delay(TimeSpan.FromSeconds(30)));
+		await hostedService.StopAsync(CancellationToken.None);
+
+		Assert.False(sweepStatus.Stopped);
+	}
+
+	// --- issue #1772: 42501 log line names the actual denied table ---------------
+
+	/// <summary>
+	/// Issue #1772: the per-pull reconcile path can deny on a table other than
+	/// <c>content_pull_checks</c> (e.g. <c>content_revisions</c>) -- the log line must
+	/// name that table, not assert the pending-list call's table.
+	/// </summary>
+	[Fact]
+	public async Task SweepOnceAsync_PermissionDeniedOnReconcilePathForAnotherTable_LogsTheActualTable()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, _, _, _, _) = Build();
+		Guid pullJobId = Guid.NewGuid();
+		checkFanOut.AddFanOut(Guid.NewGuid(), pullJobId, Guid.NewGuid(), "commitA", [new ContentCheckProfileDirectory("p0", "/invented/p0")]);
+		checkFanOut.ThrowOnGetReadiness = CreatePostgresExceptionWithTable(
+			"permission denied for table content_revisions", PostgresErrorCodes.InsufficientPrivilege, "content_revisions");
+		CapturingLogger<ContentPullReconcileHostedService> logger = new();
+		ContentPullReconcileHostedService hostedService = new(
+			service, checkFanOut, Options.Create(new ContentPullReconcileOptions()), new ContentPullReconcileSweepStatus(), logger);
+
+		SweepOutcome outcome = await hostedService.SweepOnceAsync(CancellationToken.None);
+
+		Assert.Equal(SweepOutcome.AuthorizationDenied, outcome);
+		CapturedLogEntry errorEntry = logger.OnlyEntryAt(LogLevel.Error);
+		Assert.Contains("42501", errorEntry.Message, StringComparison.Ordinal);
+		Assert.Contains("content_revisions", errorEntry.Message, StringComparison.Ordinal);
+		Assert.DoesNotContain("content_pull_checks", errorEntry.Message, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Builds a <see cref="PostgresException"/> with <see cref="PostgresException.TableName"/>
+	/// populated -- that property has no public setter (Npgsql only sets it internally
+	/// from the server's error fields), so this reflects into the internal 18-arg
+	/// constructor the way a real driver-parsed 42501 on a specific table would arrive.
+	/// </summary>
+	private static PostgresException CreatePostgresExceptionWithTable(string message, string sqlState, string tableName)
+	{
+		ConstructorInfo ctor = typeof(PostgresException)
+			.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+			.Single(candidate => candidate.GetParameters().Length == 18);
+		return (PostgresException)ctor.Invoke(
+		[
+			message, "ERROR", "ERROR", sqlState,
+			null, null, 0, 0, null, null, null, tableName, null, null, null, null, null, null,
+		]);
 	}
 }

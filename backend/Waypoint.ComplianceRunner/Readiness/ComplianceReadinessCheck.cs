@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
+using Waypoint.Infrastructure.Execution.ComplianceContent;
 
 namespace Waypoint.ComplianceRunner.Readiness;
 
@@ -64,6 +65,12 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// key absence into <see cref="ReadinessReport.Ready"/> contradicted that documented,
 /// supported state and disagreed with the download-runner, which never gates health on
 /// key presence either.</description></item>
+/// <item><description>the content-pull reconcile sweep
+/// (<see cref="ContentPullReconcileSweepStatus"/>) has stopped after a non-transient
+/// 42501 (issue #1762) -- the sweep stopping does not mean this runner cannot do useful
+/// compliance work (scans and content pulls both still function), but an operator needs
+/// a signal that reconciliation itself is no longer running without grepping runner logs
+/// for the one-time error line.</description></item>
 /// </list>
 ///
 /// Every one of the above still appears in <see cref="ReadinessReport.Problems"/> --
@@ -85,19 +92,23 @@ public sealed class ComplianceReadinessCheck
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly IMasterKeyProvider _masterKeyProvider;
+	private readonly ContentPullReconcileSweepStatus _contentPullSweepStatus;
 
 	public ComplianceReadinessCheck(
 		IOptions<PowerShellOptions> powerShellOptions,
 		IOptions<ScanOptions> scanOptions,
-		IMasterKeyProvider masterKeyProvider)
+		IMasterKeyProvider masterKeyProvider,
+		ContentPullReconcileSweepStatus contentPullSweepStatus)
 	{
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(masterKeyProvider);
+		ArgumentNullException.ThrowIfNull(contentPullSweepStatus);
 
 		_powerShellOptions = powerShellOptions;
 		_scanOptions = scanOptions;
 		_masterKeyProvider = masterKeyProvider;
+		_contentPullSweepStatus = contentPullSweepStatus;
 	}
 
 	/// <summary>Runs every check and returns a complete report -- never throws.</summary>
@@ -140,6 +151,14 @@ public sealed class ComplianceReadinessCheck
 		catch (Exception exception)
 		{
 			degraded.Add($"Master key is unavailable: {exception.Message}");
+		}
+
+		// Issue #1762: the sweep publishes this itself on the one non-transient
+		// (42501) outcome that makes it stop -- see ContentPullReconcileSweepStatus's
+		// doc comment for why a stopped sweep is degraded, not a hard failure.
+		if (_contentPullSweepStatus.Stopped)
+		{
+			degraded.Add("Content-pull reconcile sweep has stopped after a non-transient permission error (42501); see issue #1762 and the compliance-runner logs for the original error.");
 		}
 
 		List<string> allProblems = [.. problems, .. degraded];

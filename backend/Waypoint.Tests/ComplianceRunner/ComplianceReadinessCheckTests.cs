@@ -17,6 +17,7 @@ using Waypoint.ComplianceRunner.Readiness;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
+using Waypoint.Infrastructure.Execution.ComplianceContent;
 using Xunit;
 
 namespace Waypoint.Tests.ComplianceRunner;
@@ -214,6 +215,37 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 		Assert.DoesNotContain(report.Problems, problem => problem.Contains("VMware.PowerCLI", StringComparison.Ordinal));
 	}
 
+	/// <summary>
+	/// Issue #1762: before this fix, <see cref="ComplianceReadinessCheck"/> had no way to
+	/// learn that <c>ContentPullReconcileHostedService</c>'s sweep loop had stopped, so a
+	/// stopped sweep kept reporting fully healthy (<see cref="ReadinessReport.Ready"/> true
+	/// and an empty <see cref="ReadinessReport.Problems"/>) forever.
+	/// </summary>
+	[Fact]
+	public void ContentPullSweepStopped_IsDegradedNotHealthy()
+	{
+		ComplianceReadinessCheck check = BuildCheck(out _, contentPullSweepStopped: true);
+
+		ReadinessReport report = check.Evaluate();
+
+		// Issue #905's pattern: degraded conditions are surfaced in Problems without
+		// failing Ready, exactly like the master-key/deprecated-fallback cases above --
+		// but the report must no longer look identically "fully healthy" (empty Problems).
+		Assert.NotEmpty(report.Problems);
+		Assert.Contains(report.Problems, problem => problem.Contains("1762", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void ContentPullSweepNotStopped_ReportsNoDegradation()
+	{
+		ComplianceReadinessCheck check = BuildCheck(out _, contentPullSweepStopped: false);
+
+		ReadinessReport report = check.Evaluate();
+
+		Assert.True(report.Ready);
+		Assert.Empty(report.Problems);
+	}
+
 	private ComplianceReadinessCheck BuildCheck(
 		out Paths paths,
 		IReadOnlyList<string>? modulePreloadPaths = null,
@@ -222,7 +254,8 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 		bool missingArtifactStore = false,
 		bool masterKeyThrows = false,
 		string? blankSetting = null,
-		bool readOnlyArtifactStore = false)
+		bool readOnlyArtifactStore = false,
+		bool contentPullSweepStopped = false)
 	{
 		string modulesDir = Path.Combine(_tempRoot, "modules");
 		string profileDir = Path.Combine(_tempRoot, "profiles", "vsphere");
@@ -285,10 +318,17 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 			? new ThrowingMasterKeyProvider()
 			: new FakeMasterKeyProvider();
 
+		ContentPullReconcileSweepStatus sweepStatus = new();
+		if (contentPullSweepStopped)
+		{
+			sweepStatus.MarkStopped();
+		}
+
 		return new ComplianceReadinessCheck(
 			Options.Create(powerShellOptions),
 			Options.Create(scanOptions),
-			masterKeyProvider);
+			masterKeyProvider,
+			sweepStatus);
 	}
 
 	private sealed record Paths(string ModulesDir, string ProfileDir, string NsxDir, string SrgDir, string ArtifactDir);
