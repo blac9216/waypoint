@@ -126,7 +126,7 @@ public sealed class CatalogIndexJobHandlerRealModuleEndToEndTests : IAsyncLifeti
 		await ResetUnknownFilesAsync();
 
 		CatalogOptions catalogOptions = new() { DepotPath = _depotDirectory };
-		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions, NullLogger<CatalogIndexJobHandler>.Instance);
 	}
 
 	public async Task DisposeAsync()

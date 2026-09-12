@@ -87,7 +87,7 @@ public sealed class CatalogIndexJobHandlerRejectedRowEndToEndTests : IAsyncLifet
 		_unknownFiles = new UnknownCatalogFileRepository(_fixture.ConnectionString);
 
 		CatalogOptions catalogOptions = new() { DepotPath = "/invented/depot" };
-		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _unknownFiles, _redactor, Options.Create(catalogOptions), wrappedPsOptions, NullLogger<CatalogIndexJobHandler>.Instance);
 	}
 
 	public async Task DisposeAsync()

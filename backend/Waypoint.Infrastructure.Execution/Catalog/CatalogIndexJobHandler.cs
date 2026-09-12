@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Catalog;
@@ -61,7 +63,7 @@ namespace Waypoint.Infrastructure.Catalog;
 /// the same "one malformed entry must not block every other artifact" posture this
 /// handler has always had.
 /// </summary>
-public sealed class CatalogIndexJobHandler : IJobHandler
+public sealed partial class CatalogIndexJobHandler : IJobHandler
 {
 	private const string InvocationCommand = "Invoke-WaypointCatalogIndex";
 	private const string ArtifactPresenceRecordType = "ArtifactPresence";
@@ -73,6 +75,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
+	private readonly ILogger<CatalogIndexJobHandler> _logger;
 
 	public CatalogIndexJobHandler(
 		IPowerShellExecutor executor,
@@ -80,7 +83,8 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		IUnknownCatalogFileRepository unknownFiles,
 		ISecretRedactor redactor,
 		IOptions<CatalogOptions> catalogOptions,
-		IOptions<PowerShellOptions> powerShellOptions)
+		IOptions<PowerShellOptions> powerShellOptions,
+		ILogger<CatalogIndexJobHandler> logger)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(artifacts);
@@ -88,6 +92,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
+		ArgumentNullException.ThrowIfNull(logger);
 
 		_executor = executor;
 		_artifacts = artifacts;
@@ -95,6 +100,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		_redactor = redactor;
 		_catalogOptions = catalogOptions;
 		_powerShellOptions = powerShellOptions;
+		_logger = logger;
 	}
 
 	public string JobType => "catalog-index";
@@ -278,7 +284,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			.ConfigureAwait(false);
 	}
 
-	private static DepotArtifactUpsert? TryParseArtifact(System.Management.Automation.PSObject psObject)
+	private DepotArtifactUpsert? TryParseArtifact(System.Management.Automation.PSObject psObject)
 	{
 		string? externalId = GetProperty<string>(psObject, "ExternalId");
 		string? status = GetProperty<string>(psObject, "Status");
@@ -292,6 +298,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		string? version = GetProperty<string>(psObject, "Version");
 		object? sizeBytes = PowerShellValueUnwrap.Unwrap(psObject.Properties["SizeBytes"]?.Value);
 		string? relativePath = GetProperty<string>(psObject, "RelativePath");
+		string? mismatchReason = GetProperty<string>(psObject, "MismatchReason");
 
 		Dictionary<string, object?> metadata = new(StringComparer.Ordinal)
 		{
@@ -308,6 +315,19 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 			metadata["version"] = version;
 		}
 
+		// Issue #1840: #1635's MismatchReason distinguishes a downloaded-and-corrupt
+		// artifact (size-mismatch/hash-mismatch) from one never downloaded ($null) --
+		// persist it so a consumer (catalog UI, a future re-download driver) can act on
+		// the distinction instead of it being computed and discarded on every sweep.
+		// Decision (issue #1840): persisting to depot_artifacts.metadata is enough for
+		// now -- no catalog/depot UI surfaces this distinction yet. Surfacing it to an
+		// operator is deferred to whichever consumer (#1512's catalog UI or a future
+		// re-download driver) first needs to act on it.
+		if (!string.IsNullOrWhiteSpace(mismatchReason))
+		{
+			metadata["mismatch_reason"] = mismatchReason;
+		}
+
 		string metadataJson = JsonSerializer.Serialize(metadata);
 
 		// externalId is passed as RelativePath (migration 0100, issue #1488): the
@@ -320,20 +340,59 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 
 	/// <summary>
 	/// Best-effort conversion of an unwrapped PowerShell <c>SizeBytes</c> property
-	/// value (may arrive as <see cref="long"/>, <see cref="int"/>, or a numeric
-	/// string) into a nullable <see cref="long"/>. Returns null rather than throwing on
-	/// anything else -- one unparsable size must not fail the whole row, matching this
-	/// handler's existing "skip, don't halt" posture for malformed entries.
+	/// value (may arrive as <see cref="long"/>, <see cref="int"/>, <see cref="double"/>,
+	/// <see cref="decimal"/>, or a numeric string) into a nullable <see cref="long"/>.
+	/// Returns null rather than throwing on anything else -- one unparsable size must
+	/// not fail the whole row, matching this handler's existing "skip, don't halt"
+	/// posture for malformed entries.
+	///
+	/// Issue #1615: string parsing is culture-invariant (the value comes from a
+	/// PowerShell runner whose culture is not pinned by us, and this repo has already
+	/// been bitten by a locale digit trap), and <see cref="double"/>/<see cref="decimal"/>
+	/// inputs -- which PowerShell readily surfaces for large byte counts on some
+	/// providers, or anything that has been through arithmetic -- convert when they
+	/// hold an integral value within <see cref="long"/> range instead of falling
+	/// through to null. A non-null input that still yields null is logged at debug
+	/// level so a systematically dropped size is discoverable.
 	/// </summary>
-	private static long? TryToInt64(object? value)
+	private long? TryToInt64(object? value)
 	{
-		return value switch
+		long? result = value switch
 		{
 			long longValue => longValue,
 			int intValue => intValue,
-			string stringValue when long.TryParse(stringValue, out long parsed) => parsed,
+			double doubleValue when IsIntegralInLongRange(doubleValue) => (long)doubleValue,
+			decimal decimalValue when IsIntegralInLongRange(decimalValue) => (long)decimalValue,
+			string stringValue when long.TryParse(
+				stringValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed) => parsed,
 			_ => null,
 		};
+
+		if (result is null && value is not null)
+		{
+			LogSizeDropped(_logger, value.ToString() ?? string.Empty, value.GetType().Name);
+		}
+
+		return result;
+	}
+
+	[LoggerMessage(Level = LogLevel.Debug, Message = "catalog-index: SizeBytes value '{Value}' ({Type}) could not be parsed to a long; size dropped.")]
+	private static partial void LogSizeDropped(ILogger logger, string value, string type);
+
+	private static bool IsIntegralInLongRange(double value)
+	{
+		return !double.IsNaN(value)
+			&& !double.IsInfinity(value)
+			&& value == Math.Truncate(value)
+			&& value >= long.MinValue
+			&& value <= long.MaxValue;
+	}
+
+	private static bool IsIntegralInLongRange(decimal value)
+	{
+		return value == Math.Truncate(value)
+			&& value >= long.MinValue
+			&& value <= long.MaxValue;
 	}
 
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)

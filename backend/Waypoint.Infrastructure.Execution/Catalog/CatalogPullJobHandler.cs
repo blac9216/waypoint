@@ -320,7 +320,23 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			}
 
 			await EmitProgressAsync(context, $"Pull complete: indexed {upserted} artifact(s).", cancellationToken).ConfigureAwait(false);
-			return JobExecutionOutcome.Succeeded($"Pulled and indexed {upserted} artifact(s) from the authenticated vendor catalog.");
+
+			// Issue #1887: the ambiguous-legacy-identity exclusion above is reported
+			// only on run.progress's message field, which no operator surface renders
+			// (neither frontend/src/screens/liverun/liverun.ts nor
+			// .../livejobs/livejobs.ts reads it). Append it to the terminal Succeeded
+			// note -- the operator-facing summary an operator actually reads -- so a
+			// pull that skipped reconciliation for one or more ambiguous artifacts
+			// says so on a surface that is rendered.
+			string successNote = $"Pulled and indexed {upserted} artifact(s) from the authenticated vendor catalog.";
+			if (ambiguousLegacyIdentities.Count > 0)
+			{
+				successNote += " Skipped legacy-identity reconciliation for " +
+					$"{ambiguousLegacyIdentities.Count} ambiguous bare fileName(s): " +
+					$"{string.Join(", ", ambiguousLegacyIdentities)}.";
+			}
+
+			return JobExecutionOutcome.Succeeded(successNote);
 		}
 		finally
 		{
