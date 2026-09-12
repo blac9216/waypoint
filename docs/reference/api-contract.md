@@ -3,7 +3,7 @@
 Kind: reference
 
 Status: **draft v1 — closes the design phase**. Derived from the UI prototype
-(`ui/prototype/`) reconciled against `domain-model.md`. This is the contract the foundation story
+([`ui/prototype/`](../how-to/ui-prototype.md)) reconciled against [`domain-model.md`](../explanation/domain-model.md). This is the contract the foundation story
 backend implements and the frontend consumes; refine it in PRs, don't fork it in code.
 Endpoint shapes are planning-grade — field lists name the load-bearing data, not every
 column.
