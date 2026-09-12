@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -35,6 +36,12 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 
 	private static readonly IReadOnlyDictionary<string, object> EmptyProperties =
 		new Dictionary<string, object>(0, StringComparer.Ordinal);
+
+	/// <summary>
+	/// Research #1032 Q1: the reference publisher's pinned item-name cap. Names longer
+	/// than this are truncated (preserving the extension), never rejected -- issue #1681.
+	/// </summary>
+	private const int ItemNameMaxLength = 80;
 
 	private readonly TimeProvider _clock;
 	private readonly Action<string> _onDocumentWritten;
@@ -73,6 +80,7 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 
 		HashSet<string> seenDirectoryNames = new(StringComparer.Ordinal);
 		HashSet<Guid> seenIds = new();
+		HashSet<string> seenNames = new(StringComparer.Ordinal);
 		foreach (ContentLibraryItemWrite item in items)
 		{
 			ValidateItem(item);
@@ -85,6 +93,16 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 			{
 				throw new ArgumentException($"Duplicate item id '{item.Id}' in one write.", nameof(items));
 			}
+
+			// Research #1032 Q1: "item names must be unique within a library -- the flat
+			// namespace is the only namespace". Checked against the TRUNCATED name, since
+			// two names that only differ past the 80-char cap collide on the wire exactly
+			// the same way (issue #1681).
+			string effectiveName = TruncateItemName(item.Name);
+			if (!seenNames.Add(effectiveName))
+			{
+				throw new ArgumentException($"Duplicate item name '{effectiveName}' in one write.", nameof(items));
+			}
 		}
 
 		string libJsonPath = Path.Combine(library.DiskPath, "lib.json");
@@ -92,11 +110,7 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 
 		LibJson? previousLib = await ReadExistingAsync<LibJson>(libJsonPath, cancellationToken).ConfigureAwait(false);
 		ItemsJson? previousItems = await ReadExistingAsync<ItemsJson>(itemsJsonPath, cancellationToken).ConfigureAwait(false);
-		Dictionary<string, ItemJson> previousById = new(StringComparer.Ordinal);
-		foreach (ItemJson previousItem in previousItems?.Items ?? [])
-		{
-			previousById[previousItem.Id] = previousItem;
-		}
+		Dictionary<string, ItemJson> previousById = await BuildPreviousItemsAsync(library.DiskPath, previousItems, cancellationToken).ConfigureAwait(false);
 
 		string nowIso = _clock.GetUtcNow().UtcDateTime.ToString("o");
 
@@ -118,20 +132,27 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 			List<ItemFileJson> files = item.Files
 				.Select(file => new ItemFileJson(file.Name, file.Size, etag, [$"{directorySegment}/{Uri.EscapeDataString(file.Name)}"]))
 				.ToList();
+			string name = TruncateItemName(item.Name);
+			// Description is non-nullable by declaration only (issue #1681) -- a caller
+			// oblivious to nullable-reference annotations can still hand us a null at
+			// runtime, and the wire format's own contract (research #1032) pins `""`.
+			string description = item.Description ?? string.Empty;
 
 			if (previousById.TryGetValue(id, out ItemJson? prior))
 			{
 				string priorEtag = prior.Files.Count > 0 ? prior.Files[0].Etag : string.Empty;
 				bool contentChanged = !string.Equals(priorEtag, etag, StringComparison.Ordinal);
-				string version = contentChanged ? (ParseCounter(prior.Version) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) : prior.Version;
+				string version = contentChanged
+					? (ParseCounter(prior.Version, $"item {id} version") + 1).ToString(CultureInfo.InvariantCulture)
+					: prior.Version;
 				anyItemChanged |= contentChanged;
 
 				resolved.Add((item.DirectoryName, new ItemJson(
 					prior.Created,
-					item.Description,
+					description,
 					version,
 					id,
-					item.Name,
+					name,
 					selfHref,
 					files,
 					item.Type,
@@ -142,10 +163,10 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 				anyItemChanged = true;
 				resolved.Add((item.DirectoryName, new ItemJson(
 					nowIso,
-					item.Description,
+					description,
 					"1",
 					id,
-					item.Name,
+					name,
 					selfHref,
 					files,
 					item.Type,
@@ -162,7 +183,7 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 
 		string libId = previousLib?.Id ?? LibUrn(Guid.NewGuid());
 		string libCreated = previousLib?.Created ?? nowIso;
-		long priorVersion = previousLib is not null ? ParseCounter(previousLib.Version) : 0;
+		long priorVersion = previousLib is not null ? ParseCounter(previousLib.Version, "lib.json version") : 0;
 		long newVersion = libraryChanged ? priorVersion + 1 : priorVersion;
 		// contentVersion is fixed for the library's lifetime once assigned -- research
 		// #1032: it is not a sync signal and this writer never advances it (the
@@ -210,6 +231,31 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 	}
 
 	/// <summary>
+	/// Research #1032 Q1: the reference publisher truncates an over-cap item name
+	/// rather than rejecting it, preserving the extension. Names within the cap pass
+	/// through unchanged.
+	/// </summary>
+	private static string TruncateItemName(string name)
+	{
+		if (name.Length <= ItemNameMaxLength)
+		{
+			return name;
+		}
+
+		string extension = Path.GetExtension(name);
+		if (extension.Length >= ItemNameMaxLength)
+		{
+			// Degenerate case: the "extension" alone already meets or exceeds the cap
+			// (e.g. no real extension, just a long dotted suffix) -- a hard truncation
+			// is the only sensible fallback.
+			return name[..ItemNameMaxLength];
+		}
+
+		string stem = name[..^extension.Length];
+		return stem[..(ItemNameMaxLength - extension.Length)] + extension;
+	}
+
+	/// <summary>
 	/// Same shape of guard as <c>ContentLibraryRepository.ResolveDiskPath</c>: a single
 	/// path segment, no <c>.</c>/<c>..</c>, no separators, never absolute -- this is
 	/// the code that actually combines an item-supplied string with a real filesystem
@@ -239,14 +285,29 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 		StringBuilder builder = new();
 		foreach (ContentLibraryItemFileWrite file in files.OrderBy(f => f.Name, StringComparer.Ordinal))
 		{
-			builder.Append(file.Name).Append(' ').Append(file.Size).Append(' ').Append(file.ContentHash).Append('\n');
+			builder.Append(file.Name).Append('\0').Append(file.Size.ToString(CultureInfo.InvariantCulture)).Append('\0').Append(file.ContentHash).Append('\n');
 		}
 
 		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
 		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
 
-	private static long ParseCounter(string value) => long.TryParse(value, out long parsed) ? parsed : 0;
+	/// <summary>
+	/// Issue #1679: parses invariantly (the surrounding code already formats these same
+	/// counters with <see cref="CultureInfo.InvariantCulture"/>) and throws loudly on an
+	/// unparseable value instead of silently resetting it to 0 -- a corrupt counter must
+	/// be a visible error, never a silent regression of the version a subscriber has
+	/// already observed.
+	/// </summary>
+	private static long ParseCounter(string value, string context)
+	{
+		if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long parsed))
+		{
+			throw new InvalidDataException($"{context} '{value}' is not a valid non-negative integer counter.");
+		}
+
+		return parsed;
+	}
 
 	private static string LibUrn(Guid id) => $"urn:uuid:{id}";
 
@@ -265,6 +326,48 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 	}
 
 	/// <summary>
+	/// Issue #1682 gap 1: prior state is normally read from <c>items.json</c> alone, but
+	/// that document can be missing or unreadable while <c>lib.json</c> and every
+	/// per-item <c>item.json</c> survive (an operator deleting it, a partial backup
+	/// restore). Falling back to the standalone <c>item.json</c> files in that case keeps
+	/// each item's <see cref="ItemJson.Created"/> and <see cref="ItemJson.Version"/>
+	/// stable instead of treating every item as brand new -- research #1032 is explicit
+	/// that item identity must be stable across republishes, and a version regressing to
+	/// <c>"1"</c> is the same class of hazard as the <c>contentVersion</c> inversion this
+	/// writer exists to avoid.
+	/// </summary>
+	private static async Task<Dictionary<string, ItemJson>> BuildPreviousItemsAsync(
+		string libraryDiskPath, ItemsJson? previousItems, CancellationToken cancellationToken)
+	{
+		Dictionary<string, ItemJson> previousById = new(StringComparer.Ordinal);
+		if (previousItems is not null)
+		{
+			foreach (ItemJson previousItem in previousItems.Items)
+			{
+				previousById[previousItem.Id] = previousItem;
+			}
+
+			return previousById;
+		}
+
+		if (!Directory.Exists(libraryDiskPath))
+		{
+			return previousById;
+		}
+
+		foreach (string itemJsonPath in Directory.EnumerateFiles(libraryDiskPath, "item.json", SearchOption.AllDirectories))
+		{
+			ItemJson? item = await ReadExistingAsync<ItemJson>(itemJsonPath, cancellationToken).ConfigureAwait(false);
+			if (item is not null)
+			{
+				previousById[item.Id] = item;
+			}
+		}
+
+		return previousById;
+	}
+
+	/// <summary>
 	/// The atomic-write primitive every document this writer produces goes through:
 	/// serialize into a same-directory temp file, then rename it over the target --
 	/// the same write-temp-then-rename pattern <c>DepotIdentityTool.SeedMachineId</c>
@@ -276,6 +379,14 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 	/// was there before this call (or nothing, if this is the first write) survives
 	/// exactly as it was, and no partial temp artifact is left behind either.
 	/// </summary>
+	/// <remarks>
+	/// Durability boundary (issue #1682 gap 2): the temp file's content is flushed to
+	/// stable storage before the rename, so the RENAMED FILE's bytes survive an unclean
+	/// power loss once the rename itself lands. The containing directory's own entry for
+	/// that rename is not separately fsync'd -- on a crash before the directory entry
+	/// reaches disk, the filesystem's own journal/replay behavior determines whether the
+	/// rename is observed after recovery, not this method.
+	/// </remarks>
 	private async Task WriteJsonAtomicAsync<T>(string targetPath, T document, CancellationToken cancellationToken)
 	{
 		cancellationToken.ThrowIfCancellationRequested();
@@ -289,6 +400,17 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 			{
 				await JsonSerializer.SerializeAsync(stream, document, WireOptions, cancellationToken).ConfigureAwait(false);
 				await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+				// Issue #1682 gap 2: flush the temp file's content to stable storage BEFORE
+				// the rename. File.Move's rename is atomic with respect to concurrent
+				// readers (what the acceptance criterion and this type's own doc comment
+				// above are about), but says nothing about durability across a power
+				// loss -- without this, the rename can be durable while the data behind
+				// it is not. Fsync-ing the containing directory afterward (so the
+				// directory ENTRY itself is durable) is deliberately not attempted here:
+				// .NET has no cross-platform primitive for it, and that narrower gap is
+				// the documented durability boundary this type's own remarks now call
+				// out explicitly.
+				stream.Flush(flushToDisk: true);
 			}
 
 			_onTempFileWritten(targetPath);
@@ -297,9 +419,23 @@ public sealed class VcspContentLibraryWriter : IContentLibraryWriter
 		}
 		finally
 		{
-			if (File.Exists(tempPath))
+			// Issue #1681: a throw from this best-effort cleanup (e.g. the temp file is
+			// concurrently locked or its directory has lost write permission) must never
+			// replace whatever exception is already propagating out of the `try` above.
+			try
 			{
-				File.Delete(tempPath);
+				if (File.Exists(tempPath))
+				{
+					File.Delete(tempPath);
+				}
+			}
+			catch (IOException)
+			{
+				// best-effort cleanup only -- must never mask the original exception.
+			}
+			catch (UnauthorizedAccessException)
+			{
+				// best-effort cleanup only -- must never mask the original exception.
 			}
 		}
 	}

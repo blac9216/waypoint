@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Runtime.Versioning;
 using System.Text.Json;
 using Waypoint.Core.ContentLibraries;
 using Waypoint.Infrastructure.ContentLibraries;
@@ -79,7 +80,10 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 		string contentHash = "hash-v1") => new(
 		id,
 		directoryName,
-		Name: "Invented Item",
+		// Derived from directoryName (rather than a fixed literal) so tests that write
+		// several items with distinct directory names in one call never collide with
+		// issue #1681's in-write item-name-uniqueness check.
+		Name: $"Invented Item ({directoryName})",
 		Type: ContentLibraryItemTypes.Other,
 		Description: "",
 		Files: [new ContentLibraryItemFileWrite(fileName, Size: 42, contentHash)]);
@@ -458,5 +462,210 @@ public sealed class VcspContentLibraryWriterTests : IDisposable
 		ContentLibraryItemWrite item = MakeItem(Guid.NewGuid(), directoryName: directoryName);
 
 		await Assert.ThrowsAsync<ArgumentException>(() => writer.WriteAsync(library, [item], CancellationToken.None));
+	}
+
+	// ---- issue #1679: invariant-culture counters, no silent reset -----------------
+
+	[Fact]
+	public async Task ComputeEtag_ForFixedFileSet_PinsToLiteralHexValue()
+	{
+		// Issue #1679: locks the etag's exact bytes for a fixed input, which pins
+		// determinism for free -- any future change to ComputeEtag's hash input
+		// (separator, field order, culture-sensitive formatting) fails this test.
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		ContentLibraryItemWrite item = new(
+			Guid.NewGuid(),
+			"item-one",
+			Name: "Fixed Item",
+			Type: ContentLibraryItemTypes.Other,
+			Description: "",
+			Files: [new ContentLibraryItemFileWrite("payload.txt", Size: 123456, ContentHash: "hash-fixed")]);
+
+		await writer.WriteAsync(library, [item], CancellationToken.None);
+
+		ItemFileJson file = ReadItems(library).Items.Single().Files.Single();
+		Assert.Equal("0ad1bbf65460c328953fda2b427c895f8f989b7a4bd27f2b80120ce5857b5165", file.Etag);
+	}
+
+	[Fact]
+	public async Task WriteAsync_UnparseableItemVersionOnDisk_ThrowsInsteadOfSilentlyResettingToOne()
+	{
+		// Issue #1679: a hand-edited or truncated item.json version must be a visible
+		// error, never a silent regression to "1" -- a subscriber that already saw a
+		// high version and now sees "1" is the exact "subscriber never notices
+		// updates" failure mode this writer's whole design exists to prevent.
+		ContentLibrary library = CreateLibrary();
+		Guid itemId = Guid.NewGuid();
+		await CreateWriter().WriteAsync(library, [MakeItem(itemId, directoryName: "item-one")], CancellationToken.None);
+
+		// previousById is built from items.json alone when it is present (issue #1682's
+		// per-item fallback only kicks in when it is missing), so corrupting THIS
+		// document's item version is what the writer actually reads back.
+		string itemsJsonPath = Path.Combine(library.DiskPath, "items.json");
+		ItemsJson itemsDocument = ReadItems(library);
+		ItemJson corruptedItem = itemsDocument.Items.Single() with { Version = "not-a-number" };
+		File.WriteAllText(itemsJsonPath, JsonSerializer.Serialize(new ItemsJson([corruptedItem]), WireOptions));
+
+		await Assert.ThrowsAsync<InvalidDataException>(() => CreateWriter().WriteAsync(
+			library,
+			[MakeItem(itemId, directoryName: "item-one", contentHash: "hash-v2")],
+			CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task WriteAsync_UnparseableLibVersionOnDisk_ThrowsInsteadOfSilentlyResettingToZero()
+	{
+		ContentLibrary library = CreateLibrary();
+		await CreateWriter().WriteAsync(library, [MakeItem(Guid.NewGuid())], CancellationToken.None);
+
+		string libJsonPath = Path.Combine(library.DiskPath, "lib.json");
+		LibJson corruptedLib = ReadLib(library) with { Version = "garbage" };
+		File.WriteAllText(libJsonPath, JsonSerializer.Serialize(corruptedLib, WireOptions));
+
+		await Assert.ThrowsAsync<InvalidDataException>(() => CreateWriter().WriteAsync(
+			library,
+			[MakeItem(Guid.NewGuid(), directoryName: "item-two")],
+			CancellationToken.None));
+	}
+
+	// ---- issue #1681: name cap, in-write uniqueness, null description -------------
+
+	[Fact]
+	public async Task WriteAsync_ItemNameOverEightyChars_IsTruncatedPreservingExtension()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		string longName = new string('a', 90) + ".vmdk";
+		ContentLibraryItemWrite item = MakeItem(Guid.NewGuid()) with { Name = longName };
+
+		await writer.WriteAsync(library, [item], CancellationToken.None);
+
+		string writtenName = ReadItems(library).Items.Single().Name;
+		Assert.Equal(80, writtenName.Length);
+		Assert.EndsWith(".vmdk", writtenName, StringComparison.Ordinal);
+		Assert.Equal(new string('a', 75) + ".vmdk", writtenName);
+	}
+
+	[Fact]
+	public async Task WriteAsync_ItemNameAtOrUnderEightyChars_IsUnchanged()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		string exactName = new string('b', 80);
+		ContentLibraryItemWrite item = MakeItem(Guid.NewGuid()) with { Name = exactName };
+
+		await writer.WriteAsync(library, [item], CancellationToken.None);
+
+		Assert.Equal(exactName, ReadItems(library).Items.Single().Name);
+	}
+
+	[Fact]
+	public async Task WriteAsync_DuplicateItemNamesInOneWrite_Throws()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+
+		await Assert.ThrowsAsync<ArgumentException>(() => writer.WriteAsync(
+			library,
+			[
+				MakeItem(Guid.NewGuid(), directoryName: "one") with { Name = "Same Name" },
+				MakeItem(Guid.NewGuid(), directoryName: "two") with { Name = "Same Name" },
+			],
+			CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task WriteAsync_NullDescription_EmitsEmptyString()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		// A non-nullable-oblivious caller (research #1032: the wire format pins `""`).
+		ContentLibraryItemWrite item = MakeItem(Guid.NewGuid()) with { Description = null! };
+
+		await writer.WriteAsync(library, [item], CancellationToken.None);
+
+		Assert.Equal(string.Empty, ReadItems(library).Items.Single().Description);
+	}
+
+	[Fact]
+	[UnsupportedOSPlatform("windows")]
+	public async Task WriteAsync_TempFileDeleteFailsDuringCleanup_DoesNotMaskOriginalException()
+	{
+		// Issue #1681: the atomic-write `finally`'s File.Delete must never mask the
+		// exception already propagating out of the `try`. Removing write permission on
+		// the temp file's directory right after it is written (via the onTempFileWritten
+		// seam), then cancelling, makes BOTH happen on the same call: the ORIGINAL
+		// OperationCanceledException from ThrowIfCancellationRequested, and a SECONDARY
+		// UnauthorizedAccessException from the doomed File.Delete in `finally`. Only the
+		// original must surface. Unix file modes are POSIX-only (CI and this dev
+		// environment both are); skip on Windows rather than fail the build there.
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		ContentLibrary library = CreateLibrary();
+		using CancellationTokenSource cts = new();
+		string? lockedDirectory = null;
+		VcspContentLibraryWriter writer = new(_clock, onTempFileWritten: targetPath =>
+		{
+			lockedDirectory = Path.GetDirectoryName(targetPath)!;
+			SetDirectoryWritable(lockedDirectory, writable: false);
+			cts.Cancel();
+		});
+
+		try
+		{
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(
+				() => writer.WriteAsync(library, [MakeItem(Guid.NewGuid())], cts.Token));
+		}
+		finally
+		{
+			if (lockedDirectory is not null)
+			{
+				SetDirectoryWritable(lockedDirectory, writable: true);
+			}
+		}
+	}
+
+	[UnsupportedOSPlatform("windows")]
+	private static void SetDirectoryWritable(string directory, bool writable) => File.SetUnixFileMode(
+		directory,
+		writable
+			? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+				| UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute
+			: UnixFileMode.UserRead | UnixFileMode.UserExecute
+				| UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+	// ---- issue #1682: items.json-missing recovery ----------------------------------
+
+	[Fact]
+	public async Task WriteAsync_ItemsJsonMissing_RebuildsFromPerItemJsonFiles_PreservingCreatedAndVersion()
+	{
+		ContentLibrary library = CreateLibrary();
+		VcspContentLibraryWriter writer = CreateWriter();
+		Guid itemId = Guid.NewGuid();
+
+		await writer.WriteAsync(library, [MakeItem(itemId, directoryName: "item-one")], CancellationToken.None);
+		_clock.Advance(TimeSpan.FromHours(1));
+		await writer.WriteAsync(library, [MakeItem(itemId, directoryName: "item-one", contentHash: "hash-v2")], CancellationToken.None);
+		ItemJson before = ReadItems(library).Items.Single();
+		Assert.Equal("2", before.Version);
+
+		// Simulates an operator deleting items.json (or a partial backup restore) while
+		// lib.json and the per-item item.json files survive.
+		File.Delete(Path.Combine(library.DiskPath, "items.json"));
+
+		_clock.Advance(TimeSpan.FromHours(1));
+		await writer.WriteAsync(library, [MakeItem(itemId, directoryName: "item-one", contentHash: "hash-v2")], CancellationToken.None);
+
+		ItemJson after = ReadItems(library).Items.Single();
+		// Without the #1682 fix, previousById would be empty (items.json is gone), the
+		// item would be treated as brand new, `created` would reset to `_clock`'s
+		// current instant, and `version` would reset to "1".
+		Assert.Equal(before.Created, after.Created);
+		Assert.Equal(before.Version, after.Version);
+		Assert.Equal(before.Id, after.Id);
 	}
 }
