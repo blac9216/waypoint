@@ -21,7 +21,9 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
+using Waypoint.Core.Subscriptions;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Subscriptions;
 using Waypoint.Tests.Infrastructure.Postgres;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -72,6 +74,18 @@ public sealed class SubscriptionsControllerTests : IAsyncLifetime
 					options.DefaultChallengeScheme = TestAuthHandler.SchemeName;
 					options.DefaultForbidScheme = TestAuthHandler.SchemeName;
 				});
+
+				// The AddWaypointInfrastructure-registered repositories are constructed
+				// with whatever ConnectionStrings:Waypoint the host resolved at startup
+				// (appsettings.json's own "Host=postgres" default, unreachable here) --
+				// this test's ConfigureAppConfiguration override above is not guaranteed
+				// to reach that construction, so re-register explicitly against this
+				// fixture's real connection string (same pattern as
+				// ComponentResultReadApiTests).
+				services.AddSingleton<ISubscriptionRepository>(new SubscriptionRepository(_connectionString));
+				services.AddSingleton<IPresetRepository>(new PresetRepository(_connectionString));
+				services.AddSingleton<SubscriptionService>();
+				services.AddSingleton<PresetService>();
 			});
 		}
 	}

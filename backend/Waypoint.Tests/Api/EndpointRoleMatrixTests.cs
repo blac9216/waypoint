@@ -428,6 +428,19 @@ public sealed class EndpointRoleMatrixTests
 		["UsersController.Get"] = WaypointRole.Admin,
 		["UsersController.Create"] = WaypointRole.Admin,
 		["UsersController.Update"] = WaypointRole.Admin,
+
+		// SubscriptionsController / PresetsController (issue #1450, RBAC decision
+		// R2-10): Viewer+ reads, Admin-only writes -- adopt-a-preset/clone/edit-clone
+		// are all writes.
+		["SubscriptionsController.List"] = WaypointRole.Viewer,
+		["SubscriptionsController.Get"] = WaypointRole.Viewer,
+		["SubscriptionsController.Create"] = WaypointRole.Admin,
+		["SubscriptionsController.Update"] = WaypointRole.Admin,
+		["SubscriptionsController.Delete"] = WaypointRole.Admin,
+		["PresetsController.List"] = WaypointRole.Viewer,
+		["PresetsController.Get"] = WaypointRole.Viewer,
+		["PresetsController.Clone"] = WaypointRole.Admin,
+		["PresetsController.Update"] = WaypointRole.Admin,
 	};
 
 	/// <summary>
