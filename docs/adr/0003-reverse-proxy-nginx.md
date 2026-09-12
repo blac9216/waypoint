@@ -8,19 +8,44 @@ Date: 2026-08-02
 The stack needs a single TLS entry point serving the static frontend, proxying `/api`
 to the backend and auth paths to Keycloak. Candidates: nginx, Traefik, Caddy.
 
-## Decision
+## Decision Drivers
 
-nginx, terminating TLS with **operator-provided certificates** (internal CA), serving
-the frontend static bundle, and proxying backend + Keycloak. SSE endpoints proxied with
-buffering disabled.
+_Backfilled under ADR-0027 from #2._ The sources record no issue or PR that captures the
+original evaluation session — this ADR was authored in the repo's initial skeleton
+commit ("Add architecture docs, ADRs, Claude workflow skills, and repo skeleton"),
+which predates any tracked issue or PR. #2 is the earliest tracked issue that names
+ADR-0003, and confirms the drivers below by consuming them directly. The bullets
+themselves are drawn from this ADR's own original Context and Rationale text, not
+invented:
 
-## Rationale
+- A single TLS entry point is needed, serving the static frontend, proxying `/api` to
+  the backend and auth paths to Keycloak (Context, above).
+- The target deployment is air-gapped, so a proxy's automatic-ACME capability has no
+  path to a certificate authority it can reach.
+- The appliance has a fixed topology (not a dynamically-scaled container fleet), so
+  container-label-driven service discovery is unneeded indirection.
+- The target audience's operators are already familiar with nginx, and DISA publishes
+  hardening guidance for it.
+- SSE endpoints need response buffering disabled at the proxy.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #2._ As with Decision Drivers above, no issue or PR
+beyond this ADR's own original Rationale text records the comparison; #2 is the
+earliest tracked issue naming ADR-0003. nginx was chosen; Traefik and Caddy were
+rejected. The bullets below are that original Rationale text, moved verbatim:
 
 - Caddy's headline feature (automatic ACME/Let's Encrypt) is useless air-gapped;
   Traefik's (container label discovery) adds indirection a fixed-topology appliance
   doesn't need.
 - nginx is ubiquitous in the target audience's world, and DISA publishes hardening
   guidance for it.
+
+## Decision
+
+nginx, terminating TLS with **operator-provided certificates** (internal CA), serving
+the frontend static bundle, and proxying backend + Keycloak. SSE endpoints proxied with
+buffering disabled.
 
 ## Consequences
 
