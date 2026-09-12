@@ -9,7 +9,7 @@
 # Every extension a repo store may need to serve with a real
 # Content-Type must therefore be listed explicitly here, not assumed
 # from nginx's own defaults.
-# why: docs/rationale/deploy.md#nginx-repo-vcsp-mime-map
+# why: docs/rationale/deploy.md#nginx-repo-vcsp-mime-map-replace-not-extend
 types {
 	application/json            json;
 	application/ovf+xml         ovf;

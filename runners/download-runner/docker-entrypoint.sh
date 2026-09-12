@@ -34,7 +34,7 @@ if [ "$(id -u)" = '0' ]; then
 	# Content-library registry: its own volume, nested at /vcf/ContentLibrary
 	# so the runner's existing store-path conventions are unchanged -- a
 	# distinct mount point, so it arrives root-owned independently of /vcf.
-	# why: docs/rationale/deploy.md#content-libraries-own-volume
+	# why: docs/rationale/deploy.md#content-libraries-nested-mount
 	[ -d /vcf/ContentLibrary ] && chown app:app /vcf/ContentLibrary
 	# Operator-installed managed-tool state (ADR-0015 decision 3) -- matches
 	# ManagedTool:ToolStatePath. A future install flow writes the

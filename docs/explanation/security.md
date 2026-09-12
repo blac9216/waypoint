@@ -487,7 +487,7 @@ ADR-0004) is enforced at the nginx server level (`ssl_verify_client optional`) a
 never bleed into repo path-space — a machine consumer (vLCM, a subscribed content
 library, SDDC Manager, `tdnf`) cannot present a client certificate and must not be
 locked out by an app-level mechanism reaching further than intended. Concretely (see
-`docs/rationale/deploy.md#nginx-repo-mtls-carve-out`): every repo location leaves
+`docs/rationale/deploy.md#nginx-repo-mtls-placeholder-seam`): every repo location leaves
 `ssl_verify_client optional` as a commented-out, explicitly-absent placeholder rather
 than inheriting the app's posture, so a later per-location auth toggle (ADR-0031's
 Waypoint-managed repo credentials, above) has a documented seam instead of an implicit
