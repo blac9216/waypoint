@@ -17,6 +17,69 @@ The shipped scan payload also still carries a caller-selected target/profile sho
 Leaving these gaps to individual handlers would permit process-global TLS bypass,
 best-effort cleanup, incomplete artifacts, and two incompatible permanent scan models.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #808, #727, #812._
+
+- Concurrent jobs must never inherit another connection's or another job's trust or
+  access decision: a process-global TLS bypass or a process-global SSH mutation would
+  let one target's exception silently apply to every other target/service running at
+  the same time (Context; #726 §5, "Never apply a process-global implicit bypass").
+- The read-only scan guarantee has to survive the one capability that genuinely needs
+  to mutate state (temporary SSH enablement) without becoming a general exception —
+  the mutation must be catalog-gated, bounded, and durably reversible rather than a
+  narrowing of "scans are read-only" (Context's "narrow scan-time SSH mutation";
+  #726 §5).
+- "The unit that constitutes a defensible scan record" (Context) has to distinguish a
+  genuine compliance outcome from an execution error and has to be complete even when
+  a component never became executable, so aggregate success can never conceal missing
+  coverage (#726 §6).
+- Stored upload evidence must be safe to retain — bounded and allowlisted — since an
+  unbounded or unsanitized STIG Manager response could carry authorization/session
+  material or reflected secrets into persisted evidence (#726 §6).
+- The shipped caller-selected target/profile payload and the planned exact-baseline
+  component model cannot coexist as two permanent scan models (Context); #727
+  explicitly charges this decision with defining that retirement, and #808's own
+  acceptance criteria require the transition to be explicit and scope-preserving
+  rather than a silent widen/narrow.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #808, #727, #812, and this ADR's own "Alternatives
+rejected" section._
+
+1. **Connection-scoped managed trust with scoped, audited bypass** (chosen) — a
+   versioned managed trust bundle applies per connection; an Admin may instead
+   authorize bypass only for one named target/service, explicit, reasoned, versioned,
+   and audited, never inherited or process-global.
+   Rejected alternative: **process-wide certificate bypass or trust mutation** —
+   concurrent jobs could inherit a different connection's security decision.
+2. **Catalog-gated temporary SSH with mandatory durable restoration** (chosen) — SSH
+   mutation is opt-in per target, gated on a reviewed catalog capability/provider, and
+   paired with pre-mutation re-observation and mandatory, durable, retryable
+   restoration.
+   Rejected alternative: **best-effort SSH restoration** — cancellation or lease loss
+   would leave durable target mutation without a durable owner.
+3. **One run-owned evidence graph with exactly-once control projections** (chosen) —
+   scope, coverage, planned items, jobs, attempts, findings, artifacts, and upload
+   receipts share one graph; every applicable control appears exactly once,
+   `Not_Reviewed` when it did not execute.
+   Rejected alternative: **independent expiry for logs, findings, and artifacts** —
+   surviving fragments could not prove scope, execution, baseline, or upload history.
+4. **Direct job-owned STIG Manager upload with bounded, sanitized evidence** (chosen)
+   — the job that produces an eligible CKL uploads directly through the configured
+   API and persists only allowlisted, redacted evidence; retries reuse the retained
+   CKL.
+   Rejected alternative: **watched-directory upload, or rescanning after upload
+   failure** — both introduce a second lifecycle and weaken artifact identity.
+5. **One appliance-wide retention period with atomic graph purge and one deterministic
+   legacy migration** (chosen) — a single Admin-configurable period (default six
+   months) purges the complete evidence graph atomically, leaving readers either the
+   retained graph or a tombstone; legacy schedules/intent translate only when exact
+   scope is preserved, otherwise they are disabled/blocked with an audit record.
+   Rejected alternative: **permanent dual scan-payload models** — equivalent scans
+   could resolve different baselines and evidence semantics.
+
 ## Decision
 
 ### Connection-scoped trust
