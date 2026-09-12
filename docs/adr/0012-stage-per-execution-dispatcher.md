@@ -48,6 +48,49 @@ never see — stranded, not recovered. #282 was deliberately left open pending t
 issue's dispatcher design, because the correct requeue target for a crashed mid-stage
 job is a stage-per-execution decision, not a guess made in isolation.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #274, #282._
+
+- The owner's explicit ruling on #274 (2026-08-08): *"I want the jobs to be able to
+  resume from any stage after a failure."* A failed or crashed job must re-enter the
+  pipeline at its last completed stage, not restart from the beginning.
+- Migration 0015's CHECK constraint (#124/#280) makes `attesting`/`converting`
+  lease-required states, so whatever represents "resting between stages" cannot be an
+  unleased row in either of those states — it has to be a state the existing claim
+  query already treats as claimable.
+- Minimizing job-engine surface: the chosen design should add no new claimable
+  job-engine state and leave ADR-0008's existing state machine and claim/lease
+  contract untouched wherever possible.
+- Zero behavior change for every handler that exists today (`download`,
+  `catalog-index`, `discover`, the scan-stub) — none of them should need to change to
+  keep working under whichever option is chosen.
+- #282 (the lease-recovery sweep's `state = 'running'`-only predicate stranding a
+  worker crashed mid-`attesting`/`converting`) needed a requeue target consistent with
+  whichever modeling this ADR chose, rather than a guess made in isolation.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #274._
+
+1. **Option A — one continuous handler execution** (initial recommendation, rejected).
+   The scan handler walks every stage inside a single `ExecuteAsync` via
+   `context.AdvanceAsync`, with a new outcome kind telling the dispatcher to let the
+   handler's last advanced state stand instead of forcing the shape's terminal state.
+   Smallest dispatcher change; keeps one lease/one worker and one continuous log
+   stream for the whole pipeline. Rejected by the owner's ruling: it cannot resume
+   mid-pipeline after a crash or failure without re-running already-completed stages,
+   because nothing durable records which stage was reached independent of the
+   lease-bound `state` column.
+2. **Option B — stage-per-execution** (chosen). Each stage becomes a separately
+   claimable execution; the dispatcher requeues the job between stages instead of
+   holding the lease across all of them, with a durable stage marker recording
+   pipeline position. More moving parts (per-stage claiming, lease churn, stage
+   routing in the handler registry) than Option A, but stages become independently
+   retryable/resumable, matching how the predecessor CLI tool already runs stages as
+   separate script invocations, and directly satisfies the ruling's resume-from-any-
+   stage requirement.
+
 ## Decision
 
 1. **`queued` stays the only claimable, unleased state.** No new job-engine state is
