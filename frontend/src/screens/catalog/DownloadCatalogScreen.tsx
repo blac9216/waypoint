@@ -215,7 +215,13 @@ export function DownloadCatalogScreen() {
 				setLoadError(err instanceof ApiError ? err.message : "Could not load the download catalog.");
 			})
 			.finally(() => {
-				if (isCurrent()) {
+				// Issue #1803: unmount does not bump `loadGenerationRef`, so
+				// `isCurrent()` alone stays true on the unmount path and
+				// `setLoading(false)` ran after the component had already
+				// unmounted — the one callback of the three the effect's
+				// cleanup below didn't also guard via the abort signal, unlike
+				// `.catch`'s `controller.signal.aborted` check above.
+				if (isCurrent() && !controller.signal.aborted) {
 					setLoading(false);
 				}
 			});
