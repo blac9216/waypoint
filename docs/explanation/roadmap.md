@@ -207,8 +207,10 @@ domain/ADRs — merged via PR [#1738](https://github.com/blac9216/waypoint/pull/
 plus `architecture.md`/`domain-model.md` depot sections) → #1034 reconciled the
 API/security/RBAC contracts — merged via PR
 [#1747](https://github.com/blac9216/waypoint/pull/1747) → **this document plus
-[`ui/download-domain-ia.md`](../ui/download-domain-ia.md)** is #1035, reconciling roadmap
-sequencing and proposing the download-domain screen IA for owner approval (R2-11).
+[`explanation/download-domain-ia.md`](download-domain-ia.md)** is #1035, reconciling
+roadmap sequencing and proposing the download-domain screen IA (R2-11); the owner
+ruled all five open questions on #1035 (2026-09-07) and #1950 applied those rulings
+to the now-approved IA document.
 
 **Implementation status (as of 2026-09-06).** 21+ issues merged across the seven lane
 epics since 2026-08-30 — catalog identity rekeyed to the vendor catalog (#1488),
