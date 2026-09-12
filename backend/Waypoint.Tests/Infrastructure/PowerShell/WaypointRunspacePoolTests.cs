@@ -345,6 +345,7 @@ public sealed class WaypointRunspacePoolTests
 		// ownership explicitly with a flag instead.
 		await gate.WaitAsync(CancellationToken.None);
 		bool heldByThisTest = true;
+		WaypointRunspacePool.RunspaceLease? lease = null;
 		try
 		{
 			// otherInstance has never rented before, so this is a cold start that must
@@ -361,18 +362,29 @@ public sealed class WaypointRunspacePoolTests
 			gate.Release();
 			heldByThisTest = false;
 
-			WaypointRunspacePool.RunspaceLease lease = await coldRent.WaitAsync(TimeSpan.FromSeconds(5));
+			// Issue #1894: this bound now races the process-wide gate's own
+			// contention (up to 20 pool-constructing test classes), not just this
+			// test's own cold-start latency (~250 ms measured). 30 s keeps a wide
+			// margin over that measured cost while still failing the test instead of
+			// hanging indefinitely if the gate is genuinely stuck.
+			lease = await coldRent.WaitAsync(TimeSpan.FromSeconds(30));
 			Assert.NotNull(lease.Runspace);
-			lease.Dispose();
 		}
 		finally
 		{
+			// Issue #1894: previously `lease.Dispose()` and `otherInstance.Dispose()`
+			// ran only on the success path, outside any `finally` -- an assertion
+			// failure above (or a forced one, per the issue's verification step)
+			// leaked `otherInstance`'s `WaypointRunspacePool` and its runspace for the
+			// remainder of the test host's life. Both are disposed here
+			// unconditionally, whether or not the body above completed normally.
 			if (heldByThisTest)
 			{
 				gate.Release();
 			}
-		}
 
-		otherInstance.Dispose();
+			lease?.Dispose();
+			otherInstance.Dispose();
+		}
 	}
 }
