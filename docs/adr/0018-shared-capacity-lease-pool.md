@@ -50,6 +50,45 @@ review-sized issues: this issue (#555) covers host-capacity discovery and the st
 admission invariant that make a single runner's advertised budget honest; the follow-up
 (#569) implements the lease pool itself.
 
+## Decision Drivers
+
+_Backfilled under ADR-0027 from #555 (issue body and the owner's ruling comment,
+2026-08-23) and PR #574 (closes #555 part 1)._
+
+- The 1-CPU/1-GiB conservative fallback undersells real hardware: it is also what a
+  runner sees on an uncapped Compose deployment (no `deploy.resources.limits`
+  configured), the documented default topology (ADR-0001), so it can admit far fewer
+  jobs than the host can actually run.
+- No startup check tied a runner's effective budget to what it advertises: a runner
+  could start and run permanently starved for a job type its `JobHandlerRegistry`
+  allowlist claims to serve, visible only later as a starvation warning (issue #467)
+  an operator has to notice and diagnose.
+- For the multi-runner question specifically: whether to let runners use real
+  appliance capacity dynamically across domains (an idle download-runner's headroom
+  helping a busy compliance-runner) versus keeping admission simple, deterministic,
+  and free of new fairness/starvation/lease-recovery machinery and a
+  database-availability dependency sitting directly in the admission path.
+
+## Considered Options
+
+_Backfilled under ADR-0027 from #555 (initial comment weighing Option A/B, and the
+owner's ruling comment, both 2026-08-23) and PR #574._
+
+- **Option A — static partitions** — rejected. Give each Compose service an explicit
+  `deploy.resources.limits` share of the host; each runner's existing
+  `ResourceAdmissionController` continues to admit only within its own static
+  partition. Simple, deterministic, no new failure modes — but an idle
+  download-runner's headroom can never help a busy compliance-runner, so real
+  appliance capacity sits partitioned even when only one domain is under load.
+- **Option B — shared DB-coordinated capacity lease pool** — chosen. Runners
+  atomically claim weighted CPU/memory slots from a Postgres-coordinated pool before
+  executing, heartbeat their leases, and release/reap on completion or worker loss.
+  Uses real appliance capacity dynamically across domains — at the cost of new
+  fairness/starvation/lease-recovery machinery and a database-availability dependency
+  sitting directly in the admission path. Delivery was split into two review-sized
+  issues: this issue (#555) covers host-capacity discovery and the startup admission
+  invariant; the follow-up (#569) implements the lease pool itself.
+
 ## Decision
 
 1. **Host-derived capacity replaces the 1-CPU/1-GiB fallback when cgroup limits are
