@@ -105,6 +105,13 @@ public sealed class VmToolsIndexRepositoryTests : IAsyncLifetime
 		await _repository.UpsertVersionMappingsAsync([mapping with { Id = Guid.NewGuid() }], CancellationToken.None);
 
 		IReadOnlyList<VmToolsEsxVersionMapping> mappings = await _repository.GetVersionMappingsAsync(CancellationToken.None);
-		Assert.Single(mappings.Where(m => m.EsxiVersionDir == esxiVersionDir));
+		VmToolsEsxVersionMapping[] matching = [.. mappings.Where(m => m.EsxiVersionDir == esxiVersionDir)];
+		Assert.Single(matching);
+
+		// Issue #1793: the FIRST insert's caller-supplied Id must round-trip, mirroring
+		// UpsertArtifactsAsync_ReCrawlOfUnchangedTree_YieldsNoDuplicateRows's identical
+		// assertion for artifacts -- a conflict on the unique key must never let a
+		// later, discarded Guid.NewGuid() clobber the row's real identity.
+		Assert.Equal(mapping.Id, matching[0].Id);
 	}
 }

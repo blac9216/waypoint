@@ -37,7 +37,12 @@ public interface IVmToolsIndexRepository
 	/// <summary>
 	/// Upserts each mapping keyed on <c>(esxi_version_dir, tools_version_code)</c>
 	/// (migration 0109's unique constraint) -- a re-parse of an unchanged
-	/// <c>versions</c> file touches rather than duplicates a row.
+	/// <c>versions</c> file touches rather than duplicates a row. Mirrors
+	/// <see cref="UpsertArtifactsAsync"/>'s <c>Id</c> contract (issue #1793): the
+	/// caller-supplied <see cref="VmToolsEsxVersionMapping.Id"/> is bound as the row's
+	/// <c>id</c> on insert, and a conflict on the unique key leaves the EXISTING row's
+	/// <c>id</c> untouched -- so a caller's own <c>Id</c> round-trips on a first insert,
+	/// exactly as <see cref="VmToolsArtifact.Id"/> already does.
 	/// </summary>
 	Task UpsertVersionMappingsAsync(IReadOnlyCollection<VmToolsEsxVersionMapping> mappings, CancellationToken cancellationToken);
 

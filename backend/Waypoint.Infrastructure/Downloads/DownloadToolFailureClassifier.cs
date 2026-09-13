@@ -63,11 +63,29 @@ internal static class DownloadToolFailureClassifier
 		"insufficient disk space", "not enough space", "device out of space",
 	];
 
-	/// <summary>Substrings that indicate Broadcom rate-limited/throttled this identity -- distinct from a hard auth rejection (issue #1482 AC: throttle-detection observability).</summary>
+	/// <summary>
+	/// Substrings that indicate Broadcom rate-limited/throttled this identity -- distinct
+	/// from a hard auth rejection (issue #1482 AC: throttle-detection observability). The
+	/// bare digits "429" are never matched on their own (issue #1653): an artifact/bundle
+	/// id, byte count, or build number can contain that sequence incidentally, so only an
+	/// HTTP-status-shaped mention of 429 counts -- the prose phrases below carry no such
+	/// risk and are matched as plain substrings.
+	/// </summary>
 	private static readonly string[] ThrottleFailurePhrases =
 	[
-		"429", "too many requests", "rate limit", "rate-limit", "throttl", "slow down",
+		"too many requests", "rate limit", "rate-limit", "throttl", "slow down",
 		"try again later", "quota exceeded",
+	];
+
+	/// <summary>
+	/// Anchored 429-status phrases (issue #1653): matched only when "429" appears in an
+	/// HTTP-status shape, never as a bare numeric substring that an id or byte count could
+	/// contain incidentally.
+	/// </summary>
+	private static readonly string[] AnchoredThrottleStatusPhrases =
+	[
+		"http 429", "http/1.1 429", "http/2 429", "status 429", "status: 429",
+		"status code 429", "response code 429", "429 too many requests",
 	];
 
 	/// <summary>Outcome class for a completed-but-nonzero invocation.</summary>
@@ -112,7 +130,7 @@ internal static class DownloadToolFailureClassifier
 			return FailureClass.Disk;
 		}
 
-		if (ContainsAny(toolMessage, ThrottleFailurePhrases))
+		if (ContainsAny(toolMessage, ThrottleFailurePhrases) || ContainsAny(toolMessage, AnchoredThrottleStatusPhrases))
 		{
 			return FailureClass.Throttle;
 		}

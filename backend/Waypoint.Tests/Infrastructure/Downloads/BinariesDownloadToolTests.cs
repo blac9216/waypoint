@@ -210,7 +210,8 @@ public sealed class BinariesDownloadToolTests : IDisposable
 	private static string Script(string body) => "#!/bin/sh\n" + body;
 
 	private BinariesDownloadTool CreateTool(
-		string script, out string callLogPath, IManagedToolPresenceChecker? presenceChecker = null, ISecretRedactor? redactor = null)
+		string script, out string callLogPath, IManagedToolPresenceChecker? presenceChecker = null, ISecretRedactor? redactor = null,
+		TimeSpan? binariesDownloadTimeout = null)
 	{
 		string binDir = Path.Combine(_root, "active", "bin");
 		Directory.CreateDirectory(binDir);
@@ -226,7 +227,7 @@ public sealed class BinariesDownloadToolTests : IDisposable
 			ActiveDirectoryName = "active",
 			ExecutableRelativePath = "bin/vcf-download-tool",
 			LibraryRelativePath = "lib",
-			BinariesDownloadTimeout = TimeSpan.FromSeconds(10),
+			BinariesDownloadTimeout = binariesDownloadTimeout ?? TimeSpan.FromSeconds(10),
 		};
 		return new BinariesDownloadTool(Options.Create(options), presenceChecker ?? new AlwaysPresent(), redactor ?? new InPlaySecretRedactor());
 	}
@@ -356,6 +357,26 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		Assert.False(result.IsAuthFailure);
 		Assert.False(result.IsDiskFailure);
 		Assert.Contains("rate-limited", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Issue #1653: a bare "429" inside an identifier or byte count must not misclassify
+	/// an otherwise-ambiguous failure as vendor throttling.
+	/// </summary>
+	[Fact]
+	public async Task NumericIdContaining429_IsNotClassifiedAsThrottle()
+	{
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 9, stdout: "internal error: failed to download artifact bundle-4293829, 142900000 bytes written."), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsThrottled);
+		Assert.False(result.IsAuthFailure);
+		Assert.False(result.IsDiskFailure);
 	}
 
 	[Fact]
@@ -617,6 +638,45 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		int expectedLength = lineCount * (line.Length + 1);
 		Assert.Equal(expectedLength, result.Stdout.Length);
 		Assert.All(result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries), l => Assert.Equal(line, l));
+	}
+
+	/// <summary>
+	/// Issue #1672 class-killer: the immediate child double-forks a detached grandchild
+	/// (<c>setsid ... &amp;</c>) that inherits the redirected stdout pipe's write end and
+	/// then exits itself almost immediately -- a real orphaned-descendant shape, not a
+	/// contrived stream trick. <c>Process.WaitForExitAsync</c> observes the immediate
+	/// child exit normally (no timeout/cancellation fires, no kill is needed), but the
+	/// pipe's write end stays open in the grandchild, so <c>ReadToEndAsync</c> never sees
+	/// EOF on its own -- only cancelling its token unblocks it. Pre-fix, that read is
+	/// started with the CALLER's outer token (here <see cref="CancellationToken.None"/>,
+	/// which never fires), so the read -- and therefore <c>DownloadAsync</c> -- hangs
+	/// forever; only the tool's own short <c>BinariesDownloadTimeout</c>, wired through
+	/// <c>linkedSource.Token</c> post-fix, ever unblocks it. The
+	/// <see cref="FactAttribute.Timeout"/> turns that hang into a failing (not an
+	/// indefinitely-stuck) test.
+	/// </summary>
+	[Fact(Timeout = 15_000)]
+	public async Task OrphanedGrandchildHoldingPipeOpen_IsBoundedByOwnTimeout_NotCallerToken()
+	{
+		string stub = Script(
+			"""
+			echo "before-detach"
+			( setsid sh -c 'sleep 30' </dev/null >&1 2>&1 & )
+			exit 0
+			""");
+
+		BinariesDownloadTool tool = CreateTool(stub, out _, binariesDownloadTimeout: TimeSpan.FromSeconds(2));
+		string depotDir = Path.Combine(_root, "depot");
+		string identityHome = Path.Combine(_root, "identity", "job-orphan");
+		string codeFile = WriteCodeFile();
+
+		// The caller's own token deliberately never cancels -- only the tool's own
+		// BinariesDownloadTimeout may bound this call (issue #1672 AC).
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle-orphan", depotDir, codeFile, identityHome, "asset-aaa", CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.Contains("did not complete within", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary>
