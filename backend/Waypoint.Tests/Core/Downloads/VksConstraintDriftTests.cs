@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Microsoft.Extensions.Logging.Abstractions;
 using Waypoint.Core.Downloads;
+using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Infrastructure.Postgres;
 using Waypoint.Tests.Support;
 using Xunit;
 
@@ -23,8 +26,7 @@ namespace Waypoint.Tests.Core.Downloads;
 /// <see cref="VksNamingEras.All"/>/<see cref="VksParseStatuses.All"/> against migration
 /// 0111's four named CHECK constraints on <c>vks_library_items</c>
 /// (<c>vks_library_items_source_check</c>, <c>_release_line_check</c>,
-/// <c>_naming_era_check</c>, <c>_parse_status_check</c>), following this repo's
-/// convention of parsing the migration SQL itself rather than a live database.
+/// <c>_naming_era_check</c>, <c>_parse_status_check</c>).
 /// Resolution is scoped by BOTH the owning table and the constraint name (#1795 AC1)
 /// via the shared <see cref="ConstraintDriftScan"/> helper (issue #1814 -- every
 /// <c>*ConstraintDriftTests</c> guard shares that one table-scoped, ALTER-visible
@@ -39,17 +41,44 @@ namespace Waypoint.Tests.Core.Downloads;
 /// (<c>benchmark_revisions_source_check</c>) and 0054 line 128
 /// (<c>component_observations_source_check</c>) named after their own tables -- and a
 /// column-only scan would silently repoint itself at whichever of those sorts last.
+///
+/// <para>Issue #1815: <c>vks_library_items_source_check</c> specifically is resolved via
+/// <see cref="ConstraintDriftScan.ParseLatestTableScopedCheckLiveAsync"/> against a real,
+/// fully-migrated Postgres fixture rather than the text scan, because this repo reserves
+/// low migration slots for concurrently in-flight work (PR #1782 itself took slot 0111
+/// while 0129 was already merged) -- see <see cref="ConstraintDriftScan"/>'s own ordering
+/// note for why that makes ordinal-filename "latest" unsafe on a real deployed database.
+/// The other three CHECKs on this table remain on the text scan; nothing currently
+/// re-declares them out of order, and #1853 fixed the underlying hazard class in one
+/// place rather than requiring every guard to convert.</para>
 /// </summary>
-public sealed class VksConstraintDriftTests
+[Collection("Postgres")]
+public sealed class VksConstraintDriftTests : IAsyncLifetime
 {
 	private const string Table = "vks_library_items";
 
-	[Fact]
-	public void VksItemSourcesAll_IsInLockstepWithSourceCheckConstraintValueSet()
+	private readonly PostgresFixture _fixture;
+
+	public VksConstraintDriftTests(PostgresFixture fixture)
 	{
-		Assert.Equal(
-			VksItemSources.All,
-			ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(Table, "vks_library_items_source_check", "source"));
+		_fixture = fixture;
+	}
+
+	public async Task InitializeAsync()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+	}
+
+	public Task DisposeAsync() => Task.CompletedTask;
+
+	[Fact]
+	public async Task VksItemSourcesAll_IsInLockstepWithSourceCheckConstraintValueSet()
+	{
+		List<string> constraintValues = await ConstraintDriftScan.ParseLatestTableScopedCheckLiveAsync(
+			_fixture.ConnectionString, Table, "vks_library_items_source_check");
+
+		Assert.Equal(VksItemSources.All, constraintValues);
 	}
 
 	[Fact]

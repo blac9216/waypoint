@@ -14,6 +14,7 @@
 
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Npgsql;
 using Waypoint.Infrastructure.Data;
 using Xunit;
 
@@ -31,6 +32,29 @@ namespace Waypoint.Tests.Support;
 /// place of the real one (found auditing the pattern PR #1782 round 3 introduced for
 /// <c>vks_library_items_source_check</c>, and mutation-proven there with a decoy
 /// migration declaring the same constraint name on an unrelated table).
+///
+/// <para><b>Ordering (issue #1853):</b> <see cref="ParseLatestTableScopedCheckAcrossMigrations"/>
+/// resolves "latest" by ordinal order over the embedded migration filenames, which this
+/// repo's <see cref="NpgsqlSchemaMigrator"/> also uses for every from-scratch apply (the
+/// only apply mode this test suite ever exercises) -- so for a single from-scratch
+/// migration run, ordinal file order and real application order are the same order,
+/// and the text scan is exact. It stops being exact for a REAL deployed database that
+/// reserves a low migration slot for concurrently in-flight work (see #1815's
+/// Motivation) and then merges that low-numbered migration only after a higher-numbered
+/// one has already shipped: on that database the low-numbered migration's
+/// <c>DROP CONSTRAINT</c>/<c>ADD CONSTRAINT</c> runs chronologically LAST, so it is what
+/// the database actually enforces, even though it sorts ordinally BEFORE the
+/// higher-numbered migration this text scan would report instead. This scan cannot see
+/// that hazard from embedded SQL text alone, because a freshly compiled test binary only
+/// ever contains the final migration set and always applies it from scratch, in ordinal
+/// order -- there is no way to reconstruct a real deployment's historical application
+/// order from that. <see cref="ParseLatestTableScopedCheckLiveAsync"/> below sidesteps
+/// the question entirely by reading back what a real Postgres instance actually enforces
+/// after migrations run, so it stays correct regardless of the order any individual
+/// migration was authored, merged, or slotted in (the approach issue #1660 landed for
+/// <c>RepoCredentialBindingConstraintDriftTests</c>). Prefer the live read for any new or
+/// converted guard; the text scan remains valid for guards that have not been converted,
+/// since it agrees with the live read on every from-scratch apply this suite performs.</para>
 ///
 /// <c>VmToolsConstraintDriftTests</c>'s own round-1 fix (PR #1765 relay) tried scoping
 /// purely by CREATE TABLE paren position and found that approach ALTER-invisible: a
@@ -93,6 +117,45 @@ internal static class ConstraintDriftScan
 		Assert.NotNull(latest);
 		Assert.NotEmpty(latest!);
 		return latest!;
+	}
+
+	/// <summary>
+	/// Reads <paramref name="constraintName"/>'s definition back out of a real,
+	/// already-migrated Postgres database via <c>pg_get_constraintdef</c>, rather than
+	/// inferring it from migration text -- see this class's ordering note above for why
+	/// that removes the ordinal-vs-applied-order hazard entirely. The caller is
+	/// responsible for having run <see cref="NpgsqlSchemaMigrator.ApplyAsync"/> (or
+	/// otherwise brought the schema to the state under test) against
+	/// <paramref name="connectionString"/> first; this only reads, it does not migrate.
+	/// Parses the CHECK's <c>= ANY (ARRAY['a'::text, 'b'::text, ...])</c> rendering,
+	/// which is how Postgres renders a <c>col IN ('a', 'b', ...)</c> CHECK once declared,
+	/// preserving declaration order (mirroring
+	/// <c>RepoCredentialBindingConstraintDriftTests.CredentialTypesAll_...</c>, issue
+	/// #1660).
+	/// </summary>
+	internal static async Task<List<string>> ParseLatestTableScopedCheckLiveAsync(
+		string connectionString, string tableName, string constraintName)
+	{
+		await using NpgsqlConnection connection = new(connectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT pg_get_constraintdef(oid) FROM pg_constraint
+			WHERE conname = $1 AND conrelid = $2::regclass
+			""", connection);
+		command.Parameters.AddWithValue(constraintName);
+		command.Parameters.AddWithValue(tableName);
+
+		string? definition = (string?)await command.ExecuteScalarAsync().ConfigureAwait(false);
+		Assert.NotNull(definition);
+
+		List<string> values = [.. Regex
+			.Matches(definition!, "'([^']*)'::text", RegexOptions.None, TimeSpan.FromSeconds(5))
+			.Select(match => match.Groups[1].Value)];
+
+		Assert.NotEmpty(values);
+		return values;
 	}
 
 	/// <summary>

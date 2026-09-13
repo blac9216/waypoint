@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
-using System.Text.RegularExpressions;
 using Waypoint.Core.Downloads.Photon;
-using Waypoint.Infrastructure.Data;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Core.Downloads.Photon;
@@ -25,13 +23,23 @@ namespace Waypoint.Tests.Core.Downloads.Photon;
 /// against migration 0130's <c>photon_image_index_channel_check</c>/
 /// <c>photon_image_index_kind_check</c>, mirroring
 /// <c>PhotonRepoVariantsConstraintDriftTests</c>'s own convention.
+///
+/// <para>Issue #1876: this file used to carry its own private, unscoped
+/// <c>CHECK ... IN (...)</c> regex against the full text of every embedded migration --
+/// the exact cross-table-read hazard #1814 eliminated for eight other guards -- because
+/// it arrived on <c>main</c> via #1844 after PR #1832's scope closed. It now routes
+/// through the shared, table-scoped <see cref="ConstraintDriftScan"/> helper like every
+/// other CHECK IN-list guard.</para>
 /// </summary>
 public sealed class PhotonImageIndexConstantsConstraintDriftTests
 {
+	private const string Table = "photon_image_index";
+
 	[Fact]
 	public void PhotonImageChannelsAll_EqualsChannelCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseLatestCheckValues("photon_image_index_channel_check", "channel");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			Table, "photon_image_index_channel_check", "channel");
 
 		Assert.Equal(
 			new HashSet<string>(PhotonImageChannels.All, StringComparer.Ordinal),
@@ -41,45 +49,37 @@ public sealed class PhotonImageIndexConstantsConstraintDriftTests
 	[Fact]
 	public void PhotonImageKindsAll_EqualsKindCheckConstraintValueSet()
 	{
-		List<string> constraintValues = ParseLatestCheckValues("photon_image_index_kind_check", "image_kind");
+		List<string> constraintValues = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossMigrations(
+			Table, "photon_image_index_kind_check", "image_kind");
 
 		Assert.Equal(
 			new HashSet<string>(PhotonImageKinds.All, StringComparer.Ordinal),
 			new HashSet<string>(constraintValues, StringComparer.Ordinal));
 	}
 
-	private static List<string> ParseLatestCheckValues(string constraintName, string columnName)
+	/// <summary>
+	/// Mutation-proof for #1876 AC2: a decoy migration declaring an identically-named
+	/// CHECK on a different table must not change what this guard reads.
+	/// </summary>
+	[Fact]
+	public void ParseLatestTableScopedCheckAcrossSql_IgnoresAnIdenticallyNamedCheckOnADifferentTable()
 	{
-		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string[] resourceNames = [.. assembly.GetManifestResourceNames()
-			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
-			.OrderBy(name => name, StringComparer.Ordinal)];
+		string[] migrations =
+		[
+			"""
+			CREATE TABLE IF NOT EXISTS photon_image_index (
+			    channel TEXT NOT NULL CONSTRAINT photon_image_index_channel_check CHECK (channel IN ('stable', 'edge'))
+			);
 
-		Regex pattern = new(
-			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\(\s*{Regex.Escape(columnName)}\s+IN\s*\(([^)]*)\)",
-			RegexOptions.IgnoreCase | RegexOptions.Singleline);
+			CREATE TABLE reviewer_probe_table (
+			    channel TEXT NOT NULL CONSTRAINT photon_image_index_channel_check CHECK (channel IN ('bogus'))
+			);
+			""",
+		];
 
-		List<string>? latestValues = null;
-		foreach (string resourceName in resourceNames)
-		{
-			using Stream? stream = assembly.GetManifestResourceStream(resourceName);
-			if (stream is null)
-			{
-				continue;
-			}
+		List<string>? values = ConstraintDriftScan.ParseLatestTableScopedCheckAcrossSql(
+			migrations, Table, "photon_image_index_channel_check", "channel");
 
-			using StreamReader reader = new(stream);
-			string sql = reader.ReadToEnd();
-
-			Match match = pattern.Match(sql);
-			if (match.Success)
-			{
-				latestValues = [.. Regex.Matches(match.Groups[1].Value, "'([^']*)'")
-					.Select(valueMatch => valueMatch.Groups[1].Value)];
-			}
-		}
-
-		Assert.NotNull(latestValues);
-		return latestValues!;
+		Assert.Equal(["stable", "edge"], values);
 	}
 }
