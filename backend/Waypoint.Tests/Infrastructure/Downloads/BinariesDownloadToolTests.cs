@@ -358,6 +358,26 @@ public sealed class BinariesDownloadToolTests : IDisposable
 		Assert.Contains("rate-limited", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
 	}
 
+	/// <summary>
+	/// Issue #1653: a bare "429" inside an identifier or byte count must not misclassify
+	/// an otherwise-ambiguous failure as vendor throttling.
+	/// </summary>
+	[Fact]
+	public async Task NumericIdContaining429_IsNotClassifiedAsThrottle()
+	{
+		BinariesDownloadTool tool = CreateTool(
+			RealContractStub(exitCode: 9, stdout: "internal error: failed to download artifact bundle-4293829, 142900000 bytes written."), out _);
+
+		BinariesDownloadResult result = await tool.DownloadAsync(
+			"vcf-bundle", Path.Combine(_root, "depot"), WriteCodeFile(), Path.Combine(_root, "identity"), "asset-aaa",
+			CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsThrottled);
+		Assert.False(result.IsAuthFailure);
+		Assert.False(result.IsDiskFailure);
+	}
+
 	[Fact]
 	public async Task AmbiguousNonzeroExit_IsConservativeNonAuthFailure()
 	{
