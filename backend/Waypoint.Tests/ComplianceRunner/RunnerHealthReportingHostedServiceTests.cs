@@ -21,6 +21,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.SystemState;
+using Waypoint.Infrastructure.Execution.ComplianceContent;
 using Waypoint.Runner.Jobs;
 using Waypoint.Runner.Resources;
 using Xunit;
@@ -203,6 +204,29 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		Assert.True(registry.WasCalled);
 	}
 
+	[Fact]
+	public async Task StartThenImmediateStop_WhenContentPullSweepStopped_WritesDegradedReport()
+	{
+		// Issue #1762: a stopped content-pull reconcile sweep must no longer be invisible
+		// to the health report -- ComplianceReadinessCheck reads
+		// ContentPullReconcileSweepStatus and this proves the report reflects it, not just
+		// the readiness check in isolation (ComplianceReadinessCheckTests already covers
+		// that unit).
+		string reportFile = Path.Combine(_tempRoot, "health.json");
+		ContentPullReconcileSweepStatus sweepStatus = new();
+		sweepStatus.MarkStopped();
+		RunnerHealthReportingHostedService service = BuildService(reportFile, ready: true, sweepStatus: sweepStatus);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		RunnerHealthReport report = JsonSerializer.Deserialize<RunnerHealthReport>(await File.ReadAllTextAsync(reportFile))!;
+
+		Assert.NotEmpty(report.Problems);
+		Assert.Contains(report.Problems, problem => problem.Contains("1762", StringComparison.Ordinal));
+	}
+
 	private RunnerHealthReportingHostedService BuildService(
 		string reportFile,
 		bool ready,
@@ -210,7 +234,8 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		long fallbackMemoryBytes = 1024L * 1024 * 1024,
 		IWorkerRegistryWriter? workerRegistry = null,
 		string workerId = "compliance-runner-test",
-		TimeSpan? refreshInterval = null)
+		TimeSpan? refreshInterval = null,
+		ContentPullReconcileSweepStatus? sweepStatus = null)
 	{
 		string modulesDir = Path.Combine(_tempRoot, "modules");
 		string profileDir = Path.Combine(_tempRoot, "profiles", "vsphere");
@@ -242,7 +267,8 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		ComplianceReadinessCheck readiness = new(
 			Options.Create(powerShellOptions),
 			Options.Create(scanOptions),
-			new FakeMasterKeyProvider());
+			new FakeMasterKeyProvider(),
+			sweepStatus ?? new ContentPullReconcileSweepStatus());
 
 		JobHandlerRegistry registry = new([], JobCapabilities.Compliance);
 

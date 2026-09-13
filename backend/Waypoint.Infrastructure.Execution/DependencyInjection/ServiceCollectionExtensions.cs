@@ -211,6 +211,13 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<ComplianceContent.ContentPullReconcileService>();
 		services.Configure<ComplianceContent.ContentPullReconcileOptions>(configuration.GetSection("ContentPullReconcile"));
 
+		// Issue #1762: registered unconditionally (like the service above) even though
+		// only compliance-runner's AddContentPullReconcileSweep ever starts the hosted
+		// service that writes to it -- Waypoint.ComplianceRunner.Readiness.ComplianceReadinessCheck
+		// depends on it as a plain required constructor parameter, and both runner hosts
+		// call this method, so it must always resolve.
+		services.AddSingleton<ComplianceContent.ContentPullReconcileSweepStatus>();
+
 		// Issue #594 (epic #577): purge deletes a terminal run's on-disk scan-artifact
 		// files -- compliance-runner only, see JobCapabilities.Compliance's doc comment.
 		services.AddSingleton<IJobHandler, Scans.PurgeJobHandler>();
