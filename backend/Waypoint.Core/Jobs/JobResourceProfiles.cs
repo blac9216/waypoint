@@ -71,11 +71,14 @@ public static class JobResourceProfiles
 		["purge"] = new JobResourceProfile(CpuCores: 0.25, MemoryBytes: 128L * 1024 * 1024),
 
 		// Download domain (ADR-0013 §2).
-		// catalog-index: reads/parses depot metadata on disk -- I/O-bound, light CPU/memory.
+		// catalog-index: reads/parses depot metadata on disk -- I/O-bound, light CPU/memory,
+		// negligible disk write (metadata only, not artifact bytes).
 		["catalog-index"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
 		// download: vcf-download-tool artifact transfer -- network/disk-bound, moderate
-		// memory for buffering, low CPU.
-		["download"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 512L * 1024 * 1024),
+		// memory for buffering, low CPU. Issue #1534: PROVISIONAL 4 GiB disk estimate --
+		// a conservative single-artifact ceiling (an ISO/OVA-class download), not a
+		// measured figure; revisit alongside JobResourceProfiles' other provisional weights.
+		["download"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 512L * 1024 * 1024, DiskBytes: 4L * 1024 * 1024 * 1024),
 		// The remaining "later" download job types (ADR-0013's reserved-but-unimplemented
 		// set): profiled at Default's shape until each lands with its own handler and
 		// can be measured.
@@ -85,8 +88,10 @@ public static class JobResourceProfiles
 		["update"] = Default,
 		// tool-install: copies/verifies a single artifact (local repository or staged
 		// upload) into the managed-tool volume -- disk I/O plus a signature
-		// verification pass, similar shape to catalog-index.
-		["tool-install"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
+		// verification pass, similar shape to catalog-index. Issue #1534: PROVISIONAL
+		// 1 GiB disk estimate -- a staged managed-tool payload, lighter than a raw
+		// artifact download.
+		["tool-install"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024, DiskBytes: 1024L * 1024 * 1024),
 	};
 
 	/// <summary>

@@ -37,15 +37,22 @@ namespace Waypoint.Core.Jobs;
 /// are allowed (e.g. 0.25 for a lightweight probe).
 /// </param>
 /// <param name="MemoryBytes">Estimated resident memory one running instance of this job type occupies.</param>
-public readonly record struct JobResourceProfile(double CpuCores, long MemoryBytes)
+/// <param name="DiskBytes">
+/// Issue #1534 (per #1033's ADR consequence "disk joins CPU/memory in resource
+/// admission"): estimated peak disk-space consumption one running instance of this job
+/// type stages/writes against the runner-local depot store. Defaults to zero so every
+/// pre-existing call site (positional or named CPU/memory construction) is unaffected --
+/// only job types that actually write to disk need an explicit non-zero value.
+/// </param>
+public readonly record struct JobResourceProfile(double CpuCores, long MemoryBytes, long DiskBytes = 0)
 {
 	/// <summary>
-	/// Multiplies both weights by <paramref name="factor"/> -- used to sum a profile
+	/// Multiplies all three weights by <paramref name="factor"/> -- used to sum a profile
 	/// across <paramref name="factor"/> concurrently running instances of the same job
 	/// type without allocating an accumulator loop at every admission check.
 	/// </summary>
-	public JobResourceProfile Scale(int factor) => new(CpuCores * factor, MemoryBytes * factor);
+	public JobResourceProfile Scale(int factor) => new(CpuCores * factor, MemoryBytes * factor, DiskBytes * factor);
 
 	public static JobResourceProfile operator +(JobResourceProfile left, JobResourceProfile right) =>
-		new(left.CpuCores + right.CpuCores, left.MemoryBytes + right.MemoryBytes);
+		new(left.CpuCores + right.CpuCores, left.MemoryBytes + right.MemoryBytes, left.DiskBytes + right.DiskBytes);
 }

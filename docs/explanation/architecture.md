@@ -217,7 +217,15 @@ engine serves both products and all future features ([ADR-0008](../adr/0008-job-
 - **Concurrency**: a shared runner library reads container CPU/memory limits, combines
   them with measured handler resource profiles and operator caps, and admits work only
   within that budget. Exact weights/defaults await measurement. Queue/worker identity
-  is replica-safe, but Compose starts one of each runner.
+  is replica-safe, but Compose starts one of each runner. Issue #1534 (per #1033's ADR
+  consequence): disk joins CPU/memory as a third, independently-enforced admission axis
+  in this same runner-local `ResourceAdmissionController` — a job whose
+  `JobResourceProfile.DiskBytes` would push the tracked disk sum past the runner's
+  effective disk budget (the depot store's live free bytes at startup, via the
+  multi-store disk-usage provider below, intersected with an optional operator cap) is
+  denied even when it fits the CPU/memory axes. This is the runner-local, claim-time
+  half of disk admission; the enqueue-time half against the shared capacity lease pool
+  is "Disk admission" below (ADR-0033) and is a separate check on a separate budget.
 - **Streaming**: per-job log and state events go to the UI over SSE (WebSocket if SSE
   proves insufficient). Logs and results also persist to Postgres for history.
 - **State machine** (per target within a run): `queued → running → attesting →

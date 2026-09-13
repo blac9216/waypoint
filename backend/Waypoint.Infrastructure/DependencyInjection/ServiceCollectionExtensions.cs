@@ -175,8 +175,12 @@ public static class ServiceCollectionExtensions
 
 		// Disk usage is a filesystem stat, not a database read -- registered
 		// unconditionally so GET /system still reports store usage on a host with no
-		// connection string configured (issue #226).
-		services.AddSingleton<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider, ArtifactStoreDiskUsageProvider>();
+		// connection string configured (issue #226). Issue #1534: the M1 store is now
+		// one INamedDiskUsageSource among however many CompositeDiskUsageProvider
+		// aggregates -- a later wave adds another AddSingleton<INamedDiskUsageSource, ...>
+		// line here with no change to the composite registration itself.
+		services.AddSingleton<Waypoint.Core.SystemState.INamedDiskUsageSource, ArtifactStoreDiskUsageSource>();
+		services.AddSingleton<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider, CompositeDiskUsageProvider>();
 
 		// Issue #241: process uptime, same "no connection string dependency" shape as
 		// the disk-usage provider above -- GET /system reports it even on a host with

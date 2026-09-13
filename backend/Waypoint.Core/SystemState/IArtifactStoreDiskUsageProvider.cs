@@ -16,17 +16,23 @@ namespace Waypoint.Core.SystemState;
 
 /// <summary>
 /// Reports live filesystem disk usage for the artifact store(s) the appliance writes
-/// to (issue #226). M1 has exactly one store -- the download slice's
-/// <c>DownloadOptions.ArtifactStorePath</c> (issue #10/#228) -- so this returns a
-/// single-element list today; the api-contract.md "disk usage by store" shape allows
-/// more (content library, Photon repository -- see the UI prototype's LOCAL STORES
-/// rail) once those stores exist in later milestones.
+/// to (issue #226). M1 shipped exactly one store -- the download slice's
+/// <c>DownloadOptions.ArtifactStorePath</c> (issue #10/#228). Issue #1534 (epic #1180)
+/// made the implementation a composite over <see cref="INamedDiskUsageSource"/>, so
+/// this interface's shape is unchanged (still one <see cref="ArtifactStoreUsage"/> per
+/// store, still a plain synchronous list) while the number of stores it can report is
+/// no longer hard-coded to one -- a later wave's sidecar volume (content library,
+/// Photon repository -- see the UI prototype's LOCAL STORES rail) registers another
+/// <see cref="INamedDiskUsageSource"/> and appears in this list with no change to
+/// <c>GET /system</c>, its controller, or the frontend.
 /// </summary>
 public interface IArtifactStoreDiskUsageProvider
 {
 	/// <summary>
-	/// Returns one <see cref="ArtifactStoreUsage"/> per configured store. Synchronous
-	/// by nature (a filesystem stat call), but returns a list so this composes
+	/// Returns one <see cref="ArtifactStoreUsage"/> per configured store that currently
+	/// reports usage successfully (a store whose source returned <c>null</c> is
+	/// omitted -- see <see cref="INamedDiskUsageSource.GetUsage"/>). Synchronous by
+	/// nature (a filesystem stat call per store), but returns a list so this composes
 	/// naturally with whatever else <c>GET /system</c> gathers.
 	/// </summary>
 	IReadOnlyList<ArtifactStoreUsage> GetUsage();

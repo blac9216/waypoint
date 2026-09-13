@@ -19,8 +19,11 @@ using Waypoint.Core.SystemState;
 
 namespace Waypoint.Infrastructure.SystemState;
 
-/// <inheritdoc cref="IArtifactStoreDiskUsageProvider"/>
+/// <inheritdoc cref="INamedDiskUsageSource"/>
 /// <remarks>
+/// Issue #1534: the M1 single-store implementation, now registered as one
+/// <see cref="INamedDiskUsageSource"/> among however many <see cref="CompositeDiskUsageProvider"/>
+/// aggregates, rather than being <see cref="IArtifactStoreDiskUsageProvider"/> itself.
 /// Computes usage via <see cref="DriveInfo"/> against the mount point that contains
 /// <c>DownloadOptions.ArtifactStorePath</c> (issue #10/#228) -- .NET's cross-platform
 /// equivalent of <c>statvfs</c>/<c>GetDiskFreeSpaceEx</c>, so this works unmodified on
@@ -28,14 +31,12 @@ namespace Waypoint.Infrastructure.SystemState;
 /// filesystem the store lives on, not a Waypoint-owned quota within it (see
 /// <see cref="ArtifactStoreUsage"/>'s doc comment).
 /// </remarks>
-public sealed partial class ArtifactStoreDiskUsageProvider : IArtifactStoreDiskUsageProvider
+public sealed partial class ArtifactStoreDiskUsageSource : INamedDiskUsageSource
 {
-	private const string StoreName = ArtifactStoreNames.Default;
-
 	private readonly IOptions<DownloadOptions> _downloadOptions;
-	private readonly ILogger<ArtifactStoreDiskUsageProvider> _logger;
+	private readonly ILogger<ArtifactStoreDiskUsageSource> _logger;
 
-	public ArtifactStoreDiskUsageProvider(IOptions<DownloadOptions> downloadOptions, ILogger<ArtifactStoreDiskUsageProvider> logger)
+	public ArtifactStoreDiskUsageSource(IOptions<DownloadOptions> downloadOptions, ILogger<ArtifactStoreDiskUsageSource> logger)
 	{
 		ArgumentNullException.ThrowIfNull(downloadOptions);
 		ArgumentNullException.ThrowIfNull(logger);
@@ -45,12 +46,12 @@ public sealed partial class ArtifactStoreDiskUsageProvider : IArtifactStoreDiskU
 
 	/// <summary>
 	/// A store whose directory does not exist yet (first boot, before any download has
-	/// run) or whose filesystem cannot be statted is omitted rather than thrown --
-	/// <c>GET /system</c> is chrome-relevant status, not a hard dependency on the
-	/// store having been created; a fresh appliance should still answer with an empty
+	/// run) or whose filesystem cannot be statted returns <c>null</c> rather than
+	/// throwing -- <c>GET /system</c> is chrome-relevant status, not a hard dependency on
+	/// the store having been created; a fresh appliance should still answer with an empty
 	/// (not 500) stores list. The failure is logged so it is visible to an operator.
 	/// </summary>
-	public IReadOnlyList<ArtifactStoreUsage> GetUsage()
+	public ArtifactStoreUsage? GetUsage()
 	{
 		string storePath = _downloadOptions.Value.ArtifactStorePath;
 
@@ -63,12 +64,12 @@ public sealed partial class ArtifactStoreDiskUsageProvider : IArtifactStoreDiskU
 			long freeBytes = drive.AvailableFreeSpace;
 			long usedBytes = Math.Max(0, totalBytes - freeBytes);
 
-			return [new ArtifactStoreUsage(StoreName, storePath, totalBytes, usedBytes, freeBytes)];
+			return new ArtifactStoreUsage(ArtifactStoreNames.Default, storePath, totalBytes, usedBytes, freeBytes);
 		}
 		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
 		{
 			LogDiskUsageUnavailable(exception, storePath);
-			return [];
+			return null;
 		}
 	}
 
