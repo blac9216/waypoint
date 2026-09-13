@@ -1001,7 +1001,10 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		Assert.NotEmpty(report.Errors);
 		Assert.Contains(report.Errors, error => error.Contains("some-future-wire-value-not-yet-known"));
-		Assert.Equal(0, report.ManualDownloadDialSkipped);
+		// The row is skipped (not purged) the same way a Keep/Review dial would skip
+		// it -- an unresolved dial value is treated as ManualDownloadDialGate.Skip,
+		// the safe direction, and counted the same as any other dial-governed skip.
+		Assert.Equal(1, report.ManualDownloadDialSkipped);
 
 		// The manual-download row was not purged (safe direction: no deletion on an
 		// unresolved dial)...
