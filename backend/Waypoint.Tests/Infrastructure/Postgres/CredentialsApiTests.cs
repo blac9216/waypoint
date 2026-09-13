@@ -499,6 +499,16 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Guid targetId = await SeedVSphereTargetAsync();
 		await SeedTargetCredentialBindingAsync(targetId, "vcsa-ssh", sshCredentialId);
 
+		// Issue #1652 AC3: a SECOND credential keeps its own target_credential_bindings
+		// row throughout, so the table's UNFILTERED count stays >=1 after the first
+		// credential's binding is cleared below. Only a blocker query still scoped by
+		// `WHERE credential_id = $1` reports zero for the first credential and lets its
+		// final DELETE succeed; drop that scoping and the surviving second row keeps the
+		// count non-zero, so the final DELETE would stay 409 and this test goes red.
+		Guid otherCredentialId = await CreateCredentialAsync("vcsa-ssh-other", credentialType: "ssh");
+		Guid otherTargetId = await SeedVSphereTargetAsync();
+		await SeedTargetCredentialBindingAsync(otherTargetId, "vcsa-ssh", otherCredentialId);
+
 		HttpResponseMessage blocked = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{sshCredentialId}", body: null);
 		Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
 
@@ -557,6 +567,18 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		HttpResponseMessage bind = await SendAsync(
 			HttpMethod.Put, "/api/v1/repo-credentials/depot", new { credential_ref = repoCredentialId });
 		bind.EnsureSuccessStatusCode();
+
+		// Issue #1652 AC3: a SECOND credential keeps its own repo_credential_bindings row
+		// (a different store) throughout, so the table's UNFILTERED count stays >=1 after
+		// the first credential's `depot` binding is cleared below. Only a blocker query
+		// still scoped by `WHERE credential_id = $1` reports zero for the first credential
+		// and lets its final DELETE succeed; drop that scoping and the surviving `umds`
+		// row keeps the count non-zero, so the final DELETE would stay 409 and this test
+		// goes red.
+		Guid otherCredentialId = await CreateCredentialAsync("repo-store-other", credentialType: "repo-basic-auth");
+		HttpResponseMessage otherBind = await SendAsync(
+			HttpMethod.Put, "/api/v1/repo-credentials/umds", new { credential_ref = otherCredentialId });
+		otherBind.EnsureSuccessStatusCode();
 
 		HttpResponseMessage blocked = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{repoCredentialId}", body: null);
 		Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
