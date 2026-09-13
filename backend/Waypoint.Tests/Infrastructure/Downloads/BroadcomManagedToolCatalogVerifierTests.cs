@@ -27,13 +27,11 @@ public sealed class BroadcomManagedToolCatalogVerifierTests : IDisposable
 	private readonly string _root = Directory.CreateTempSubdirectory("waypoint-vcfdt-catalog-").FullName;
 	private readonly string _metadata;
 	private readonly string _artifact;
-	private readonly string _trust;
 
 	public BroadcomManagedToolCatalogVerifierTests()
 	{
 		_metadata = Path.Combine(_root, "PROD", "metadata", "productVersionCatalog", "v1");
 		_artifact = Path.Combine(_root, "PROD", "COMP", "VCFDT", "vcf-download-tool-9.1.0.0400.25570101.tar.gz");
-		_trust = Path.Combine(_root, "catalog-trust.cert");
 		Directory.CreateDirectory(_metadata);
 		Directory.CreateDirectory(Path.GetDirectoryName(_artifact)!);
 		File.WriteAllBytes(_artifact, [1, 2, 3, 4]);
@@ -45,10 +43,9 @@ public sealed class BroadcomManagedToolCatalogVerifierTests : IDisposable
 	private BroadcomManagedToolCatalogVerifier CreateVerifier() => new(Options.Create(new ManagedToolOptions
 	{
 		LocalRepositoryPath = _root,
-		CatalogTrustCertificatePath = _trust,
 	}));
 
-	private void WriteCatalogAndSignature(byte[] expectedHash, long size, RSA? signingKey = null, bool trustSigner = true, bool duplicateConflict = false)
+	private void WriteCatalogAndSignature(byte[] expectedHash, long size, RSA? signingKey = null, bool duplicateConflict = false)
 	{
 		bool ownsKey = signingKey is null;
 		signingKey ??= RSA.Create(2048);
@@ -64,10 +61,6 @@ public sealed class BroadcomManagedToolCatalogVerifierTests : IDisposable
 			using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
 			byte[] signature = signingKey.SignData(bytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 			File.WriteAllText(Path.Combine(_metadata, "productVersionCatalog.sig"), $"SHA256(2f431d2654aeecbc058dd054d0dbb7ce)= {Convert.ToHexString(signature).ToLowerInvariant()}\n{certificate.ExportCertificatePem()}");
-			if (trustSigner)
-			{
-				File.WriteAllText(_trust, certificate.ExportCertificatePem());
-			}
 		}
 		finally
 		{
@@ -95,16 +88,42 @@ public sealed class BroadcomManagedToolCatalogVerifierTests : IDisposable
 		Assert.Contains("signature is invalid", result.FailureReason, StringComparison.OrdinalIgnoreCase);
 	}
 
+	/// <summary>
+	/// Issue #798: there is no independent trust anchor. A catalog consistently signed
+	/// by ANY certificate -- not just a pinned/well-known publisher one -- verifies, as
+	/// long as the signature matches the catalog bytes and the envelope's own embedded
+	/// certificate. This is the deliberate integrity-only model (no provenance claim).
+	/// </summary>
 	[Fact]
-	public async Task DifferentTrustCertificate_IsRejected()
+	public async Task CatalogSignedByArbitraryNonPinnedCertificate_StillVerifies()
 	{
-		using RSA other = RSA.Create(2048);
-		CertificateRequest request = new("CN=Wrong", other, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-		using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
-		File.WriteAllText(_trust, certificate.ExportCertificatePem());
+		using RSA arbitrarySigner = RSA.Create(2048);
+		WriteCatalogAndSignature(SHA256.HashData([1, 2, 3, 4]), 4, arbitrarySigner);
+		ManagedToolCatalogVerificationResult result = await CreateVerifier().VerifyAsync(_root, _artifact, "9.1.0.0400.25570101", CancellationToken.None);
+		Assert.True(result.Valid, result.FailureReason);
+	}
+
+	/// <summary>
+	/// Issue #798 AC2: a signature envelope whose embedded certificate does not match
+	/// the key that produced the signature -- e.g. an envelope reassembled from two
+	/// different signed catalogs, or corrupted in transit -- still fails closed before
+	/// promotion/indexing, even with no independent anchor to compare against.
+	/// </summary>
+	[Fact]
+	public async Task EnvelopeCertificateSubstituted_IsRejected()
+	{
+		using RSA signer = RSA.Create(2048);
+		WriteCatalogAndSignature(SHA256.HashData([1, 2, 3, 4]), 4, signer);
+		string signatureLine = File.ReadAllLines(Path.Combine(_metadata, "productVersionCatalog.sig"))[0];
+
+		using RSA otherSigner = RSA.Create(2048);
+		CertificateRequest request = new("CN=Substituted Signer", otherSigner, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+		using X509Certificate2 substituted = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+		File.WriteAllText(Path.Combine(_metadata, "productVersionCatalog.sig"), $"{signatureLine}\n{substituted.ExportCertificatePem()}");
+
 		ManagedToolCatalogVerificationResult result = await CreateVerifier().VerifyAsync(_root, _artifact, null, CancellationToken.None);
 		Assert.False(result.Valid);
-		Assert.Contains("does not match", result.FailureReason, StringComparison.OrdinalIgnoreCase);
+		Assert.Contains("signature is invalid", result.FailureReason, StringComparison.OrdinalIgnoreCase);
 	}
 
 	[Fact]
@@ -124,15 +143,6 @@ public sealed class BroadcomManagedToolCatalogVerifierTests : IDisposable
 		Assert.False(result.Valid);
 		Assert.Null(result.ActualSha256);
 		Assert.Contains("size mismatch", result.FailureReason, StringComparison.OrdinalIgnoreCase);
-	}
-
-	[Fact]
-	public async Task MissingIndependentTrustCertificate_IsRejected()
-	{
-		File.Delete(_trust);
-		ManagedToolCatalogVerificationResult result = await CreateVerifier().VerifyAsync(_root, _artifact, null, CancellationToken.None);
-		Assert.False(result.Valid);
-		Assert.Contains("not provisioned", result.FailureReason, StringComparison.OrdinalIgnoreCase);
 	}
 
 	[Fact]
