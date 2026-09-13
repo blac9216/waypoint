@@ -103,6 +103,12 @@ public sealed record VmToolsArtifact(
 /// <c>esx/&lt;version&gt;</c> directory name to a Tools version/build. A malformed source
 /// line never becomes a row -- see <c>VmToolsVersionsFileParseResult.Warnings</c>.
 /// </summary>
+/// <param name="Id">
+/// Caller-supplied identity, matching <see cref="VmToolsArtifact.Id"/>'s contract
+/// (issue #1793): <c>IVmToolsIndexRepository.UpsertVersionMappingsAsync</c> binds this
+/// value as the row's <c>id</c> on insert and round-trips it back out of
+/// <c>GetVersionMappingsAsync</c> -- it is never repository-assigned.
+/// </param>
 public sealed record VmToolsEsxVersionMapping(
 	Guid Id,
 	int SequenceInFile,

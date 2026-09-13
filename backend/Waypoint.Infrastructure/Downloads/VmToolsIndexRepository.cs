@@ -148,7 +148,7 @@ public sealed class VmToolsIndexRepository : IVmToolsIndexRepository
 		foreach (VmToolsEsxVersionMapping mapping in mappings)
 		{
 			await using NpgsqlCommand command = new(UpsertMappingSql, connection, transaction);
-			command.Parameters.AddWithValue(Guid.NewGuid());
+			command.Parameters.AddWithValue(mapping.Id);
 			command.Parameters.AddWithValue(mapping.SequenceInFile);
 			command.Parameters.AddWithValue(mapping.EsxiVersionDir);
 			command.Parameters.AddWithValue((object?)mapping.EsxiBuild ?? DBNull.Value);
