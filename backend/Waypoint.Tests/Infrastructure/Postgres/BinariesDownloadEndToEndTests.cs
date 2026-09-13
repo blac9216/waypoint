@@ -572,4 +572,24 @@ public sealed class BinariesDownloadEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Null(await GetArtifactAsync(artifactId));
 	}
+
+	/// <summary>
+	/// Issue #1651: <c>BinariesDownloadJobHandlerTests</c> (fake-only) cannot reach the
+	/// "validated enrollment, no <c>depot-activation-code</c> credential row" branch --
+	/// it resolves through the real, sealed <see cref="CredentialRepository"/>. Mirrors
+	/// <c>CatalogPullEndToEndTests.NoActivationCodeConfigured_FailsCleanly_NeverCallsThePuller</c>:
+	/// no credential is ever seeded, so the handler must fail closed against real
+	/// Postgres before the tool is ever invoked.
+	/// </summary>
+	[Fact]
+	public async Task NoActivationCodeConfigured_FailsClosed_NeverCallsTheTool()
+	{
+		BinariesDownloadJobHandler handler = CreateHandler(new UnreachableTool());
+		ClaimedJob job = await EnqueueBinariesDownloadJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("No credential", outcome.Note, StringComparison.Ordinal);
+	}
 }

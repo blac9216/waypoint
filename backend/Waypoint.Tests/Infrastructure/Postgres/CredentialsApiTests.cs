@@ -485,6 +485,42 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #1652: the sibling blocking-direction test above proves only that the
+	/// binding blocks deletion -- not that clearing it ever un-blocks anything. A
+	/// regression that made the blocker-count query ignore its
+	/// <c>WHERE credential_id = $1</c> predicate (or one that failed to observe a
+	/// cleared binding) would leave the credential undeletable forever, and the
+	/// blocking-direction test alone would never catch it.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_AfterItsTargetCredentialBindingIsCleared_Succeeds()
+	{
+		Guid sshCredentialId = await CreateCredentialAsync("vcsa-ssh-unblock", credentialType: "ssh");
+		Guid targetId = await SeedVSphereTargetAsync();
+		await SeedTargetCredentialBindingAsync(targetId, "vcsa-ssh", sshCredentialId);
+
+		HttpResponseMessage blocked = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{sshCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+
+		// This factory (unlike TargetsApiTests' own) never wires TargetRepository to the
+		// fixture's connection string, so clearing through the live
+		// `DELETE /targets/{id}/credential-bindings/{purpose}` endpoint would resolve
+		// against the wrong Postgres entirely -- clear the binding the same direct-SQL
+		// way <see cref="SeedTargetCredentialBindingAsync"/> created it.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand delete = new(
+				"DELETE FROM target_credential_bindings WHERE target_id = $1 AND purpose = 'vcsa-ssh'", connection);
+			delete.Parameters.AddWithValue(targetId);
+			Assert.Equal(1, await delete.ExecuteNonQueryAsync());
+		}
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{sshCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+	}
+
+	/// <summary>
 	/// Issue #1517 (migration 0103): a live <c>repo_credential_bindings</c> row is its
 	/// own blocking category, the same "not silently allowed, and no orphaned store
 	/// left unauthenticated without a clear signal" rule issue #1517's AC requires --
@@ -507,6 +543,29 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
 		Assert.Equal("repo_credential_bindings", blockers[0].GetProperty("category").GetString());
 		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+	}
+
+	/// <summary>
+	/// Issue #1652: companion to the blocking-direction test above -- proves the
+	/// unblocking direction, that clearing the last <c>repo_credential_bindings</c> row
+	/// referencing a credential makes it deletable again, rather than permanently.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_AfterItsRepoCredentialBindingIsCleared_Succeeds()
+	{
+		Guid repoCredentialId = await CreateCredentialAsync("repo-store-unblock", credentialType: "repo-basic-auth");
+		HttpResponseMessage bind = await SendAsync(
+			HttpMethod.Put, "/api/v1/repo-credentials/depot", new { credential_ref = repoCredentialId });
+		bind.EnsureSuccessStatusCode();
+
+		HttpResponseMessage blocked = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{repoCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+
+		HttpResponseMessage cleared = await SendAsync(HttpMethod.Delete, "/api/v1/repo-credentials/depot", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, cleared.StatusCode);
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{repoCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
 	}
 
 	/// <summary>
