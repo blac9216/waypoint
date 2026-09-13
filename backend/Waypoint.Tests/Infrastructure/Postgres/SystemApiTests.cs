@@ -72,9 +72,11 @@ public sealed class SystemApiTests : IAsyncLifetime
 				});
 
 				services.AddSingleton<IApplianceStateRepository>(new ApplianceStateRepository(_connectionString));
-				services.AddSingleton<IArtifactStoreDiskUsageProvider>(new ArtifactStoreDiskUsageProvider(
-					Options.Create(new DownloadOptions { ArtifactStorePath = _artifactStorePath }),
-					NullLogger<ArtifactStoreDiskUsageProvider>.Instance));
+				services.AddSingleton<IArtifactStoreDiskUsageProvider>(new CompositeDiskUsageProvider([
+					new ArtifactStoreDiskUsageSource(
+						Options.Create(new DownloadOptions { ArtifactStorePath = _artifactStorePath }),
+						NullLogger<ArtifactStoreDiskUsageSource>.Instance),
+				]));
 
 				// Issue #443: SystemController now also depends on IWorkerRegistryReader.
 				// This factory wires repositories directly (no ConnectionStrings:Waypoint

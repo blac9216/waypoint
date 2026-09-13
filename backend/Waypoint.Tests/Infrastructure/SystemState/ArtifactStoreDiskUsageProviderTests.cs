@@ -26,7 +26,12 @@ namespace Waypoint.Tests.Infrastructure.SystemState;
 /// absolute capacities for the same temp directory), so these tests assert
 /// structure -- fields present, non-negative, and total ~= used + free -- never exact
 /// byte counts. The controller-level shape/gate assertions live in
-/// <c>Waypoint.Tests.Api.SystemEndpointTests</c>, against a fake of this interface.
+/// <c>Waypoint.Tests.Api.SystemEndpointTests</c>, against a fake of
+/// <c>IArtifactStoreDiskUsageProvider</c>. Issue #1534 renamed the type under test from
+/// <c>ArtifactStoreDiskUsageProvider</c> to <see cref="ArtifactStoreDiskUsageSource"/>
+/// (now one <c>INamedDiskUsageSource</c> the composite provider aggregates, returning a
+/// single nullable <see cref="ArtifactStoreUsage"/> rather than a list) -- see
+/// <c>CompositeDiskUsageProviderTests</c> for the aggregate-level coverage.
 /// </summary>
 public sealed class ArtifactStoreDiskUsageProviderTests : IDisposable
 {
@@ -46,15 +51,15 @@ public sealed class ArtifactStoreDiskUsageProviderTests : IDisposable
 	}
 
 	[Fact]
-	public void GetUsage_ForConfiguredStorePath_ReturnsOneStoreWithSaneFigures()
+	public void GetUsage_ForConfiguredStorePath_ReturnsSaneFigures()
 	{
 		IOptions<DownloadOptions> options = Options.Create(new DownloadOptions { ArtifactStorePath = _tempStoreRoot });
-		ArtifactStoreDiskUsageProvider provider = new(options, NullLogger<ArtifactStoreDiskUsageProvider>.Instance);
+		ArtifactStoreDiskUsageSource source = new(options, NullLogger<ArtifactStoreDiskUsageSource>.Instance);
 
-		IReadOnlyList<ArtifactStoreUsage> stores = provider.GetUsage();
+		ArtifactStoreUsage? store = source.GetUsage();
 
-		ArtifactStoreUsage store = Assert.Single(stores);
-		Assert.False(string.IsNullOrWhiteSpace(store.Name));
+		Assert.NotNull(store);
+		Assert.False(string.IsNullOrWhiteSpace(store!.Name));
 		Assert.Equal(_tempStoreRoot, store.Path);
 		Assert.True(store.TotalBytes >= 0, "TotalBytes must be non-negative.");
 		Assert.True(store.UsedBytes >= 0, "UsedBytes must be non-negative.");
@@ -74,9 +79,9 @@ public sealed class ArtifactStoreDiskUsageProviderTests : IDisposable
 		Assert.False(Directory.Exists(_tempStoreRoot));
 
 		IOptions<DownloadOptions> options = Options.Create(new DownloadOptions { ArtifactStorePath = _tempStoreRoot });
-		ArtifactStoreDiskUsageProvider provider = new(options, NullLogger<ArtifactStoreDiskUsageProvider>.Instance);
+		ArtifactStoreDiskUsageSource source = new(options, NullLogger<ArtifactStoreDiskUsageSource>.Instance);
 
-		provider.GetUsage();
+		source.GetUsage();
 
 		Assert.True(Directory.Exists(_tempStoreRoot));
 	}
