@@ -41,7 +41,8 @@ namespace Waypoint.Tests.DownloadRunner;
 /// RPM-repo metadata discovery job), same convention; <c>photon-image-discovery</c>
 /// joined in issue #1790 (the sibling image-tree discovery job), same convention;
 /// <c>subscription-evaluate</c> joined in issue #1472 (the subscription-evaluation
-/// job), same convention.
+/// job), same convention. <c>content-library-sync</c> joined in issue #1513 (the
+/// Supervisor depot-fed sync job, epic #1185), same convention.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
@@ -53,6 +54,7 @@ public sealed class DownloadRunnerJobTypesTests
 				{
 					"catalog-index", "download", "tool-install", "depot-enrollment", "catalog-pull", "retention-sweep",
 					"binaries-download", "photon-repo-discovery", "photon-image-discovery", "subscription-evaluate",
+					"content-library-sync",
 				},
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}

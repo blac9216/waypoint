@@ -177,6 +177,16 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Waypoint.Core.Subscriptions.SubscriptionEvaluationService>();
 		services.AddSingleton<IJobHandler, Subscriptions.SubscriptionEvaluationJobHandler>();
 
+		// Issue #1513 (epic #1185): the Supervisor depot-fed content-library sync
+		// job -- re-serves the depot's SUPERVISOR product tree into its own VCSP
+		// library. Registers in the SAME change that adds "content-library-sync" to
+		// DownloadRunnerJobTypes.Allowed, per that allowlist's own doc comment
+		// (issue #619's convention). IContentLibraryRepository/IContentLibraryItemRepository/
+		// IContentLibraryWriter/IDepotArtifactRepository are registered by
+		// AddWaypointInfrastructure, already called before this method (this
+		// method's own doc comment).
+		services.AddSingleton<IJobHandler, ContentLibrary.SupervisorLibrarySyncJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 		// Issue #738: resolves a vCenter execution item's frozen catalog execution

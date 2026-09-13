@@ -20,16 +20,19 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Migration 0133's no-grant posture (issue #1396), mirroring
-/// <see cref="ContentLibraryFoldersRunnerRoleGrantTests"/>'s pattern for 0113: exactly
-/// one consumer today, the API process (item CRUD, its own HTTP-surface follow-up
-/// issue #1826), so both runner roles must be denied even a bare SELECT.
+/// Migration 0133's original no-grant posture (issue #1396) denied both runner roles;
+/// the 20260913040921 migration (issue #1513) narrowly widened
+/// <c>waypoint_download_runner</c> to SELECT/INSERT/UPDATE for
+/// <c>SupervisorLibrarySyncJobHandler</c> -- see
+/// <c>SupervisorLibrarySyncRunnerRoleGrantTests</c> for that positive/negative
+/// coverage. <c>waypoint_compliance_runner</c> is untouched by that migration (this is
+/// a download-domain job, ADR-0013 SS2) and stays denied even a bare SELECT, mirroring
+/// <see cref="ContentLibraryFoldersRunnerRoleGrantTests"/>'s pattern for 0113.
 /// </summary>
 [Collection("Postgres")]
 public sealed class ContentLibraryItemsRunnerRoleGrantTests : IAsyncLifetime
 {
 	private readonly PostgresFixture _fixture;
-	private string _downloadRunnerConnectionString = string.Empty;
 	private string _complianceRunnerConnectionString = string.Empty;
 
 	public ContentLibraryItemsRunnerRoleGrantTests(PostgresFixture fixture)
@@ -44,20 +47,13 @@ public sealed class ContentLibraryItemsRunnerRoleGrantTests : IAsyncLifetime
 
 		NpgsqlConnectionStringBuilder builder = new(_fixture.ConnectionString)
 		{
-			Username = "waypoint_download_runner",
+			Username = "waypoint_compliance_runner",
 			Password = "waypoint_test",
 		};
-		_downloadRunnerConnectionString = builder.ConnectionString;
-
-		builder.Username = "waypoint_compliance_runner";
 		_complianceRunnerConnectionString = builder.ConnectionString;
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
-
-	[Fact]
-	public async Task DownloadRunnerRole_CannotReadContentLibraryItems() =>
-		await AssertSelectDeniedAsync(_downloadRunnerConnectionString, "content_library_items");
 
 	[Fact]
 	public async Task ComplianceRunnerRole_CannotReadContentLibraryItems() =>
