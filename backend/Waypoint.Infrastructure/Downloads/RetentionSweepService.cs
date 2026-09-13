@@ -174,6 +174,15 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		// test membership without re-scanning the list per row.
 		HashSet<Guid> manualDownloadCandidates = [.. request.ManualDownloadDepotArtifactIds ?? []];
 
+		// Issue #1864(b): named manual-download ids this call actually evaluates
+		// (i.e. matched a row the auto-prune or revisit pass visited), so a named id
+		// that matches nothing -- untracked, tracked-but-not-in-grace/pending-purge,
+		// or already purged -- can be reported rather than silently dropped. Every
+		// row visited counts as "matched" regardless of the outcome (dial-skipped,
+		// out-of-scope-skipped, pruned, or erroring): the dial block itself
+		// evaluated it, which is the parity `UntrackedCandidatesSkipped` draws.
+		HashSet<Guid> manualDownloadCandidatesEvaluated = [];
+
 		IReadOnlyList<RetainedContentState> graceRows = await _states
 			.ListByStateAsync(RetainedContentStates.Grace, cancellationToken).ConfigureAwait(false);
 
@@ -197,6 +206,13 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			}
 
 			bool isManualDownloadCandidate = manualDownloadCandidates.Contains(row.DepotArtifactId);
+			if (isManualDownloadCandidate)
+			{
+				// Matched here regardless of what happens below (out-of-scope skip,
+				// dial-governed skip, or falls through to the normal window check) --
+				// issue #1864(b) only cares that this row was visited at all.
+				manualDownloadCandidatesEvaluated.Add(row.DepotArtifactId);
+			}
 
 			// Issue #1687: a tracked, grace-expired candidate that has since been
 			// reported on the review list (download_out_of_scope_content) is an
@@ -227,29 +243,10 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 				continue;
 			}
 
-			RetentionPolicy? policy;
-			if (row.PolicyId is { } policyId)
+			RetentionPolicy? policy = await ResolvePolicyForRowAsync(row, "grace window", errors, cancellationToken).ConfigureAwait(false);
+			if (policy is null)
 			{
-				// An explicit policy_id that fails to resolve is a data defect (the
-				// referenced download_retention_policies row was removed, or never
-				// existed) -- surfaced as an error, not silently substituted with the
-				// Default scope's window, which may be shorter and would therefore
-				// prune this row early without anyone being told why.
-				policy = await _policies.GetAsync(policyId, cancellationToken).ConfigureAwait(false);
-				if (policy is null)
-				{
-					errors.Add($"retained-content-state '{row.Id}' references retention policy '{policyId}' which no longer resolves; grace window cannot be evaluated until the dangling policy_id is corrected.");
-					continue;
-				}
-			}
-			else
-			{
-				policy = await _policies.GetByScopeKeyAsync(RetentionPolicyScopes.Default, cancellationToken).ConfigureAwait(false);
-				if (policy is null)
-				{
-					errors.Add($"no retention policy resolvable for retained-content-state '{row.Id}'; grace window cannot be evaluated.");
-					continue;
-				}
+				continue;
 			}
 
 			// Issue #1798: a candidate the caller has named as a manual/ad-hoc
@@ -264,16 +261,8 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			// ADR-0034/approved design #16 section 2.
 			if (isManualDownloadCandidate)
 			{
-				ManualDownloadDial dial = ManualDownloadRetentionDialResolver.Resolve(policy);
-				if (ManualDownloadRetentionDialResolver.RequiresReview(dial))
-				{
-					await _reviewList.ReportOutOfScopeAsync(
-						row.DepotArtifactId,
-						ManualDownloadReviewReason,
-						cancellationToken).ConfigureAwait(false);
-				}
-
-				if (ManualDownloadRetentionDialResolver.SkipsAutoPrune(dial))
+				ManualDownloadDialGate gate = await EvaluateManualDownloadDialAsync(row, policy, errors, cancellationToken).ConfigureAwait(false);
+				if (gate == ManualDownloadDialGate.Skip)
 				{
 					manualDownloadDialSkipped++;
 					continue;
@@ -322,6 +311,30 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		{
 			cancellationToken.ThrowIfCancellationRequested();
 
+			// Issue #1863: a pending-purge row is a second auto-prune decision point,
+			// not just the grace pass above -- a manual/ad-hoc download dialed Keep or
+			// Review by the time this revisit runs must not be silently re-purged just
+			// because its earlier delete attempt (back when the dial may still have
+			// read AutoPrune) happened to fail. Gated the same way the grace pass
+			// gates entry into pending-purge in the first place.
+			bool isManualDownloadCandidate = manualDownloadCandidates.Contains(row.DepotArtifactId);
+			if (isManualDownloadCandidate)
+			{
+				manualDownloadCandidatesEvaluated.Add(row.DepotArtifactId);
+				RetentionPolicy? policy = await ResolvePolicyForRowAsync(row, "manual-download dial", errors, cancellationToken).ConfigureAwait(false);
+				if (policy is null)
+				{
+					continue;
+				}
+
+				ManualDownloadDialGate gate = await EvaluateManualDownloadDialAsync(row, policy, errors, cancellationToken).ConfigureAwait(false);
+				if (gate == ManualDownloadDialGate.Skip)
+				{
+					manualDownloadDialSkipped++;
+					continue;
+				}
+			}
+
 			RetentionPurgeOutcome outcome = await PurgeRowInternalAsync(row, "retention-sweep", "revisiting pending-purge row from a prior failed delete", cancellationToken)
 				.ConfigureAwait(false);
 			if (outcome.Purged)
@@ -334,6 +347,14 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			}
 		}
 
+		// Issue #1864(b): named manual-download ids that matched no row this call
+		// visited at all (grace or pending-purge) -- reported so a caller naming
+		// candidates can tell the dial never had a decision to make for them, rather
+		// than inferring it from an absent counter bump.
+		int manualDownloadCandidatesNotApplicable = manualDownloadCandidates.Count == 0
+			? 0
+			: manualDownloadCandidates.Count(id => !manualDownloadCandidatesEvaluated.Contains(id));
+
 		return new RetentionSweepReport(
 			Skipped: false,
 			SkippedReason: null,
@@ -342,7 +363,8 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 			UntrackedCandidatesSkipped: untrackedSkipped,
 			Errors: errors,
 			OutOfScopeSkipped: outOfScopeSkipped,
-			ManualDownloadDialSkipped: manualDownloadDialSkipped);
+			ManualDownloadDialSkipped: manualDownloadDialSkipped,
+			ManualDownloadCandidatesNotApplicable: manualDownloadCandidatesNotApplicable);
 	}
 
 	public async Task<RetentionPurgeOutcome> PurgeImmediatelyAsync(
@@ -414,20 +436,36 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 				return new RetentionPurgeOutcome(row.Id, false, deleteError);
 			}
 
-			await _states.TransitionAsync(row.Id, RetainedContentStates.Purged, occurredAt, cancellationToken).ConfigureAwait(false);
-
-			// Issue #1862: the content this row named no longer exists once the
-			// transition above lands, so ANY download_out_of_scope_content row for
-			// the same depot_artifact_id (whether this dial's own Review report or
-			// one this same call's #1687 guard would otherwise have protected --
+			// Issue #1862: the content this row named no longer exists once the file
+			// delete above succeeded, so ANY download_out_of_scope_content row for the
+			// same depot_artifact_id (whether this dial's own Review report or one
+			// this same call's #1687 guard would otherwise have protected --
 			// unreachable here, since that guard skips the row entirely rather than
 			// reaching this point) is now stale: the admin review list must not keep
-			// offering a "delete out-of-scope content" action against content
-			// already gone. IReviewListService itself still cannot delete (that
-			// guarantee is untouched); this goes through the narrower
-			// IOutOfScopeContentEraser seam instead. A no-op, not an error, for the
-			// common case of a row that was never out-of-scope-reported at all.
+			// offering a "delete out-of-scope content" action against content already
+			// gone. IReviewListService itself still cannot delete (that guarantee is
+			// untouched); this goes through the narrower IOutOfScopeContentEraser seam
+			// instead. A no-op, not an error, for the common case of a row that was
+			// never out-of-scope-reported at all.
+			//
+			// Issue #1891: deliberately sequenced BEFORE the terminal Purged
+			// transition below, not after. If EraseAsync itself throws (anything
+			// other than InvalidOperationException still propagates out of this
+			// method's try, same as before), the row is still at pending-purge --
+			// recoverable by a sweep re-run, which repeats this whole method: the
+			// physical delete is idempotent (an already-absent file counts as
+			// success, see DeletePhysicalFileAsync), so the retry cleanly re-attempts
+			// EraseAsync and then the Purged transition. Reaching Purged before the
+			// erase risked the opposite: a row stuck in the terminal state with a
+			// stale review-list entry that neither a sweep re-run (this method's own
+			// AlreadyPurged short-circuit) nor the Admin's DeleteOutOfScopeAsync
+			// (which requires PurgeImmediatelyAsync to report Purged: true) could
+			// ever reach again. A stale erase ahead of a purge that then fails is
+			// harmless -- the report, if still warranted, is simply re-made on a
+			// later pass.
 			await _outOfScopeEraser.EraseAsync(row.DepotArtifactId, cancellationToken).ConfigureAwait(false);
+
+			await _states.TransitionAsync(row.Id, RetainedContentStates.Purged, occurredAt, cancellationToken).ConfigureAwait(false);
 
 			LogPurged(_logger, row.DepotArtifactId, row.Id, actor, reason ?? "(none)", deleted);
 			return new RetentionPurgeOutcome(row.Id, true, null);
@@ -517,6 +555,82 @@ public sealed partial class RetentionSweepService : IRetentionSweepService
 		}
 
 		return null;
+	}
+
+	/// <summary>
+	/// Resolves the <see cref="RetentionPolicy"/> that governs <paramref name="row"/>
+	/// itself -- <paramref name="row"/>.PolicyId when set (a data defect that fails to
+	/// resolve is surfaced as an error, not silently substituted with the Default
+	/// scope's window, which may be shorter/looser and would misgovern the row
+	/// without anyone being told why), else the Default scope policy. Shared by the
+	/// auto-prune pass's grace-window check and the pending-purge revisit pass's
+	/// manual-download dial gate (issue #1863) -- both need the same row-governing
+	/// policy, just for different decisions.
+	/// </summary>
+	private async Task<RetentionPolicy?> ResolvePolicyForRowAsync(RetainedContentState row, string subject, List<string> errors, CancellationToken cancellationToken)
+	{
+		if (row.PolicyId is { } policyId)
+		{
+			RetentionPolicy? explicitPolicy = await _policies.GetAsync(policyId, cancellationToken).ConfigureAwait(false);
+			if (explicitPolicy is null)
+			{
+				errors.Add($"retained-content-state '{row.Id}' references retention policy '{policyId}' which no longer resolves; {subject} cannot be evaluated until the dangling policy_id is corrected.");
+			}
+			return explicitPolicy;
+		}
+
+		RetentionPolicy? defaultPolicy = await _policies.GetByScopeKeyAsync(RetentionPolicyScopes.Default, cancellationToken).ConfigureAwait(false);
+		if (defaultPolicy is null)
+		{
+			errors.Add($"no retention policy resolvable for retained-content-state '{row.Id}'; {subject} cannot be evaluated.");
+		}
+		return defaultPolicy;
+	}
+
+	private enum ManualDownloadDialGate
+	{
+		/// <summary>The dial does not exempt the row from whatever the caller was about to do to it.</summary>
+		Proceed,
+
+		/// <summary>The dial (Keep or Review) exempts the row, or the dial value itself could not be resolved -- either way, no purge this pass.</summary>
+		Skip,
+	}
+
+	/// <summary>
+	/// Evaluates <paramref name="policy"/>'s <see cref="ManualDownloadRetentionDialResolver"/>
+	/// dial for a manual/ad-hoc download candidate row -- shared by the auto-prune
+	/// pass and the pending-purge revisit pass (issue #1863) so a Keep/Review dial
+	/// exempts the row from BOTH decision points, not just the first. Issue #1864(a):
+	/// an unrecognized <c>manual_download_dial_default</c> (reachable only through
+	/// constraint drift on migration 0107's CHECK, or a bypassing writer) is reported
+	/// via <paramref name="errors"/> and treated as <see cref="ManualDownloadDialGate.Skip"/>
+	/// -- the safe direction (no deletion) -- rather than propagating the resolver's
+	/// <see cref="ArgumentException"/> out of <see cref="RunSweepAsync"/> and aborting
+	/// every remaining row in both passes, mirroring how the policy-resolution
+	/// failures immediately above this call site are handled.
+	/// </summary>
+	private async Task<ManualDownloadDialGate> EvaluateManualDownloadDialAsync(RetainedContentState row, RetentionPolicy policy, List<string> errors, CancellationToken cancellationToken)
+	{
+		ManualDownloadDial dial;
+		try
+		{
+			dial = ManualDownloadRetentionDialResolver.Resolve(policy);
+		}
+		catch (ArgumentException exception)
+		{
+			errors.Add($"retained-content-state '{row.Id}': {exception.Message}");
+			return ManualDownloadDialGate.Skip;
+		}
+
+		if (ManualDownloadRetentionDialResolver.RequiresReview(dial))
+		{
+			await _reviewList.ReportOutOfScopeAsync(
+				row.DepotArtifactId,
+				ManualDownloadReviewReason,
+				cancellationToken).ConfigureAwait(false);
+		}
+
+		return ManualDownloadRetentionDialResolver.SkipsAutoPrune(dial) ? ManualDownloadDialGate.Skip : ManualDownloadDialGate.Proceed;
 	}
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "retention sweep skipped for scope '{ScopeKey}': listing/scan was unverified or partial")]
