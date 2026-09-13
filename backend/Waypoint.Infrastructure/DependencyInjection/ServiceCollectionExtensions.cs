@@ -419,6 +419,14 @@ public static class ServiceCollectionExtensions
 			// The claim/heartbeat/release write side is runner-only, wired by
 			// AddWaypointExecution.
 			services.AddSingleton<Waypoint.Core.Capacity.ICapacityPoolStatusReader>(new Capacity.CapacityLeasePoolRepository(connectionString));
+
+			// Issue #1529 (epic #1180, split from #1042): the disk-admission reserve
+			// singleton. API-only, same withheld-runner-grants posture as
+			// Waypoint.Core.Runs.IRetentionPolicyRepository below -- no runner reads or
+			// writes this table; the admission decision that will eventually consult it
+			// is #1531's surface, not this registration's.
+			services.AddSingleton<Waypoint.Core.Capacity.IDiskAdmissionPolicyRepository>(new Capacity.DiskAdmissionPolicyRepository(connectionString));
+
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));
