@@ -130,9 +130,27 @@ Broadcom does not publish a detached signature beside each VCF Download Tool arc
 The offline depot instead publishes the artifact's byte size and SHA-256 in
 `PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json`, with an RSA
 PKCS#1 v1.5/SHA-256 signature envelope in `productVersionCatalog.sig`. A local
-repository install therefore authenticates the exact catalog bytes against an
-independently provisioned VMware/Broadcom certificate, then verifies the candidate's
-catalog size and SHA-256 before activation. A certificate embedded in the signature
-envelope is not trusted merely because it is embedded there. Manual-upload and
-connected-fetch delivery are tracked separately under Epic #667 because their
-metadata sources differ.
+repository install therefore authenticates the exact catalog bytes against the
+certificate embedded in that same signature envelope (RSA `VerifyData` over the
+catalog's own bytes), then verifies the candidate's catalog size and SHA-256 before
+activation. This is an integrity/consistency check only: the embedded certificate IS
+the trust root, and there is no independent, operator-provisioned, or code-pinned
+publisher anchor. Manual-upload and connected-fetch delivery are tracked separately
+under Epic #667 because their metadata sources differ.
+
+### Trust model narrowed to envelope-integrity only (2026-08-25, #798)
+
+The earlier revision of the paragraph above asserted the inverse — that the catalog was
+authenticated against an "independently provisioned VMware/Broadcom certificate" and
+that "a certificate embedded in the signature envelope is not trusted merely because it
+is embedded there." Issue #798 removed all certificate anchoring (operator-provisioned
+and code-pinned alike): any such anchor could only ever be sourced from the same
+Broadcom channel the catalog itself came from, so it added no independent assurance.
+The owner ratified this on 2026-08-25 ("No certificate anchoring at all — neither
+operator-provisioned nor pinned in code"). The shipped `BroadcomManagedToolCatalogVerifier`
+now RSA-verifies the catalog's exact bytes against the certificate embedded in the
+envelope's own `productVersionCatalog.sig`, bounds the document size, and matches each
+candidate's SHA-256 and size — nothing more. Residual risk: there is no independent
+signer-provenance check, so a self-consistent envelope from any signer verifies; this is
+accepted, and provenance across the air gap is provided elsewhere by the Waypoint
+bundling certificate at transfer time (issue #17), not here.

@@ -23,9 +23,10 @@ public sealed record ManagedToolCatalogVerificationResult(bool Valid, string? Ac
 
 /// <summary>
 /// Result of authenticating the Broadcom product-version catalog <em>document</em>
-/// itself -- trust-chain + detached-signature + size/shape bounds -- with no
-/// per-artifact size/SHA match (issue #687's connected <c>catalog-pull</c>, which
-/// pulls the whole catalog rather than installing one named binary).
+/// itself -- an integrity/consistency check (RSA signature over the catalog's exact
+/// bytes against the certificate embedded in its own envelope) plus size/shape bounds,
+/// with no per-artifact size/SHA match (issue #687's connected <c>catalog-pull</c>,
+/// which pulls the whole catalog rather than installing one named binary).
 /// </summary>
 public sealed record ManagedToolCatalogAuthenticationResult(bool Valid, string? FailureReason)
 {
@@ -34,21 +35,24 @@ public sealed record ManagedToolCatalogAuthenticationResult(bool Valid, string? 
 }
 
 /// <summary>
-/// Authenticates Broadcom's product-version catalog against an independently
-/// provisioned certificate. <see cref="AuthenticateCatalogAsync"/> stops after the
-/// catalog document's own trust-chain/signature/shape check (the connected
-/// <c>catalog-pull</c> path, issue #687); <see cref="VerifyAsync"/> additionally
-/// matches a single named candidate's catalog size and SHA-256 (the install path).
-/// Both share the same publisher trust anchor and signature-envelope convention.
+/// Authenticates Broadcom's product-version catalog by an integrity/consistency check
+/// only (issue #798): the catalog's exact bytes are RSA-verified against the certificate
+/// embedded in the catalog's own signature envelope -- there is no independent,
+/// operator-provisioned, or code-pinned publisher trust anchor.
+/// <see cref="AuthenticateCatalogAsync"/> stops after that embedded-cert signature check
+/// plus a size/shape bound (the connected <c>catalog-pull</c> path, issue #687);
+/// <see cref="VerifyAsync"/> additionally matches a single named candidate's catalog
+/// size and SHA-256 (the install path). Both share the same embedded-certificate
+/// signature-envelope convention.
 /// </summary>
 public interface IManagedToolCatalogVerifier
 {
 	/// <summary>
-	/// Authenticates the catalog document only: the independently provisioned trust
-	/// certificate, the detached signature envelope over the catalog's exact bytes,
-	/// and the catalog's size/JSON-shape bounds -- no per-artifact match. Used by the
-	/// connected <c>catalog-pull</c> job, which pulls and indexes the whole catalog
-	/// rather than installing one named binary.
+	/// Authenticates the catalog document only: the signature envelope's RSA signature
+	/// over the catalog's exact bytes, verified against the certificate embedded in that
+	/// same envelope (no external trust anchor), plus the catalog's size/JSON-shape
+	/// bounds -- no per-artifact match. Used by the connected <c>catalog-pull</c> job,
+	/// which pulls and indexes the whole catalog rather than installing one named binary.
 	/// </summary>
 	Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(
 		string repositoryRoot, CancellationToken cancellationToken);
