@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { type CatalogArtifact, filterArtifactsBySearch, friendlyProductName, groupArtifactsByProduct } from "./catalog";
+import {
+	type CatalogArtifact,
+	filterArtifactsBySearch,
+	friendlyProductName,
+	groupArtifactsByProduct,
+	isKubernetesProduct,
+	productType,
+} from "./catalog";
 
 /**
  * `friendlyProductName`/`humanizeProductKey` table tests (issue #1588).
@@ -96,5 +103,37 @@ describe("groupArtifactsByProduct (issue #797: null product crashed the group ke
 		expect(groups).toHaveLength(2);
 		expect(groups.map((g) => g.friendlyName)).toContain("Unknown");
 		expect(groups.map((g) => g.friendlyName)).toContain("vCenter Server");
+	});
+});
+
+describe("isKubernetesProduct (issue #797: null product crashed the core/Kubernetes type filter)", () => {
+	it("never throws on a null/undefined product and classifies it as non-Kubernetes (core)", () => {
+		expect(() => isKubernetesProduct(null)).not.toThrow();
+		expect(() => isKubernetesProduct(undefined)).not.toThrow();
+		expect(isKubernetesProduct(null)).toBe(false);
+		expect(isKubernetesProduct(undefined)).toBe(false);
+		expect(productType(null as unknown as string)).toBe("core");
+	});
+
+	it("still recognises the real Kubernetes-stack keys", () => {
+		expect(isKubernetesProduct("VKR")).toBe(true);
+		expect(isKubernetesProduct("VKS_CLUSTER")).toBe(true);
+		expect(isKubernetesProduct("SUPERVISOR_SERVICE_ABC")).toBe(true);
+		expect(isKubernetesProduct("VCENTER")).toBe(false);
+	});
+
+	// Mirrors DownloadCatalogScreen's `typedArtifacts` filter
+	// (`isKubernetesProduct(a.product) === (type === "kubernetes")`), the exact
+	// path that threw a TypeError on a null-product row before this fix.
+	it("lets the screen's type filter run over a malformed null-product row without throwing", () => {
+		const artifacts = [malformedArtifact(), validArtifact({ product: "VKR" })];
+		const coreFilter = () => artifacts.filter((a) => isKubernetesProduct(a.product) === false);
+		const k8sFilter = () => artifacts.filter((a) => isKubernetesProduct(a.product) === true);
+
+		expect(coreFilter).not.toThrow();
+		expect(k8sFilter).not.toThrow();
+		// The null-product row is treated as core (kept by the core filter, excluded by the Kubernetes filter).
+		expect(coreFilter().map((a) => a.id)).toEqual(["malformed-1"]);
+		expect(k8sFilter().map((a) => a.id)).toEqual(["valid-1"]);
 	});
 });

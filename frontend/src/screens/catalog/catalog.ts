@@ -166,9 +166,15 @@ export function friendlyProductName(productKey: string): string {
 }
 
 /** VKR itself, every `VKS_*` release, and every `SUPERVISOR_SERVICE_*`
- * component — the Kubernetes-stack bulk called out in issue #796. */
-export function isKubernetesProduct(productKey: string): boolean {
-	return productKey === "VKR" || productKey.startsWith("VKS_") || productKey.startsWith("SUPERVISOR_SERVICE_");
+ * component — the Kubernetes-stack bulk called out in issue #796.
+ *
+ * Issue #797: null-tolerant like the grouping key above (`artifact.product ||
+ * UNKNOWN_PRODUCT_KEY`) — a malformed row with a missing `product` is not a
+ * Kubernetes product, so it classifies as core rather than crashing the type
+ * filter on `.startsWith()`. Guards every caller (`productType`, the screen's
+ * type filter) in one place. */
+export function isKubernetesProduct(productKey: string | null | undefined): boolean {
+	return productKey === "VKR" || (productKey?.startsWith("VKS_") ?? false) || (productKey?.startsWith("SUPERVISOR_SERVICE_") ?? false);
 }
 
 export function productType(productKey: string): ProductType {
