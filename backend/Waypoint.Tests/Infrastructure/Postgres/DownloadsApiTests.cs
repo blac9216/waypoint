@@ -91,6 +91,20 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 				// factory).
 				services.AddSingleton(new CredentialRepository(_connectionString));
 				services.AddSingleton<IWorkerRegistryReader>(new WorkerRegistryRepository(_connectionString));
+
+				// Issue #1531: both enqueue endpoints now depend on IDiskAdmissionService,
+				// which itself depends on the policy repository -- same container-level
+				// connection-string override as every other repository above (the base
+				// appsettings.json's ConnectionStrings:Waypoint host is not reachable from
+				// this test host). The real IArtifactStoreDiskUsageProvider (registered
+				// unconditionally by AddWaypointInfrastructure) is left in place -- every
+				// artifact seeded by this file has no SizeBytes, so projected bytes is
+				// always 0 and admission is unaffected by real disk usage.
+				services.AddSingleton<Waypoint.Core.Capacity.IDiskAdmissionPolicyRepository>(
+					new Waypoint.Infrastructure.Capacity.DiskAdmissionPolicyRepository(_connectionString));
+				services.AddSingleton<Waypoint.Core.Capacity.IDiskAdmissionService>(serviceProvider => new Waypoint.Infrastructure.Capacity.DiskAdmissionService(
+					serviceProvider.GetRequiredService<IArtifactStoreDiskUsageProvider>(),
+					serviceProvider.GetRequiredService<Waypoint.Core.Capacity.IDiskAdmissionPolicyRepository>()));
 			});
 		}
 	}
