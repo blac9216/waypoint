@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
+using Waypoint.Core.Capacity;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Errors;
@@ -60,6 +61,7 @@ public sealed class DownloadsController : ControllerBase
 	private readonly CredentialRepository _credentials;
 	private readonly IWorkerRegistryReader _workerRegistry;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
+	private readonly IDiskAdmissionService _diskAdmission;
 
 	public DownloadsController(
 		IDownloadRepository downloads,
@@ -67,7 +69,8 @@ public sealed class DownloadsController : ControllerBase
 		IJobControlRepository jobs,
 		CredentialRepository credentials,
 		IWorkerRegistryReader workerRegistry,
-		IOptions<CatalogOptions> catalogOptions)
+		IOptions<CatalogOptions> catalogOptions,
+		IDiskAdmissionService diskAdmission)
 	{
 		ArgumentNullException.ThrowIfNull(downloads);
 		ArgumentNullException.ThrowIfNull(artifacts);
@@ -75,12 +78,14 @@ public sealed class DownloadsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(workerRegistry);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
+		ArgumentNullException.ThrowIfNull(diskAdmission);
 		_downloads = downloads;
 		_artifacts = artifacts;
 		_jobs = jobs;
 		_credentials = credentials;
 		_workerRegistry = workerRegistry;
 		_catalogOptions = catalogOptions;
+		_diskAdmission = diskAdmission;
 	}
 
 	/// <summary>
@@ -205,6 +210,14 @@ public sealed class DownloadsController : ControllerBase
 
 			resolved.Add(artifact);
 		}
+
+		// Issue #1531 deliberately does NOT wire the admission check into this legacy
+		// path: ADR-0030 retires POST /downloads and the `download` job type outright
+		// (issue #1040, open) -- it has been a fixture-only, dead-on-arrival contract
+		// since before this epic (issue #968: no real depot artifact was ever
+		// reachable through it), so it never actually writes to the artifact store.
+		// The real "manual download enqueue" this issue's AC means is
+		// QueueBinariesDownload below.
 
 		// One run for the whole batch (ADR-0008), then one download job per artifact via
 		// the shared FanOutJobsAsync path -- identical to every scan/catalog run's fan-out.
@@ -363,6 +376,10 @@ public sealed class DownloadsController : ControllerBase
 				$"Re-pull the catalog (POST /catalog/pull) to populate bundle_id, then retry. Affected artifacts: {string.Join(", ", missingBundleId)}.");
 		}
 
+		// Issue #1531: same admission check QueueDownloads runs, before any run is
+		// created for this batch either.
+		await EnsureDiskAdmittedAsync(resolved, cancellationToken).ConfigureAwait(false);
+
 		// One run for the whole batch (ADR-0008), then one binaries-download job per
 		// artifact via the same shared FanOutJobsAsync path QueueDownloads uses.
 		Guid runId = await _jobs.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
@@ -467,6 +484,32 @@ public sealed class DownloadsController : ControllerBase
 
 		Download? updated = await _downloads.GetAsync(id, cancellationToken).ConfigureAwait(false);
 		return Ok(new DownloadCancelledResponse(id.ToString(), updated?.State ?? DownloadStates.Cancelled));
+	}
+
+	/// <summary>
+	/// Issue #1531: refuses the whole resolved batch with a 409 naming projected,
+	/// free, and reserve bytes when admitting it would breach the configured reserve
+	/// (this issue's AC). Projected bytes sums each resolved artifact's catalog
+	/// <see cref="DepotArtifact.SizeBytes"/> -- the existing size source #1038/#1039
+	/// already expose, not a new one -- treating a not-yet-known size (a row indexed
+	/// before migration 0100, or by the offline disk walk) as zero: an unknown size
+	/// contributes nothing to the projection rather than blocking the whole batch on
+	/// missing catalog metadata.
+	/// </summary>
+	private async Task EnsureDiskAdmittedAsync(IReadOnlyList<DepotArtifact> resolved, CancellationToken cancellationToken)
+	{
+		long projectedBytes = resolved.Sum(artifact => artifact.SizeBytes ?? 0);
+		DiskAdmissionResult admission = await _diskAdmission
+			.AdmitAsync(projectedBytes, ArtifactStoreNames.Default, cancellationToken).ConfigureAwait(false);
+
+		if (!admission.Allowed)
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.Conflict, "disk_admission_denied",
+				"This request would exceed the artifact store's available disk space minus the configured reserve.",
+				$"Projected bytes: {admission.ProjectedBytes}. Free bytes: {admission.FreeBytes}. " +
+				$"Reserve bytes: {admission.ReserveBytes}. Shortfall bytes: {admission.ShortfallBytes}.");
+		}
 	}
 
 	private static string BuildSourceUrl(DepotArtifact artifact)

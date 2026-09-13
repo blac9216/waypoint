@@ -22,3 +22,14 @@ namespace Waypoint.Core.SystemState;
 /// quota derived from the store's own contents.
 /// </summary>
 public sealed record ArtifactStoreUsage(string Name, string Path, long TotalBytes, long UsedBytes, long FreeBytes);
+
+/// <summary>
+/// Issue #1531: the M1 store name <see cref="Waypoint.Infrastructure.SystemState.ArtifactStoreDiskUsageProvider"/>
+/// reports usage under, hoisted here so <c>IDiskAdmissionService</c> callers have one
+/// shared constant to pass rather than each re-typing the literal
+/// <see cref="ArtifactStoreUsage.Name"/> value.
+/// </summary>
+public static class ArtifactStoreNames
+{
+	public const string Default = "Artifact store";
+}

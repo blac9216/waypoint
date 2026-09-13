@@ -427,6 +427,14 @@ public static class ServiceCollectionExtensions
 			// is #1531's surface, not this registration's.
 			services.AddSingleton<Waypoint.Core.Capacity.IDiskAdmissionPolicyRepository>(new Capacity.DiskAdmissionPolicyRepository(connectionString));
 
+			// Issue #1531: the admission decision itself, built on the policy
+			// repository just above and the unconditionally-registered disk-usage
+			// provider (line ~179) -- registered here (connection-string-conditional)
+			// because it depends on the policy repository, which is.
+			services.AddSingleton<Waypoint.Core.Capacity.IDiskAdmissionService>(serviceProvider => new Capacity.DiskAdmissionService(
+				serviceProvider.GetRequiredService<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Capacity.IDiskAdmissionPolicyRepository>()));
+
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));

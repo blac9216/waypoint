@@ -30,7 +30,7 @@ namespace Waypoint.Infrastructure.SystemState;
 /// </remarks>
 public sealed partial class ArtifactStoreDiskUsageProvider : IArtifactStoreDiskUsageProvider
 {
-	private const string StoreName = "Artifact store";
+	private const string StoreName = ArtifactStoreNames.Default;
 
 	private readonly IOptions<DownloadOptions> _downloadOptions;
 	private readonly ILogger<ArtifactStoreDiskUsageProvider> _logger;
