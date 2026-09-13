@@ -1,0 +1,29 @@
+-- Issue #1513 (epic #1185 "Content libraries", split from #1160/#1057): the
+-- Supervisor depot-fed sync job (Waypoint.Infrastructure.Execution.ContentLibrary.
+-- SupervisorLibrarySyncJobHandler, run/job type 'content-library-sync' -- already
+-- reserved in jobs_job_type_check/runs_run_type_check since 0001, so no CHECK
+-- constraint change is needed here) is the FIRST genuine waypoint_download_runner
+-- consumer of the content-library registry (0090) and item identity table (0133).
+-- Both of those migrations' own headers promised this: "the nearest future
+-- runner-side consumer is #1057 (depot-fed add-to-library) ... which must ship its
+-- own GRANT migration when it lands" (0100/#1484/0127/#1436 precedent).
+--
+-- Scope is deliberately narrow, matching exactly what the handler does:
+--   * content_libraries: SELECT (resolve the Supervisor library by name) and INSERT
+--     (create it on first run if it does not exist yet) -- never UPDATE or DELETE,
+--     since the handler never renames or removes a library.
+--   * content_library_items: SELECT (list the library's current items for the
+--     skip-if-current diff), INSERT (new depot artifacts), and UPDATE (an existing
+--     item whose depot content changed) -- never DELETE, matching this table's own
+--     never-auto-remove precedent (UnknownCatalogFile, DepotArtifactRepository's
+--     RekeyManyAsync/SupersedeCatalogDocumentRowAsync): a depot artifact that
+--     disappears from the SUPERVISOR product tree leaves its library item in place
+--     for an operator to review, rather than silently unpublishing it.
+--
+-- waypoint_compliance_runner gets nothing on either table -- this is a download
+-- domain job (ADR-0013 SS2) -- proven by SupervisorLibrarySyncRunnerRoleGrantTests
+-- alongside the positive/negative download_runner grants, this repo's #556
+-- grant-hygiene convention (assert the grant that exists AND the operation that
+-- must still fail).
+GRANT SELECT, INSERT ON content_libraries TO waypoint_download_runner;
+GRANT SELECT, INSERT, UPDATE ON content_library_items TO waypoint_download_runner;

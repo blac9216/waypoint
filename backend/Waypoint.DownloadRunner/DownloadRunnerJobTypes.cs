@@ -52,6 +52,10 @@ namespace Waypoint.DownloadRunner;
 /// evaluation job -- fetch-set diff, lib.json version-counter pre-check, and per-item
 /// <c>binaries-download</c> fan-out -- same convention, handler registration and this
 /// entry land together.
+/// <c>content-library-sync</c> (issue #1513, epic #1185): reserved since 0001 as one
+/// of ADR-0013's "later" content-library/bundle/update job types with no handler --
+/// <c>SupervisorLibrarySyncJobHandler</c> is the first registration, so handler and
+/// this allowlist entry land together, same convention.
 /// </summary>
 public static class DownloadRunnerJobTypes
 {
@@ -66,6 +70,7 @@ public static class DownloadRunnerJobTypes
 		"binaries-download",
 		"photon-repo-discovery",
 		"photon-image-discovery",
-		"subscription-evaluate"
+		"subscription-evaluate",
+		"content-library-sync"
 	};
 }
