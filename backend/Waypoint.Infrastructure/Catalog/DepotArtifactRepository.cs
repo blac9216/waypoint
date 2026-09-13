@@ -271,6 +271,27 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	}
 
 	/// <inheritdoc/>
+	public async Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(catalogDocumentRelativePath);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_artifacts
+			SET superseded_at = now()
+			WHERE relative_path = $1
+			  AND superseded_at IS NULL
+			  AND product IS NULL
+			  AND version IS NULL
+			""", connection);
+		command.Parameters.AddWithValue(catalogDocumentRelativePath);
+		int affected = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		return affected > 0;
+	}
+
+	/// <inheritdoc/>
 	public async Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

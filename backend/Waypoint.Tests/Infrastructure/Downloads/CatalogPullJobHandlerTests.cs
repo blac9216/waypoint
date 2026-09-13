@@ -77,6 +77,7 @@ public sealed class CatalogPullJobHandlerTests
 		public Task<DepotArtifact?> GetByIdAsync(Guid id, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
 	private sealed class FakePullStateRepository : ICatalogPullStateRepository

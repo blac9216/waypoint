@@ -277,6 +277,14 @@ public sealed class CatalogPullJobHandler : IJobHandler
 
 			await _artifacts.RekeyManyAsync(legacyRenames, cancellationToken).ConfigureAwait(false);
 
+			// Issue #797: reconcile a pre-fix stray row for the catalog DOCUMENT
+			// itself (NULL product, NULL version -- a prior parser bug indexed it as
+			// an artifact) the same self-healing way #764's reorder already treats
+			// every other index fact -- every successful pull retries this until it
+			// finds nothing left to reconcile, no manual DB surgery required. A no-op
+			// on every stack that never hit the bug.
+			await _artifacts.SupersedeCatalogDocumentRowAsync(toolOptions.ProductVersionCatalogPath, cancellationToken).ConfigureAwait(false);
+
 			int upserted = 0;
 			foreach (DepotArtifactUpsert upsert in parsed)
 			{

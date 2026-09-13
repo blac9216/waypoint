@@ -150,6 +150,9 @@ public sealed class ReviewListServiceTests : IAsyncLifetime, IDisposable
 
 		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) =>
 			throw new NotSupportedException("not needed for this test");
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("not needed for this test");
 	}
 
 	[Fact]

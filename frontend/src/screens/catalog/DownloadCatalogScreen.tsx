@@ -268,13 +268,18 @@ export function DownloadCatalogScreen() {
 		});
 	}, [searchedArtifacts]);
 
+	// Issue #797: a malformed row (missing product/version identity — the
+	// backend defect this issue also fixes) is excluded from both option
+	// sets rather than crashing `friendlyProductName`'s split on a
+	// null/undefined key or offering an unfilterable "null" option; the row
+	// itself still renders in the table, just with nothing to filter it by.
 	const productOptions = useMemo(() => {
-		const set = new Set(searchedArtifacts.map((a) => a.product));
+		const set = new Set(searchedArtifacts.map((a) => a.product).filter((p): p is string => Boolean(p)));
 		return Array.from(set).sort((a, b) => friendlyProductName(a).localeCompare(friendlyProductName(b)));
 	}, [searchedArtifacts]);
 
 	const versionOptions = useMemo(() => {
-		const set = new Set(searchedArtifacts.map((a) => a.version));
+		const set = new Set(searchedArtifacts.map((a) => a.version).filter((v): v is string => Boolean(v)));
 		return Array.from(set).sort();
 	}, [searchedArtifacts]);
 

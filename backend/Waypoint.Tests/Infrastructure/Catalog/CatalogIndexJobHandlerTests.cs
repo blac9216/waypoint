@@ -45,6 +45,7 @@ public sealed class CatalogIndexJobHandlerTests
 		public Task<IReadOnlyList<DepotArtifact>> GetByIdsAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task<int> RekeyManyAsync(IReadOnlyDictionary<string, string> renames, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
 	private sealed class UnreachableUnknownFileRepository : IUnknownCatalogFileRepository

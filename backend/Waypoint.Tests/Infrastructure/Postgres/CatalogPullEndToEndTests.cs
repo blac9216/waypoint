@@ -313,6 +313,9 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, Waypoint.Core.Pagination.PageRequest page, CancellationToken cancellationToken) =>
 			_inner.ListAsync(filter, page, cancellationToken);
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) =>
+			_inner.SupersedeCatalogDocumentRowAsync(catalogDocumentRelativePath, cancellationToken);
 	}
 
 	private async Task<Guid> SeedActivationCodeCredentialAsync(string secret)
@@ -429,6 +432,55 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		// Job-scoped staging directory is fully cleaned up.
 		Assert.False(Directory.Exists(Path.Combine(_toolStatePath, "catalog-pull-staging", $"job-{job.Id:N}")));
+	}
+
+	/// <summary>
+	/// Issue #797, AC#3 (Finding 1 handler-level proof): a stack that already carries the
+	/// pre-fix stray catalog-document row (NULL product, NULL version at
+	/// <c>ManagedToolOptions.ProductVersionCatalogPath</c>) self-heals on its next successful
+	/// pull -- the handler's <c>SupersedeCatalogDocumentRowAsync</c> call marks that row
+	/// superseded, so it drops out of the listing surface, while the pull's real artifact is
+	/// indexed alongside it. No manual DB surgery. Removing the handler's supersede call leaves
+	/// the stray row visible (total 2, stray still <c>superseded_at IS NULL</c>) and fails this
+	/// test.
+	/// </summary>
+	[Fact]
+	public async Task PreExistingStrayCatalogDocumentRow_IsSelfHealedAfterANextSuccessfulPull()
+	{
+		// Seed the pre-fix stray row at the exact catalog-document path (default
+		// ManagedToolOptions.ProductVersionCatalogPath), NULL product / NULL version.
+		const string catalogDocPath = "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json";
+		await _artifacts.UpsertAsync(
+			new DepotArtifactUpsert(catalogDocPath, "sha-stray", "indexed", "{}"), CancellationToken.None);
+
+		await SeedActivationCodeCredentialAsync(InventedCode);
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
+		ClaimedJob job = await EnqueuePullJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+
+		// The stray row is gone from the listing surface -- only the freshly pulled artifact
+		// (with real product/version) remains visible.
+		(IReadOnlyList<DepotArtifact> items, long total) = await _artifacts.ListAsync(
+			new DepotArtifactFilter(null, null, null), new Waypoint.Core.Pagination.PageRequest(), CancellationToken.None);
+		Assert.Equal(1, total);
+		Assert.Equal("VCENTER", items[0].Product);
+		Assert.DoesNotContain(items, item => item.ExternalId == catalogDocPath);
+
+		// Proven at the raw column: the stray row was superseded (not deleted, not left null).
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT superseded_at FROM depot_artifacts WHERE relative_path = $1", connection);
+		command.Parameters.AddWithValue(catalogDocPath);
+		object? supersededAt = await command.ExecuteScalarAsync();
+		Assert.NotNull(supersededAt);
+		Assert.IsNotType<DBNull>(supersededAt);
 	}
 
 	/// <summary>

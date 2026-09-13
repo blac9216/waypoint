@@ -160,4 +160,67 @@ public sealed class VendorProductVersionCatalogParserTests
 	{
 		Assert.ThrowsAny<JsonException>(() => VendorProductVersionCatalogParser.Parse("{not-valid"));
 	}
+
+	/// <summary>
+	/// Issue #797: a binary whose entry carries no <c>productVersion</c> has no
+	/// product+version identity and must never be indexed as an artifact -- the
+	/// live-stack defect this regresses against was a row for the vendor catalog
+	/// DOCUMENT itself (<c>PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json</c>)
+	/// with NULL product and NULL version. The component key here ("METADATA")
+	/// stands in for whatever non-product component a future catalog might list
+	/// a self-referential or metadata-only entry under -- the guard is the
+	/// general "no version, no index" rule, not a check against one literal path.
+	/// </summary>
+	[Fact]
+	public void Parse_EntryWithNoProductVersion_IsSkippedNotIndexed()
+	{
+		const string json = """
+			{
+			  "patches": {
+			    "METADATA": [
+			      {
+			        "artifacts": { "bundles": [
+			          { "id": "meta-1", "binaries": [ { "fileName": "productVersionCatalog.json", "checksum": "aa", "size": 100 } ] }
+			        ] }
+			      }
+			    ]
+			  }
+			}
+			""";
+
+		Assert.Empty(VendorProductVersionCatalogParser.Parse(json));
+	}
+
+	/// <summary>
+	/// Same defect, mixed with an ordinary valid entry in the SAME component: the
+	/// no-version entry is dropped while the valid one still indexes normally --
+	/// one malformed entry must not affect any other (matching this parser's
+	/// long-standing tolerance posture for every other malformed shape above).
+	/// </summary>
+	[Fact]
+	public void Parse_EntryWithNoProductVersionAlongsideValidEntry_OnlyValidEntryIndexes()
+	{
+		const string json = """
+			{
+			  "patches": {
+			    "VCENTER": [
+			      {
+			        "artifacts": { "bundles": [
+			          { "id": "meta-1", "binaries": [ { "fileName": "productVersionCatalog.json", "checksum": "aa", "size": 100 } ] }
+			        ] }
+			      },
+			      {
+			        "productVersion": "8.0.3",
+			        "artifacts": { "bundles": [
+			          { "id": "b1", "binaries": [ { "fileName": "vcsa-patch.iso", "checksum": "bb", "size": 200 } ] }
+			        ] }
+			      }
+			    ]
+			  }
+			}
+			""";
+
+		DepotArtifactUpsert upsert = Assert.Single(VendorProductVersionCatalogParser.Parse(json));
+		Assert.Equal("PROD/COMP/VCENTER/vcsa-patch.iso", upsert.RelativePath);
+	}
 }

@@ -611,6 +611,118 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		Assert.Null(artifact!.BundleId);
 	}
 
+	/// <summary>
+	/// Issue #797, Finding 1: <see cref="DepotArtifactRepository.SupersedeCatalogDocumentRowAsync"/>
+	/// must mark <c>superseded_at</c> on ONLY the stray catalog-document row (NULL product,
+	/// NULL version at the catalog-document <c>relative_path</c>) -- never a hard delete, and
+	/// never a row at any other path, even another NULL/NULL one. Seeds the stray target, an
+	/// unrelated NULL/NULL row at a DIFFERENT path, and a pre-superseded NULL/NULL row at a
+	/// THIRD path, then asserts only the target gains <c>superseded_at</c>, the other two are
+	/// untouched (the different-path row stays visible; the pre-superseded row keeps its
+	/// ORIGINAL timestamp), and the total row count is unchanged. Reverting the method body to
+	/// a no-op, or dropping its <c>relative_path = $1</c> targeting, fails this test.
+	/// </summary>
+	[Fact]
+	public async Task SupersedeCatalogDocumentRowAsync_StrayCatalogDocumentRow_SupersedesThatRowOnlyNeverDeletesOrTouchesOthers()
+	{
+		string catalogDocPath = $"PROD/metadata/productVersionCatalog/v1/productVersionCatalog-{Guid.NewGuid():N}.json";
+		string otherPath = $"PROD/COMP/VCENTER/other-{Guid.NewGuid():N}.iso";
+		string preSupersededPath = $"PROD/metadata/stale-{Guid.NewGuid():N}.json";
+
+		// The stray catalog-document row: NULL product, NULL version (metadata carries neither).
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(catalogDocPath, "sha-stray", "indexed", "{}"), CancellationToken.None);
+		// A DIFFERENT path, also NULL/NULL -- left alone (targeting is by path, not a blanket null filter).
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(otherPath, "sha-other", "indexed", "{}"), CancellationToken.None);
+		// An already-superseded NULL/NULL row at a third path -- its original timestamp must not be rewritten.
+		Guid preId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(preSupersededPath, "sha-pre", "indexed", "{}"), CancellationToken.None);
+		DateTime preSupersededAt;
+		await using (NpgsqlConnection seed = new(_fixture.ConnectionString))
+		{
+			await seed.OpenAsync();
+			await using NpgsqlCommand mark = new(
+				"UPDATE depot_artifacts SET superseded_at = now() - interval '1 day' WHERE id = $1 RETURNING superseded_at", seed);
+			mark.Parameters.AddWithValue(preId);
+			preSupersededAt = (DateTime)(await mark.ExecuteScalarAsync())!;
+		}
+
+		long before = await CountAllRowsAsync();
+
+		bool superseded = await _repository.SupersedeCatalogDocumentRowAsync(catalogDocPath, CancellationToken.None);
+
+		Assert.True(superseded);
+		Assert.NotNull(await SupersededAtForPathAsync(catalogDocPath)); // target marked superseded
+		Assert.Null(await SupersededAtForPathAsync(otherPath));         // different path untouched, still visible
+		Assert.Equal(preSupersededAt, await SupersededAtForPathAsync(preSupersededPath)); // original timestamp preserved
+		Assert.Equal(before, await CountAllRowsAsync());               // supersede-only: no delete
+	}
+
+	/// <summary>
+	/// Issue #797, Finding 1: the method's <c>AND product IS NULL AND version IS NULL</c> guard
+	/// means a LEGITIMATE row at the catalog-document path (real product/version -- the shape a
+	/// correct pull could one day write there) is never superseded. The
+	/// <c>depot_artifacts_relative_path_key</c> UNIQUE constraint forbids a legit and a stray
+	/// row sharing one path at once, so this invariant is pinned as its own fixture rather than
+	/// folded into the stray test above. Dropping the product/version predicate from the WHERE
+	/// clause supersedes this row and fails this test.
+	/// </summary>
+	[Fact]
+	public async Task SupersedeCatalogDocumentRowAsync_LegitimateRowAtCatalogPath_LeavesItUntouched()
+	{
+		string catalogDocPath = $"PROD/metadata/productVersionCatalog/v1/productVersionCatalog-{Guid.NewGuid():N}.json";
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(catalogDocPath, "sha-legit", "present", """{"product":"VCENTER","version":"8.0.3"}"""),
+			CancellationToken.None);
+
+		bool superseded = await _repository.SupersedeCatalogDocumentRowAsync(catalogDocPath, CancellationToken.None);
+
+		Assert.False(superseded);
+		Assert.Null(await SupersededAtForPathAsync(catalogDocPath));
+	}
+
+	/// <summary>
+	/// Issue #797, Finding 1: the <c>superseded_at IS NULL</c> guard makes a second call a
+	/// no-op -- the already-superseded row keeps its ORIGINAL timestamp rather than being
+	/// re-stamped, and the method returns false (nothing left to reconcile). Proves the
+	/// per-pull retry the handler relies on is idempotent. Dropping the
+	/// <c>superseded_at IS NULL</c> predicate makes the second call rewrite the timestamp and
+	/// return true, failing this test.
+	/// </summary>
+	[Fact]
+	public async Task SupersedeCatalogDocumentRowAsync_AlreadySuperseded_IsANoOpAndPreservesTheOriginalTimestamp()
+	{
+		string catalogDocPath = $"PROD/metadata/productVersionCatalog/v1/productVersionCatalog-{Guid.NewGuid():N}.json";
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(catalogDocPath, "sha-stray", "indexed", "{}"), CancellationToken.None);
+
+		Assert.True(await _repository.SupersedeCatalogDocumentRowAsync(catalogDocPath, CancellationToken.None));
+		DateTime? first = await SupersededAtForPathAsync(catalogDocPath);
+		Assert.NotNull(first);
+
+		Assert.False(await _repository.SupersedeCatalogDocumentRowAsync(catalogDocPath, CancellationToken.None));
+		Assert.Equal(first, await SupersededAtForPathAsync(catalogDocPath));
+	}
+
+	private async Task<DateTime?> SupersededAtForPathAsync(string relativePath)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT superseded_at FROM depot_artifacts WHERE relative_path = $1", connection);
+		command.Parameters.AddWithValue(relativePath);
+		object? value = await command.ExecuteScalarAsync().ConfigureAwait(false);
+		return value is null or DBNull ? null : (DateTime)value;
+	}
+
+	private async Task<long> CountAllRowsAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT count(*) FROM depot_artifacts", connection);
+		return (long)(await command.ExecuteScalarAsync().ConfigureAwait(false))!;
+	}
+
 	private static async Task<string> ReadMigrationSqlAsync(string fileName)
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;

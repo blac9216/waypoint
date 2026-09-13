@@ -212,6 +212,9 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			inner.ListAsync(filter, page, cancellationToken);
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) =>
+			inner.SupersedeCatalogDocumentRowAsync(catalogDocumentRelativePath, cancellationToken);
 	}
 
 	/// <summary>

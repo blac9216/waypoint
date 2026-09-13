@@ -226,6 +226,9 @@ public sealed class CatalogPullThenSweepReconciliationTests : IAsyncLifetime, ID
 
 		public Task<(IReadOnlyList<DepotArtifact> Items, long TotalCount)> ListAsync(DepotArtifactFilter filter, PageRequest page, CancellationToken cancellationToken) =>
 			inner.ListAsync(filter, page, cancellationToken);
+
+		public Task<bool> SupersedeCatalogDocumentRowAsync(string catalogDocumentRelativePath, CancellationToken cancellationToken) =>
+			inner.SupersedeCatalogDocumentRowAsync(catalogDocumentRelativePath, cancellationToken);
 	}
 
 	/// <summary>Drives the real handler for the "pull" half of the scenario, standing in only for the vendor tool process and signature authentication (neither affects catalog identity). <paramref name="artifacts"/> defaults to the real repository -- overridable so a test can wrap it (e.g. <see cref="CountingArtifactRepository"/>).</summary>
