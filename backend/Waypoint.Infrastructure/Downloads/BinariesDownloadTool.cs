@@ -367,24 +367,45 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 			// slow read, that the BinariesDownloadTimeout can't rescue since the process
 			// itself is stuck, not just uncooperative. Reading concurrently with (not
 			// after) the wait is the standard fix.
-			Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-			Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+			// Cancelled by linkedSource.Token, not the caller's outer cancellationToken:
+			// the tool's own BinariesDownloadTimeout must be able to unblock a read that
+			// is otherwise waiting on a child that never closes its pipes (issue #1672).
+			Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(linkedSource.Token);
+			Task<string> stderrTask = process.StandardError.ReadToEndAsync(linkedSource.Token);
 
 			try
 			{
+				// The reads are awaited INSIDE this same try -- not only
+				// WaitForExitAsync -- so a timeout/cancellation that fires while a
+				// process has already exited but a reader is still draining a large
+				// trailing buffer (or, per issue #1672, is stuck entirely, e.g. an
+				// orphaned grandchild still holding the pipe's write end open past the
+				// parent's own exit) is caught by the same handler below, instead of
+				// escaping as an unhandled OperationCanceledException.
 				await process.WaitForExitAsync(linkedSource.Token).ConfigureAwait(false);
+				string stdout = await stdoutTask.ConfigureAwait(false);
+				string stderr = await stderrTask.ConfigureAwait(false);
+				return (true, process.ExitCode, stdout, stderr);
 			}
 			catch (OperationCanceledException)
 			{
 				TryKill(process);
-				bool timedOut = timeoutSource.IsCancellationRequested;
-				return (false, -1, string.Empty,
-					timedOut ? $"did not complete within {options.BinariesDownloadTimeout}" : "cancelled");
-			}
 
-			string stdout = await stdoutTask.ConfigureAwait(false);
-			string stderr = await stderrTask.ConfigureAwait(false);
-			return (true, process.ExitCode, stdout, stderr);
+				// Neither reader task is guaranteed observed otherwise, so the `using
+				// (process)` below would dispose the Process -- closing the redirected
+				// streams -- while a read is still pending (issue #1672). Await both
+				// defensively (they fault or complete promptly once the process is killed
+				// and its pipes close) and surface whatever partial output they captured.
+				string partialStdout = await AwaitPartialOutputAsync(stdoutTask).ConfigureAwait(false);
+				string partialStderr = await AwaitPartialOutputAsync(stderrTask).ConfigureAwait(false);
+				string partialOutput = string.IsNullOrEmpty(partialStdout) && string.IsNullOrEmpty(partialStderr)
+					? string.Empty
+					: $" (partial stdout: {Truncate(partialStdout)}; partial stderr: {Truncate(partialStderr)})";
+
+				bool timedOut = timeoutSource.IsCancellationRequested;
+				string reason = timedOut ? $"did not complete within {options.BinariesDownloadTimeout}" : "cancelled";
+				return (false, -1, string.Empty, reason + partialOutput);
+			}
 		}
 	}
 
@@ -404,4 +425,22 @@ public sealed class BinariesDownloadTool : IBinariesDownloadTool
 	}
 
 	private static string Truncate(string text) => text.Length <= 500 ? text : text[..500] + "...";
+
+	/// <summary>
+	/// Awaits a pipe-reader task that may be cancelled or faulted by the process having
+	/// been killed out from under it, returning whatever it captured (or empty) instead of
+	/// throwing -- so the caller can safely dispose the <see cref="Process"/> immediately
+	/// afterward with nothing left pending on it (issue #1672).
+	/// </summary>
+	private static async Task<string> AwaitPartialOutputAsync(Task<string> readerTask)
+	{
+		try
+		{
+			return await readerTask.ConfigureAwait(false);
+		}
+		catch (Exception exception) when (exception is OperationCanceledException or IOException or ObjectDisposedException)
+		{
+			return string.Empty;
+		}
+	}
 }
