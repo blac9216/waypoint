@@ -348,7 +348,39 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		}
 		finally
 		{
-			TryDeleteDirectory(stagingRoot);
+			// Issue #1671: stagingRoot held the decrypted Activation Code
+			// (activation-code.txt, above) -- a failed cleanup here strands a
+			// plaintext secret on disk, so it is worth a warning naming the path.
+			if (!TryDeleteDirectory(stagingRoot))
+			{
+				await TryEmitCleanupFailureWarningAsync(context, stagingRoot, cancellationToken).ConfigureAwait(false);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Issue #1671: <see cref="TryDeleteDirectory"/> cleanup failures were previously
+	/// silent (caught and discarded), stranding a decrypted secret with no signal to
+	/// anyone. Emits a warning-severity job-log event naming the path -- never the
+	/// secret's contents, which never appear here -- and is itself best-effort: a
+	/// failure to emit the warning must never mask the job's already-determined
+	/// outcome or a propagating exception from the caller's try/finally. Mirrors
+	/// <c>BinariesDownloadJobHandler</c>'s identical helper.
+	/// </summary>
+	private static async Task TryEmitCleanupFailureWarningAsync(JobExecutionContext context, string path, CancellationToken cancellationToken)
+	{
+		try
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				severity = "warning",
+				line = $"Failed to remove secret-staging directory during cleanup; a decrypted secret may remain on disk at {path}.",
+			});
+			await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception)
+		{
+			// Best-effort diagnostic only -- see doc comment above.
 		}
 	}
 
@@ -480,7 +512,15 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		await writer.WriteAsync(contents.AsMemory(), cancellationToken).ConfigureAwait(false);
 	}
 
-	private static void TryDeleteDirectory(string path)
+	/// <summary>
+	/// Best-effort directory removal. Returns <c>true</c> when the path no longer
+	/// exists afterward (including when it never existed), <c>false</c> when an
+	/// <see cref="IOException"/> or <see cref="UnauthorizedAccessException"/> left it
+	/// behind -- issue #1671: the caller decides whether a <c>false</c> result is
+	/// worth a warning (it is, since <c>stagingRoot</c> held a decrypted secret),
+	/// rather than this helper swallowing the failure with no signal.
+	/// </summary>
+	private static bool TryDeleteDirectory(string path)
 	{
 		try
 		{
@@ -488,15 +528,16 @@ public sealed class CatalogPullJobHandler : IJobHandler
 			{
 				Directory.Delete(path, recursive: true);
 			}
+
+			return true;
 		}
 		catch (IOException)
 		{
-			// Best-effort cleanup only, matching DepotEnrollmentJobHandler's
-			// TryDelete convention -- a stray staging directory does not change a
-			// job's already-recorded outcome, but cleanup is always attempted.
+			return false;
 		}
 		catch (UnauthorizedAccessException)
 		{
+			return false;
 		}
 	}
 }

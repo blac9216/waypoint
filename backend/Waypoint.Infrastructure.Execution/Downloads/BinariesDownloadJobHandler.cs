@@ -275,8 +275,43 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		}
 		finally
 		{
-			TryDeleteDirectory(stagingRoot);
-			TryDeleteDirectory(identityHome);
+			// Issue #1671: stagingRoot held the decrypted Activation Code
+			// (activation-code.txt, above) -- a failed cleanup here strands a
+			// plaintext secret on disk, so it is worth a warning naming the path.
+			// identityHome holds only the non-secret derived asset_id, but is
+			// warned on too so the two directories do not drift in observability.
+			if (!TryDeleteDirectory(stagingRoot))
+			{
+				await TryEmitCleanupFailureWarningAsync(context, stagingRoot, holdsSecret: true, cancellationToken).ConfigureAwait(false);
+			}
+
+			if (!TryDeleteDirectory(identityHome))
+			{
+				await TryEmitCleanupFailureWarningAsync(context, identityHome, holdsSecret: false, cancellationToken).ConfigureAwait(false);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Issue #1671: <see cref="TryDeleteDirectory"/> cleanup failures were previously
+	/// silent (caught and discarded), stranding a decrypted secret with no signal to
+	/// anyone. Emits a warning-severity job-log event naming the path -- never the
+	/// secret's contents, which never appear here -- and is itself best-effort: a
+	/// failure to emit the warning must never mask the job's already-determined
+	/// outcome or a propagating exception from the caller's try/finally.
+	/// </summary>
+	private static async Task TryEmitCleanupFailureWarningAsync(JobExecutionContext context, string path, bool holdsSecret, CancellationToken cancellationToken)
+	{
+		try
+		{
+			string line = holdsSecret
+				? $"Failed to remove secret-staging directory during cleanup; a decrypted secret may remain on disk at {path}."
+				: $"Failed to remove job-scoped identity directory during cleanup: {path}.";
+			await EmitLogAsync(context, "warning", line, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception)
+		{
+			// Best-effort diagnostic only -- see doc comment above.
 		}
 	}
 
@@ -517,7 +552,15 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 		await writer.WriteAsync(contents.AsMemory(), cancellationToken).ConfigureAwait(false);
 	}
 
-	private static void TryDeleteDirectory(string path)
+	/// <summary>
+	/// Best-effort directory removal. Returns <c>true</c> when the path no longer
+	/// exists afterward (including when it never existed), <c>false</c> when an
+	/// <see cref="IOException"/> or <see cref="UnauthorizedAccessException"/> left it
+	/// behind -- issue #1671: the caller decides whether a <c>false</c> result is
+	/// worth a warning (it is, when the directory held a decrypted secret), rather
+	/// than this helper swallowing the failure with no signal.
+	/// </summary>
+	private static bool TryDeleteDirectory(string path)
 	{
 		try
 		{
@@ -525,15 +568,16 @@ public sealed class BinariesDownloadJobHandler : IJobHandler
 			{
 				Directory.Delete(path, recursive: true);
 			}
+
+			return true;
 		}
 		catch (IOException)
 		{
-			// Best-effort cleanup only, matching CatalogPullJobHandler's identical
-			// convention -- a stray staging/identity directory is not a correctness
-			// issue once the job's outcome is recorded.
+			return false;
 		}
 		catch (UnauthorizedAccessException)
 		{
+			return false;
 		}
 	}
 

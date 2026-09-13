@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Catalog;
@@ -21,6 +22,7 @@ using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Downloads;
@@ -84,14 +86,27 @@ public sealed class BinariesDownloadJobHandlerTests
 		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
 	}
 
+	/// <summary>Issue #1671: captures every emitted event so a test can assert on the payload a cleanup-failure warning produces.</summary>
+	private sealed class RecordingEventPublisher : IJobEventPublisher
+	{
+		public List<(string EventType, Guid? JobId, Guid? RunId, string PayloadJson)> Emitted { get; } = [];
+
+		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken)
+		{
+			Emitted.Add((eventType, jobId, runId, payloadJson));
+			return Task.CompletedTask;
+		}
+	}
+
 	private static JobExecutionContext ContextFor(
-		string payload = "{\"depot_artifact_id\":\"00000000-0000-0000-0000-000000000001\",\"external_id\":\"vcf-bundle-01\",\"bundle_id\":\"b1\"}")
+		string payload = "{\"depot_artifact_id\":\"00000000-0000-0000-0000-000000000001\",\"external_id\":\"vcf-bundle-01\",\"bundle_id\":\"b1\"}",
+		IJobEventPublisher? events = null)
 	{
 		ClaimedJob job = new(
 			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), JobType: RunTypes.BinariesDownload, TargetId: null, TargetName: "vcf-bundle-01",
 			CredentialId: null, Priority: 1, Payload: payload, AttemptCount: 1, MaxAttempts: 3);
 		return new JobExecutionContext(
-			job, "worker-test", new FakeEventPublisher(),
+			job, "worker-test", events ?? new FakeEventPublisher(),
 			new JobQueueRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x", NullLogger<JobQueueRepository>.Instance),
 			JobShape.Simple);
 	}
@@ -202,5 +217,77 @@ public sealed class BinariesDownloadJobHandlerTests
 	{
 		BinariesDownloadJobHandler handler = CreateHandler(null);
 		Assert.Equal("binaries-download", handler.JobType);
+	}
+
+	/// <summary>
+	/// Issue #1671: pre-fix, <c>TryDeleteDirectory</c> was <c>void</c> and swallowed
+	/// <see cref="UnauthorizedAccessException"/> with no signal, so a failed cleanup
+	/// of the staging root that held the decrypted Activation Code was invisible.
+	/// Forces a real deletion failure (a directory whose parent has no write
+	/// permission cannot have an entry unlinked from it, even as root's own
+	/// unprivileged test process) and asserts the helper now reports it.
+	/// </summary>
+	[Fact]
+	public void TryDeleteDirectory_ParentNotWritable_ReturnsFalseRatherThanSwallowingTheFailure()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		if (RootPrecondition.IsRoot())
+		{
+			// An unwritable directory is not achievable running as root -- skipped
+			// cleanly rather than asserting something that would not hold.
+			return;
+		}
+
+		string baseDir = Directory.CreateTempSubdirectory("waypoint-1671-").FullName;
+		string parent = Path.Combine(baseDir, "parent");
+		string target = Path.Combine(parent, "secret-staging");
+		Directory.CreateDirectory(target);
+		UnixFileMode originalParentMode = File.GetUnixFileMode(parent);
+		File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+		try
+		{
+			MethodInfo method = typeof(BinariesDownloadJobHandler).GetMethod(
+				"TryDeleteDirectory", BindingFlags.NonPublic | BindingFlags.Static, [typeof(string)])!;
+
+			bool result = (bool)method.Invoke(null, [target])!;
+
+			Assert.False(result);
+			Assert.True(Directory.Exists(target));
+		}
+		finally
+		{
+			File.SetUnixFileMode(parent, originalParentMode);
+			Directory.Delete(baseDir, recursive: true);
+		}
+	}
+
+	/// <summary>
+	/// Issue #1671 AC: "A cleanup failure on a staging root that held a decrypted
+	/// secret produces a warning that names the path." Asserts the warning-severity
+	/// job-log event carries the path but never a secret value (none is ever passed
+	/// to this helper, by construction -- it only ever sees the path).
+	/// </summary>
+	[Fact]
+	public async Task TryEmitCleanupFailureWarningAsync_HoldsSecret_EmitsWarningJobLogNamingThePath()
+	{
+		RecordingEventPublisher events = new();
+		JobExecutionContext context = ContextFor(events: events);
+		const string path = "/tmp/waypoint-test/binaries-download-staging/job-deadbeef";
+
+		MethodInfo method = typeof(BinariesDownloadJobHandler).GetMethod(
+			"TryEmitCleanupFailureWarningAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
+		await (Task)method.Invoke(null, [context, path, true, CancellationToken.None])!;
+
+		(string eventType, Guid? jobId, Guid? runId, string payloadJson) = Assert.Single(events.Emitted);
+		Assert.Equal(JobEventTypes.JobLog, eventType);
+		Assert.Equal(context.Job.Id, jobId);
+		Assert.Equal(context.Job.RunId, runId);
+		Assert.Contains("\"severity\":\"warning\"", payloadJson);
+		Assert.Contains(path, payloadJson);
+		Assert.Contains("secret", payloadJson, StringComparison.OrdinalIgnoreCase);
 	}
 }
