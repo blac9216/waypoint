@@ -239,6 +239,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	/// <summary>
@@ -376,6 +377,12 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 			"SELECT count(*) FROM jobs WHERE target_id = $1 AND job_type = 'binaries-download'", connection);
 		jobCount.Parameters.AddWithValue(artifact);
 		Assert.Equal(0L, (long)(await jobCount.ExecuteScalarAsync())!);
+
+		// Issue #1836: the "...AndCreatesNoRun" half of this test's own name was never
+		// asserted -- only the absence of a fanned-out job. Reverting the 409 throw to
+		// after CreateRunAsync would still leave zero jobs (nothing to fan out against)
+		// but WOULD leave an orphan `runs` row; this closes that gap.
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	/// <summary>
@@ -498,6 +505,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	[Fact]
@@ -512,6 +520,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	/// <summary>
@@ -578,6 +587,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	/// <summary>Both selection modes supplied together is ambiguous too -- rejected rather than silently preferring one.</summary>
@@ -600,6 +610,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		Assert.Equal(0L, await GetRunCountAsync());
 	}
 
 	[Theory]
@@ -1004,6 +1015,23 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		return await _artifacts.UpsertAsync(
 			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", "{}"),
 			CancellationToken.None);
+	}
+
+	/// <summary>
+	/// Issues #1607/#1836: the "no run created on rejection" invariant claimed by
+	/// several of the tests above is checked here directly against the `runs` table
+	/// rather than only via the absence of a `jobs` row -- a future change that created
+	/// the run before the rejecting validation would leave an orphan `runs` row that no
+	/// existing `jobs`-only assertion would ever catch. The fixture resets the job-engine
+	/// tables (including `runs`) at the top of every test (<see cref="InitializeAsync"/>),
+	/// so a bare total count is an unambiguous "this request created zero runs".
+	/// </summary>
+	private async Task<long> GetRunCountAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT count(*) FROM runs", connection);
+		return (long)(await command.ExecuteScalarAsync())!;
 	}
 
 	private async Task<(string DownloadId, string RunId)> QueueDownloadAsync(Guid artifactId)
