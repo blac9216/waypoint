@@ -348,6 +348,11 @@ public sealed class EndpointRoleMatrixTests
 		["RetentionPolicyController.Get"] = WaypointRole.Admin,
 		["RetentionPolicyController.Put"] = WaypointRole.Admin,
 
+		// DiskAdmissionPolicyController -- issue #1531 (epic #1180, split from #1042):
+		// mirrors RetentionPolicyController's floor exactly, both verbs Admin-only.
+		["DiskAdmissionPolicyController.Get"] = WaypointRole.Admin,
+		["DiskAdmissionPolicyController.Put"] = WaypointRole.Admin,
+
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by
 		// ScheduleJobTypes.RequiredRole -- see class doc comment and Schedule.cs.

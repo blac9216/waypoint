@@ -131,7 +131,11 @@ public sealed class DiskAdmissionPolicyControllerTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Assert.True(document.RootElement.GetProperty("reserve_bytes").GetInt64() > 0);
-		Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("updated_by").ValueKind);
+		// The API's global JSON options omit a null-valued field entirely rather than
+		// emitting it as `null` (see docs/reference/api-contract.md's "Null-valued
+		// fields are omitted, not null" convention) -- absence of the property IS the
+		// "never changed by an Admin" signal, not a JsonValueKind.Null value.
+		Assert.False(document.RootElement.TryGetProperty("updated_by", out _));
 	}
 
 	[Fact]
