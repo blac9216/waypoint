@@ -84,6 +84,23 @@ now (a) set equality between the `.sql` files on disk and the versions recorded 
 `schema_migrations` after a fresh apply, and (b) duplicate-prefix detection. There is no
 counter to bump when adding a migration. Full scheme: `docs/reference/schema-migrations.md`.
 
+## Constraint-drift guard convention
+Every `*ConstraintDriftTests` class that parses a closed-vocabulary CHECK constraint's
+`IN (...)` value list out of migration SQL does so through the shared, table-scoped
+`Waypoint.Tests.Support.ConstraintDriftScan` helper (issue #1814) rather than a private
+regex — a private copy cannot be table-scoped for free, and one already produced a
+cross-table misread before the helper existed (PR #1832). `ConstraintDriftScanTests`'
+sibling, `ConstraintDriftScanConventionTests` (issue #1877), enumerates every
+`*ConstraintDriftTests` type in the test assembly and its own source file and fails if
+one parses a CHECK IN-list independently, against a stated, exhaustive allowlist for the
+genuinely different shapes: `ContentLibraryFoldersConstraintDriftTests` (a UNIQUE
+constraint/index existence check, not a CHECK value list), `DepotRelativePathsConstraintDriftTests`
+(a PowerShell `$Script:` module-scoped variable, no SQL involved),
+`ConsumerViewConstraintDriftTests` (resolves a CHECK constraint's/index's NAME to prove
+an error-mapping guard, not its value set), and `ContentLibraryItemsConstraintDriftTests`
+(asserts one named migration file's literal DDL text, not a "latest across all
+migrations" resolved value list, so no ordering hazard applies).
+
 ## Isolation on a shared host
 Every bring-up uses its own Compose project name (`-p <slug>`) and host port well away from 8443; verify isolation before trusting a result; `down -v` when done. Docker cannot see `/tmp` — bind mounts live under `/workspaces`. Full recipe: ../how-to/testing.md §The recipe.
 
