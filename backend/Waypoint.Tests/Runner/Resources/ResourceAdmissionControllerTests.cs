@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.SystemState;
 using Waypoint.Runner.Resources;
 using Xunit;
 
@@ -390,6 +391,88 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 		bool admitted = controller.TryAdmit(Guid.NewGuid(), "scan", scanComponentTransport: null);
 		Assert.True(admitted);
 		Assert.Equal(1, controller.AdmittedJobCount);
+	}
+
+	/// <summary>Issue #1534: a fake single-store <see cref="IArtifactStoreDiskUsageProvider"/> reporting a fixed free-bytes figure, for the disk-axis admission tests below.</summary>
+	private sealed class FakeDiskUsageProvider(long freeBytes) : IArtifactStoreDiskUsageProvider
+	{
+		public IReadOnlyList<ArtifactStoreUsage> GetUsage() =>
+			[new ArtifactStoreUsage(ArtifactStoreNames.Default, "/var/lib/waypoint/artifacts", freeBytes * 2, freeBytes, freeBytes)];
+	}
+
+	private ResourceAdmissionController CreateControllerWithDiskBudget(long freeBytes, RunnerResourceOptions? options = null)
+	{
+		RunnerResourceOptions effective = options ?? new RunnerResourceOptions();
+		effective.CgroupRoot = _emptyCgroupRoot;
+		CgroupResourceDiscovery discovery = new(Options.Create(effective), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance);
+		return new ResourceAdmissionController(Options.Create(effective), discovery, NullLogger<ResourceAdmissionController>.Instance, TimeProvider.System, new FakeDiskUsageProvider(freeBytes));
+	}
+
+	/// <summary>
+	/// Issue #1534 AC3: a job that fits comfortably on CPU and memory is still denied
+	/// once its disk-bytes profile would push the tracked disk sum past the effective
+	/// disk budget (here, the depot store's reported free bytes) -- the third axis is
+	/// independently enforced, not inferred from the other two.
+	/// </summary>
+	[Fact]
+	public void DiskBudgetExhausted_DeniesAdmissionEvenWithCpuAndMemoryHeadroom()
+	{
+		ResourceAdmissionController controller = CreateControllerWithDiskBudget(
+			freeBytes: 4L * 1024 * 1024 * 1024, // Exactly one "download" (4 GiB) worth of disk.
+			new RunnerResourceOptions { FallbackCpuCores = 16.0, FallbackMemoryBytes = 16L * 1024 * 1024 * 1024 });
+
+		Assert.True(controller.TryAdmit(Guid.NewGuid(), "download"));
+		// CPU/memory have vast headroom left, but the 4 GiB disk budget is now exhausted.
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "download"));
+	}
+
+	[Fact]
+	public void DiskBudgetExhausted_ReleaseFreesDiskBudgetForASubsequentAdmission()
+	{
+		ResourceAdmissionController controller = CreateControllerWithDiskBudget(
+			freeBytes: 4L * 1024 * 1024 * 1024,
+			new RunnerResourceOptions { FallbackCpuCores = 16.0, FallbackMemoryBytes = 16L * 1024 * 1024 * 1024 });
+
+		Guid jobId = Guid.NewGuid();
+		Assert.True(controller.TryAdmit(jobId, "download"));
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "download"));
+
+		controller.Release(jobId);
+
+		Assert.Equal(0, controller.AdmittedDiskBytes);
+		Assert.True(controller.TryAdmit(Guid.NewGuid(), "download"));
+	}
+
+	[Fact]
+	public void EffectiveDiskBudget_IsMinOfLiveFreeBytesAndOperatorCap()
+	{
+		ResourceAdmissionController controller = CreateControllerWithDiskBudget(
+			freeBytes: 100L * 1024 * 1024 * 1024,
+			new RunnerResourceOptions
+			{
+				FallbackCpuCores = 16.0,
+				FallbackMemoryBytes = 16L * 1024 * 1024 * 1024,
+				MaxDiskBytes = 10L * 1024 * 1024 * 1024, // Binding constraint, well below the live 100 GiB free.
+			});
+
+		Assert.Equal(10L * 1024 * 1024 * 1024, controller.EffectiveDiskBudgetBytes);
+	}
+
+	[Fact]
+	public void NoDiskUsageProviderSupplied_LeavesDiskAxisUnboundedForBackwardCompatibility()
+	{
+		// The 3-arg public constructor (every pre-#1534 caller/test) must keep admitting
+		// on CPU/memory alone -- no IArtifactStoreDiskUsageProvider means no live free-
+		// bytes reading exists to bound the disk axis against.
+		ResourceAdmissionController controller = CreateController(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 16.0,
+			FallbackMemoryBytes = 16L * 1024 * 1024 * 1024,
+		});
+
+		Assert.Equal(long.MaxValue, controller.EffectiveDiskBudgetBytes);
+		Assert.True(controller.TryAdmit(Guid.NewGuid(), "download"));
+		Assert.True(controller.TryAdmit(Guid.NewGuid(), "download"));
 	}
 
 	private sealed class ManualTimeProvider : TimeProvider

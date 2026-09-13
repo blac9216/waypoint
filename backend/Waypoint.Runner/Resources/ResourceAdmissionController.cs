@@ -16,6 +16,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 
 namespace Waypoint.Runner.Resources;
 
@@ -65,12 +66,31 @@ public sealed partial class ResourceAdmissionController
 	private readonly TimeProvider _timeProvider;
 	private double _admittedCpuCores;
 	private long _admittedMemoryBytes;
+	private long _admittedDiskBytes;
 
 	public ResourceAdmissionController(
 		IOptions<RunnerResourceOptions> resourceOptions,
 		CgroupResourceDiscovery discovery,
 		ILogger<ResourceAdmissionController> logger)
-		: this(resourceOptions, discovery, logger, TimeProvider.System)
+		: this(resourceOptions, discovery, logger, TimeProvider.System, diskUsage: null)
+	{
+	}
+
+	/// <summary>
+	/// Issue #1534 (per #1033's ADR consequence "disk joins CPU/memory in resource
+	/// admission"): overload additionally resolving <paramref name="diskUsage"/> so
+	/// <see cref="EffectiveDiskBudgetBytes"/> is derived from the depot store's live free
+	/// bytes rather than left unbounded. DI (<c>services.AddSingleton&lt;ResourceAdmissionController&gt;()</c>)
+	/// prefers this constructor automatically once an
+	/// <see cref="IArtifactStoreDiskUsageProvider"/> is registered, because the container
+	/// picks the public constructor with the most resolvable parameters.
+	/// </summary>
+	public ResourceAdmissionController(
+		IOptions<RunnerResourceOptions> resourceOptions,
+		CgroupResourceDiscovery discovery,
+		ILogger<ResourceAdmissionController> logger,
+		IArtifactStoreDiskUsageProvider diskUsage)
+		: this(resourceOptions, discovery, logger, TimeProvider.System, diskUsage)
 	{
 	}
 
@@ -78,13 +98,14 @@ public sealed partial class ResourceAdmissionController
 	/// Issue #467 test seam: lets <see cref="ResourceAdmissionControllerTests"/> control
 	/// the clock the denial-warning rate limiter reads, rather than sleeping real time to
 	/// exercise the "warn again after the interval elapses" branch. Production callers
-	/// always resolve the public constructor above (<see cref="TimeProvider.System"/>).
+	/// always resolve one of the public constructors above (<see cref="TimeProvider.System"/>).
 	/// </summary>
 	internal ResourceAdmissionController(
 		IOptions<RunnerResourceOptions> resourceOptions,
 		CgroupResourceDiscovery discovery,
 		ILogger<ResourceAdmissionController> logger,
-		TimeProvider timeProvider)
+		TimeProvider timeProvider,
+		IArtifactStoreDiskUsageProvider? diskUsage = null)
 	{
 		ArgumentNullException.ThrowIfNull(resourceOptions);
 		ArgumentNullException.ThrowIfNull(discovery);
@@ -103,7 +124,19 @@ public sealed partial class ResourceAdmissionController
 		Discovered = discovered;
 		EffectiveBudget = new HostResourceLimits(cpuCap, memoryCap, discovered.Source);
 
-		LogEffectiveBudget(discovered.Source, discovered.CpuCores, discovered.MemoryBytes, cpuCap, memoryCap);
+		// Issue #1534: unlike CPU/memory, disk is not cgroup-discovered -- it is the
+		// depot store's live free bytes at startup (via the same INamedDiskUsageProvider
+		// composite `/system` reports from), intersected with an optional operator cap.
+		// No diskUsage provider at all (the 3-arg public constructor, still used by every
+		// pre-#1534 caller and test) leaves the disk axis unbounded, so existing
+		// single-store admission behavior is unaffected until a caller opts in.
+		long? liveFreeBytes = diskUsage?.GetUsage()
+			.FirstOrDefault(store => string.Equals(store.Name, ArtifactStoreNames.Default, StringComparison.Ordinal))
+			?.FreeBytes;
+		long diskCap = options.MaxDiskBytes ?? long.MaxValue;
+		EffectiveDiskBudgetBytes = liveFreeBytes is { } freeBytes ? Math.Min(freeBytes, diskCap) : long.MaxValue;
+
+		LogEffectiveBudget(discovered.Source, discovered.CpuCores, discovered.MemoryBytes, cpuCap, memoryCap, EffectiveDiskBudgetBytes);
 	}
 
 	/// <summary>The raw discovery result (cgroup v2/v1/fallback), before operator caps are intersected in.</summary>
@@ -117,11 +150,22 @@ public sealed partial class ResourceAdmissionController
 	/// </summary>
 	public HostResourceLimits EffectiveBudget { get; }
 
+	/// <summary>
+	/// Issue #1534: the disk-bytes budget admission enforces, in bytes --
+	/// <c>min(depot store's live free bytes at startup, RunnerResourceOptions.MaxDiskBytes)</c>,
+	/// or <see cref="long.MaxValue"/> (effectively unbounded) when no
+	/// <see cref="IArtifactStoreDiskUsageProvider"/> was supplied at construction.
+	/// </summary>
+	public long EffectiveDiskBudgetBytes { get; }
+
 	/// <summary>CPU cores currently committed to admitted, still-running jobs.</summary>
 	public double AdmittedCpuCores { get { lock (_gate) { return _admittedCpuCores; } } }
 
 	/// <summary>Memory bytes currently committed to admitted, still-running jobs.</summary>
 	public long AdmittedMemoryBytes { get { lock (_gate) { return _admittedMemoryBytes; } } }
+
+	/// <summary>Disk bytes currently committed to admitted, still-running jobs (issue #1534).</summary>
+	public long AdmittedDiskBytes { get { lock (_gate) { return _admittedDiskBytes; } } }
 
 	/// <summary>How many jobs this controller currently considers admitted/running.</summary>
 	public int AdmittedJobCount => _running.Count;
@@ -171,25 +215,30 @@ public sealed partial class ResourceAdmissionController
 		{
 			double projectedCpu = _admittedCpuCores + profile.CpuCores;
 			long projectedMemory = _admittedMemoryBytes + profile.MemoryBytes;
+			long projectedDisk = _admittedDiskBytes + profile.DiskBytes;
 
-			if (projectedCpu > EffectiveBudget.CpuCores || projectedMemory > EffectiveBudget.MemoryBytes)
+			if (projectedCpu > EffectiveBudget.CpuCores || projectedMemory > EffectiveBudget.MemoryBytes || projectedDisk > EffectiveDiskBudgetBytes)
 			{
-				// Issue #467: "will never fit" (the profile alone exceeds the total
-				// effective budget on either axis) is a permanent misconfiguration --
-				// no amount of other jobs finishing ever frees enough room. "doesn't fit
-				// right now" (the profile would fit in isolation, but other admitted jobs
-				// are currently occupying the room) is transient and self-resolves once
-				// something releases. Both are worth operator visibility (issue #467's
-				// AC), but only the permanent case can never be fixed by waiting.
-				bool permanent = profile.CpuCores > EffectiveBudget.CpuCores || profile.MemoryBytes > EffectiveBudget.MemoryBytes;
+				// Issue #467 (extended by #1534 to the disk axis): "will never fit" (the
+				// profile alone exceeds the total effective budget on any axis) is a
+				// permanent misconfiguration -- no amount of other jobs finishing ever
+				// frees enough room. "doesn't fit right now" (the profile would fit in
+				// isolation, but other admitted jobs are currently occupying the room) is
+				// transient and self-resolves once something releases. Both are worth
+				// operator visibility (issue #467's AC), but only the permanent case can
+				// never be fixed by waiting.
+				bool permanent = profile.CpuCores > EffectiveBudget.CpuCores
+					|| profile.MemoryBytes > EffectiveBudget.MemoryBytes
+					|| profile.DiskBytes > EffectiveDiskBudgetBytes;
 				_starvedJobTypes[jobType] = new StarvedJobType(jobType, permanent);
-				MaybeLogAdmissionDenied(jobId, jobType, permanent, profile, EffectiveBudget.CpuCores, EffectiveBudget.MemoryBytes);
+				MaybeLogAdmissionDenied(jobId, jobType, permanent, profile, EffectiveBudget.CpuCores, EffectiveBudget.MemoryBytes, EffectiveDiskBudgetBytes);
 				return false;
 			}
 
 			_starvedJobTypes.TryRemove(jobType, out _);
 			_admittedCpuCores = projectedCpu;
 			_admittedMemoryBytes = projectedMemory;
+			_admittedDiskBytes = projectedDisk;
 			_running[jobId] = profile;
 			return true;
 		}
@@ -204,9 +253,9 @@ public sealed partial class ResourceAdmissionController
 	/// </summary>
 	public IReadOnlyList<StarvedJobType> StarvedJobTypes => [.. _starvedJobTypes.Values];
 
-	private void MaybeLogAdmissionDenied(Guid jobId, string jobType, bool permanent, JobResourceProfile profile, double budgetCpu, long budgetMemory)
+	private void MaybeLogAdmissionDenied(Guid jobId, string jobType, bool permanent, JobResourceProfile profile, double budgetCpu, long budgetMemory, long budgetDisk)
 	{
-		LogAdmissionDeniedDebug(jobId, jobType, profile.CpuCores, profile.MemoryBytes, _admittedCpuCores, _admittedMemoryBytes, budgetCpu, budgetMemory);
+		LogAdmissionDeniedDebug(jobId, jobType, profile.CpuCores, profile.MemoryBytes, profile.DiskBytes, _admittedCpuCores, _admittedMemoryBytes, _admittedDiskBytes, budgetCpu, budgetMemory, budgetDisk);
 
 		DateTimeOffset now = _timeProvider.GetUtcNow();
 		DateTimeOffset lastWarned = _lastDenialWarningAt.GetOrAdd(jobType, DateTimeOffset.MinValue);
@@ -219,11 +268,11 @@ public sealed partial class ResourceAdmissionController
 
 		if (permanent)
 		{
-			LogAdmissionPermanentlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, budgetCpu, budgetMemory);
+			LogAdmissionPermanentlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, profile.DiskBytes, budgetCpu, budgetMemory, budgetDisk);
 		}
 		else
 		{
-			LogAdmissionTransientlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, _admittedCpuCores, _admittedMemoryBytes, budgetCpu, budgetMemory);
+			LogAdmissionTransientlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, profile.DiskBytes, _admittedCpuCores, _admittedMemoryBytes, _admittedDiskBytes, budgetCpu, budgetMemory, budgetDisk);
 		}
 	}
 
@@ -242,25 +291,27 @@ public sealed partial class ResourceAdmissionController
 			{
 				_admittedCpuCores -= profile.CpuCores;
 				_admittedMemoryBytes -= profile.MemoryBytes;
+				_admittedDiskBytes -= profile.DiskBytes;
 			}
 		}
 	}
 
-	[LoggerMessage(Level = LogLevel.Information, Message = "Resource admission budget: source={Source}, discovered={DiscoveredCpu} cores / {DiscoveredMemory} bytes, effective (post-cap)={EffectiveCpu} cores / {EffectiveMemory} bytes")]
-	private partial void LogEffectiveBudget(HostResourceLimitSource source, double discoveredCpu, long discoveredMemory, double effectiveCpu, long effectiveMemory);
+	[LoggerMessage(Level = LogLevel.Information, Message = "Resource admission budget: source={Source}, discovered={DiscoveredCpu} cores / {DiscoveredMemory} bytes, effective (post-cap)={EffectiveCpu} cores / {EffectiveMemory} bytes / {EffectiveDisk} disk bytes")]
+	private partial void LogEffectiveBudget(HostResourceLimitSource source, double discoveredCpu, long discoveredMemory, double effectiveCpu, long effectiveMemory, long effectiveDisk);
 
-	[LoggerMessage(Level = LogLevel.Debug, Message = "Admission denied for job {JobId} ({JobType}): profile {ProfileCpu} cores / {ProfileMemory} bytes would push admitted {AdmittedCpu} cores / {AdmittedMemory} bytes past budget {BudgetCpu} cores / {BudgetMemory} bytes")]
-	private partial void LogAdmissionDeniedDebug(Guid jobId, string jobType, double profileCpu, long profileMemory, double admittedCpu, long admittedMemory, double budgetCpu, long budgetMemory);
+	[LoggerMessage(Level = LogLevel.Debug, Message = "Admission denied for job {JobId} ({JobType}): profile {ProfileCpu} cores / {ProfileMemory} bytes / {ProfileDisk} disk bytes would push admitted {AdmittedCpu} cores / {AdmittedMemory} bytes / {AdmittedDisk} disk bytes past budget {BudgetCpu} cores / {BudgetMemory} bytes / {BudgetDisk} disk bytes")]
+	private partial void LogAdmissionDeniedDebug(Guid jobId, string jobType, double profileCpu, long profileMemory, long profileDisk, double admittedCpu, long admittedMemory, long admittedDisk, double budgetCpu, long budgetMemory, long budgetDisk);
 
-	// Issue #467: Warning-level, rate-limited (DenialWarningInterval) per job type -- see
-	// MaybeLogAdmissionDenied. Two distinct messages so "will never fit" and "doesn't fit
-	// right now" read unambiguously in a log search rather than requiring the reader to
-	// interpret a shared "denied" line's numbers.
-	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' can never be admitted on this runner: its profile ({ProfileCpu} cores / {ProfileMemory} bytes) exceeds the total effective budget ({BudgetCpu} cores / {BudgetMemory} bytes). This is a permanent misconfiguration -- raise the operator resource cap/fallback or move this job type to a larger runner.")]
-	private partial void LogAdmissionPermanentlyStarved(string jobType, double profileCpu, long profileMemory, double budgetCpu, long budgetMemory);
+	// Issue #467 (extended by #1534 to the disk axis): Warning-level, rate-limited
+	// (DenialWarningInterval) per job type -- see MaybeLogAdmissionDenied. Two distinct
+	// messages so "will never fit" and "doesn't fit right now" read unambiguously in a
+	// log search rather than requiring the reader to interpret a shared "denied" line's
+	// numbers.
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' can never be admitted on this runner: its profile ({ProfileCpu} cores / {ProfileMemory} bytes / {ProfileDisk} disk bytes) exceeds the total effective budget ({BudgetCpu} cores / {BudgetMemory} bytes / {BudgetDisk} disk bytes). This is a permanent misconfiguration -- raise the operator resource cap/fallback or move this job type to a larger runner.")]
+	private partial void LogAdmissionPermanentlyStarved(string jobType, double profileCpu, long profileMemory, long profileDisk, double budgetCpu, long budgetMemory, long budgetDisk);
 
-	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' is being denied admission: its profile ({ProfileCpu} cores / {ProfileMemory} bytes) does not fit alongside {AdmittedCpu} cores / {AdmittedMemory} bytes already admitted, within budget {BudgetCpu} cores / {BudgetMemory} bytes. This is transient -- admission will resume once running jobs release enough budget.")]
-	private partial void LogAdmissionTransientlyStarved(string jobType, double profileCpu, long profileMemory, double admittedCpu, long admittedMemory, double budgetCpu, long budgetMemory);
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' is being denied admission: its profile ({ProfileCpu} cores / {ProfileMemory} bytes / {ProfileDisk} disk bytes) does not fit alongside {AdmittedCpu} cores / {AdmittedMemory} bytes / {AdmittedDisk} disk bytes already admitted, within budget {BudgetCpu} cores / {BudgetMemory} bytes / {BudgetDisk} disk bytes. This is transient -- admission will resume once running jobs release enough budget.")]
+	private partial void LogAdmissionTransientlyStarved(string jobType, double profileCpu, long profileMemory, long profileDisk, double admittedCpu, long admittedMemory, long admittedDisk, double budgetCpu, long budgetMemory, long budgetDisk);
 }
 
 /// <summary>

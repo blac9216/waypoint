@@ -56,6 +56,16 @@ public sealed class RunnerResourceOptions
 	public long? MaxMemoryBytes { get; set; }
 
 	/// <summary>
+	/// Issue #1534 (per #1033's ADR consequence "disk joins CPU/memory in resource
+	/// admission"): operator-configured disk-budget cap, in bytes. When set, the
+	/// effective disk budget is <c>min(liveFreeBytesAtStartup, this)</c> -- same
+	/// <c>min(discovered, cap)</c> intersection shape as <see cref="MaxCpuCores"/> and
+	/// <see cref="MaxMemoryBytes"/>, letting an operator reserve headroom below what the
+	/// depot store currently reports free.
+	/// </summary>
+	public long? MaxDiskBytes { get; set; }
+
+	/// <summary>
 	/// Root of the cgroup filesystem to read from. Defaults to the real mount; tests
 	/// point this at a fixture directory laid out like a cgroup v1 or v2 hierarchy so
 	/// cgroup parsing is exercised without depending on the test host's actual cgroup
