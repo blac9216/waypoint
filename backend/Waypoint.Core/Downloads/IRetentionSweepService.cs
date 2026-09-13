@@ -130,8 +130,19 @@ public sealed record RetentionSweepReport(
 	// Issue #1798: a manual/ad-hoc download whose scope policy's
 	// ManualDownloadRetentionDialResolver.SkipsAutoPrune dial (Keep or Review)
 	// exempted it from this pass's auto-prune, counted separately from
-	// OutOfScopeSkipped since it is a different skip reason.
-	int ManualDownloadDialSkipped = 0);
+	// OutOfScopeSkipped since it is a different skip reason. Issue #1863: this
+	// counter, and the dial gate it reports on, apply equally to a row the
+	// pending-purge revisit pass re-attempts, not only a row the grace pass
+	// currently holds.
+	int ManualDownloadDialSkipped = 0,
+	// Issue #1864(b): a caller-named ManualDownloadDepotArtifactIds id that matched
+	// no row this call visited (grace or pending-purge) -- reported so a caller can
+	// tell the dial had no decision to make for that id this pass, rather than
+	// inferring it from an absent counter bump. Most non-matches are legitimate (a
+	// row not yet in grace is simply not at a decision point yet), mirroring
+	// UntrackedCandidatesSkipped's own "reported, not silent" parity for
+	// SupersededOrOutOfWindowDepotArtifactIds.
+	int ManualDownloadCandidatesNotApplicable = 0);
 
 /// <summary>
 /// One <see cref="IRetentionSweepService.PurgeImmediatelyAsync"/> outcome.

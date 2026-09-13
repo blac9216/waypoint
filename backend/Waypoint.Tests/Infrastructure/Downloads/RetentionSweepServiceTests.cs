@@ -240,6 +240,33 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 			inner.ListAsync(cancellationToken);
 	}
 
+	/// <summary>
+	/// Wraps a real <see cref="IRetentionPolicyRepository"/> but reports the Default
+	/// scope's policy with <see cref="RetentionPolicy.ManualDownloadDialDefault"/>
+	/// replaced by <paramref name="driftedDialValue"/> -- lets a test force the
+	/// "manual_download_dial_default outside the three known wire values" defect
+	/// (issue #1864(a)) without needing to defeat migration 0107's own
+	/// <c>download_retention_policies_dial_check</c>, which makes a genuinely
+	/// drifted value impossible to persist in real Postgres.
+	/// </summary>
+	private sealed class DriftedDialPolicyRepository(IRetentionPolicyRepository inner, string driftedDialValue) : IRetentionPolicyRepository
+	{
+		public Task<Guid> UpsertAsync(string scopeKey, int gracePeriodDays, int graceMaxRefreshes, string manualDownloadDialDefault, CancellationToken cancellationToken) =>
+			inner.UpsertAsync(scopeKey, gracePeriodDays, graceMaxRefreshes, manualDownloadDialDefault, cancellationToken);
+
+		public Task<RetentionPolicy?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+			inner.GetAsync(id, cancellationToken);
+
+		public async Task<RetentionPolicy?> GetByScopeKeyAsync(string scopeKey, CancellationToken cancellationToken)
+		{
+			RetentionPolicy? policy = await inner.GetByScopeKeyAsync(scopeKey, cancellationToken);
+			return policy is null ? null : policy with { ManualDownloadDialDefault = driftedDialValue };
+		}
+
+		public Task<IReadOnlyList<RetentionPolicy>> ListAsync(CancellationToken cancellationToken) =>
+			inner.ListAsync(cancellationToken);
+	}
+
 	[Fact]
 	public async Task RunSweepAsync_TrackedCandidate_EntersGraceAndRaisesAlert()
 	{
@@ -907,6 +934,188 @@ public sealed class RetentionSweepServiceTests : IAsyncLifetime, IDisposable
 		// purge; otherwise the admin review list would keep offering a "delete
 		// out-of-scope content" action against content that no longer exists.
 		Assert.False(await reviewList.IsOutOfScopeAsync(artifactId, CancellationToken.None));
+	}
+
+	// -- Issue #1863: the pending-purge revisit pass is a second auto-prune decision
+	// point for a manual/ad-hoc download and must honor the dial exactly as the grace
+	// pass does, not silently re-purge a row the dial now protects.
+
+	[Fact]
+	public async Task RunSweepAsync_PendingPurgeManualDownloadKeepDial_IsNotRevisitPurged()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("pending-purge-manual-download-keep");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.PendingPurge, CancellationToken.None);
+		// Deliberately never write the depot file -- the row is already stuck at
+		// pending-purge from a prior failed delete, per issue #1661's own setup.
+
+		// The dial is now Keep -- set AFTER the row reached pending-purge, exactly
+		// the sequence issue #1863 describes: the scope policy's dial was AutoPrune
+		// when the row entered pending-purge, and is only later set to Keep.
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Keep, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(0, report.AutoPruned);
+		Assert.Equal(1, report.ManualDownloadDialSkipped);
+		Assert.Empty(report.Errors);
+
+		RetainedContentState? state = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.PendingPurge, state!.State); // the dial's "never auto-pruned" promise held, not silently purged
+	}
+
+	// -- Issue #1864(a): an unrecognized dial value reports an error and lets the
+	// rest of the sweep (both passes) continue, instead of the ArgumentException
+	// aborting RunSweepAsync entirely.
+
+	[Fact]
+	public async Task RunSweepAsync_DriftedManualDownloadDialValue_ReportsErrorAndCompletesRemainingRows()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.AutoPrune, CancellationToken.None);
+
+		Guid manualArtifactId = await InsertDepotArtifactAsync("drifted-dial-manual-candidate");
+		Guid manualStateId = await _states.EnsureTrackedAsync(manualArtifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(manualStateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("drifted-dial-manual-candidate");
+
+		// A second, ordinary (non-manual-download) grace row -- proves the drifted
+		// dial value does not abort the whole sweep and strand this row too.
+		Guid ordinaryArtifactId = await InsertDepotArtifactAsync("drifted-dial-ordinary-row");
+		Guid ordinaryStateId = await _states.EnsureTrackedAsync(ordinaryArtifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(ordinaryStateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("drifted-dial-ordinary-row");
+
+		DriftedDialPolicyRepository driftedPolicies = new(_policies, "some-future-wire-value-not-yet-known");
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)), policies: driftedPolicies);
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [manualArtifactId]),
+			CancellationToken.None);
+
+		Assert.NotEmpty(report.Errors);
+		Assert.Contains(report.Errors, error => error.Contains("some-future-wire-value-not-yet-known"));
+		Assert.Equal(0, report.ManualDownloadDialSkipped);
+
+		// The manual-download row was not purged (safe direction: no deletion on an
+		// unresolved dial)...
+		RetainedContentState? manualState = await _states.GetAsync(manualStateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Grace, manualState!.State);
+
+		// ...and the sweep did NOT abort: the ordinary row after it in the same pass
+		// was still auto-pruned normally.
+		Assert.Equal(1, report.AutoPruned);
+		RetainedContentState? ordinaryState = await _states.GetAsync(ordinaryStateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, ordinaryState!.State);
+	}
+
+	// -- Issue #1864(b): a named manual-download id that matches no row visited this
+	// pass is reported via ManualDownloadCandidatesNotApplicable, not silently
+	// dropped.
+
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadCandidateNotYetInGrace_IsReportedNotApplicable()
+	{
+		// Tracked but not yet in grace -- not at a decision point, so legitimately a
+		// no-op, but must still be counted rather than silently dropped.
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-candidate-not-in-grace");
+		await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(1, report.ManualDownloadCandidatesNotApplicable);
+		Assert.Equal(0, report.ManualDownloadDialSkipped);
+	}
+
+	[Fact]
+	public async Task RunSweepAsync_ManualDownloadCandidateInGrace_IsNotCountedNotApplicable()
+	{
+		await _policies.UpsertAsync(RetentionPolicyScopes.Default, gracePeriodDays: 1, graceMaxRefreshes: 0, ManualDownloadDialOptions.Keep, CancellationToken.None);
+
+		Guid artifactId = await InsertDepotArtifactAsync("manual-download-candidate-matched-in-grace");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _states.TransitionAsync(stateId, RetainedContentStates.Grace, CancellationToken.None);
+		WriteDepotFile("manual-download-candidate-matched-in-grace");
+
+		RetentionSweepService service = CreateService(new FakeTimeProvider(DateTimeOffset.UtcNow.AddYears(1)));
+
+		RetentionSweepReport report = await service.RunSweepAsync(
+			new RetentionSweepRequest([], ListingVerified: true, ManualDownloadDepotArtifactIds: [artifactId]),
+			CancellationToken.None);
+
+		Assert.Equal(0, report.ManualDownloadCandidatesNotApplicable);
+		Assert.Equal(1, report.ManualDownloadDialSkipped);
+	}
+
+	// -- Issue #1891: a purge whose out-of-scope erase fails after a successful
+	// physical delete must not strand the row unrecoverably -- the erase now runs
+	// BEFORE the terminal Purged transition, so an erase failure leaves the row at
+	// pending-purge, and the very next sweep/purge-now completes it.
+
+	private sealed class FailOnceEraser(IOutOfScopeContentEraser inner) : IOutOfScopeContentEraser
+	{
+		private bool _failed;
+
+		public Task EraseAsync(Guid depotArtifactId, CancellationToken cancellationToken)
+		{
+			if (!_failed)
+			{
+				_failed = true;
+				throw new NpgsqlException("simulated connection loss between the physical delete and the erase.");
+			}
+
+			return inner.EraseAsync(depotArtifactId, cancellationToken);
+		}
+	}
+
+	[Fact]
+	public async Task PurgeImmediatelyAsync_EraseFailsAfterSuccessfulDelete_LeavesRowRecoverableAtPendingPurge()
+	{
+		Guid artifactId = await InsertDepotArtifactAsync("erase-failure-after-delete-target");
+		Guid stateId = await _states.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		WriteDepotFile("erase-failure-after-delete-target");
+
+		FakeReviewListService reviewList = new();
+		FailOnceEraser failingEraser = new(reviewList);
+		RetentionSweepService service = new(
+			_states,
+			_policies,
+			new DepotArtifactRepository(_fixture.ConnectionString),
+			reviewList,
+			failingEraser,
+			new RecordingEventPublisher(),
+			Options.Create(new CatalogOptions { DepotPath = _depotRoot }),
+			NullLogger<RetentionSweepService>.Instance,
+			new FakeTimeProvider(DateTimeOffset.UtcNow));
+
+		await Assert.ThrowsAsync<NpgsqlException>(
+			() => service.PurgeImmediatelyAsync(stateId, "operator-1", "policy violation", CancellationToken.None));
+
+		// The physical delete DID happen (not repeated harmlessly is proven below);
+		// the row must still be at pending-purge, not stranded at a terminal state
+		// with no recovery path.
+		RetainedContentState? afterFailure = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.PendingPurge, afterFailure!.State);
+		Assert.False(File.Exists(Path.Combine(_depotRoot, "erase-failure-after-delete-target")));
+
+		// Recoverable via a sweep re-run / purge-now retry, exactly like #1661's own
+		// pending-purge revisit contract -- the retry's physical delete is a harmless
+		// no-op (file already gone), and this time the erase succeeds.
+		RetentionPurgeOutcome retry = await service.PurgeImmediatelyAsync(stateId, "operator-1", "policy violation", CancellationToken.None);
+
+		Assert.True(retry.Purged);
+		RetainedContentState? finalState = await _states.GetAsync(stateId, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, finalState!.State);
 	}
 
 	private void WriteDepotFile(string relativePath) =>
