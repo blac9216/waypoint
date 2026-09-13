@@ -127,12 +127,6 @@ public sealed class ManagedToolOptions
 	public string ProductVersionCatalogSignaturePath { get; set; } = "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.sig";
 
 	/// <summary>
-	/// Independently provisioned VMware/Broadcom certificate used to trust the
-	/// certificate embedded in the catalog signature envelope.
-	/// </summary>
-	public string CatalogTrustCertificatePath { get; set; } = "/var/lib/waypoint/managed-tool/catalog-trust.cert";
-
-	/// <summary>
 	/// Directory manual uploads (issue #39's third install path) are staged into by
 	/// <c>POST /downloads/tool/upload</c> before the <c>tool-install</c> job picks them
 	/// up. Lives on its OWN dedicated volume (<c>tool-upload-staging</c> in

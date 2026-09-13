@@ -21,7 +21,15 @@ using Waypoint.Core.Downloads;
 
 namespace Waypoint.Infrastructure.Downloads;
 
-/// <summary>Verifies Broadcom's real productVersionCatalog.json/.sig distribution format.</summary>
+/// <summary>
+/// Verifies Broadcom's real productVersionCatalog.json/.sig distribution format.
+/// Integrity/consistency only (issue #798): the catalog signature is RSA-verified
+/// against the certificate embedded in its OWN envelope -- there is no independent,
+/// operator-provisioned, or code-pinned trust anchor, since any such anchor could only
+/// ever be sourced from the same Broadcom channel the catalog itself came from (owner
+/// decision 2026-08-25). Provenance across the air gap is provided elsewhere, by the
+/// Waypoint bundling certificate at transfer time (issue #17), not here.
+/// </summary>
 public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedToolOptions> options) : IManagedToolCatalogVerifier
 {
 	private readonly IOptions<ManagedToolOptions> _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -45,11 +53,13 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 	}
 
 	/// <summary>
-	/// Catalog-only authentication (issue #687 connected <c>catalog-pull</c>): trust
-	/// chain + detached-signature-envelope check over the catalog's exact bytes + a
-	/// size bound, with NO per-artifact size/SHA match. Uses the SAME publisher trust
-	/// anchor and envelope convention as the install-time <see cref="VerifyAsync"/>
-	/// (they both funnel through <see cref="AuthenticateCatalogDocumentAsync"/>).
+	/// Catalog-only authentication (issue #687 connected <c>catalog-pull</c>):
+	/// detached-signature-envelope integrity/consistency check over the catalog's exact
+	/// bytes (RSA-verified against the envelope's OWN embedded certificate, no
+	/// independent trust anchor -- issue #798) + a size bound, with NO per-artifact
+	/// size/SHA match. Uses the SAME envelope convention as the install-time
+	/// <see cref="VerifyAsync"/> (they both funnel through
+	/// <see cref="AuthenticateCatalogDocumentAsync"/>).
 	/// </summary>
 	public async Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(
 		string repositoryRoot, CancellationToken cancellationToken)
@@ -81,10 +91,6 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 		{
 			return AuthenticatedCatalog.Fail($"Broadcom product-version catalog signature not found at '{signaturePath}'.");
 		}
-		if (!File.Exists(configured.CatalogTrustCertificatePath))
-		{
-			return AuthenticatedCatalog.Fail($"Broadcom catalog trust certificate is not provisioned at '{configured.CatalogTrustCertificatePath}'.");
-		}
 
 		long catalogFileSize = new FileInfo(catalogPath).Length;
 		if (catalogFileSize > MaxCatalogBytes)
@@ -103,12 +109,6 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 		try
 		{
 			using X509Certificate2 embedded = X509Certificate2.CreateFromPem(match.Groups[2].Value);
-			using X509Certificate2 trusted = X509Certificate2.CreateFromPem(
-				await File.ReadAllTextAsync(configured.CatalogTrustCertificatePath, cancellationToken).ConfigureAwait(false));
-			if (!CryptographicOperations.FixedTimeEquals(embedded.RawData, trusted.RawData))
-			{
-				return AuthenticatedCatalog.Fail("Catalog signature certificate does not match the independently provisioned Broadcom trust certificate.");
-			}
 			using RSA? rsa = embedded.GetRSAPublicKey();
 			if (rsa is null || !rsa.VerifyData(catalogBytes, Convert.FromHexString(match.Groups[1].Value), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
 			{
@@ -117,7 +117,7 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 		}
 		catch (Exception exception) when (exception is CryptographicException or FormatException)
 		{
-			return AuthenticatedCatalog.Fail($"Broadcom catalog trust material could not be parsed: {exception.Message}");
+			return AuthenticatedCatalog.Fail($"Broadcom product-version catalog signature envelope could not be parsed: {exception.Message}");
 		}
 
 		return AuthenticatedCatalog.Ok(catalogBytes);

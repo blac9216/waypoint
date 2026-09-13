@@ -86,7 +86,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-catalog-pull-key").FullName;
 	private readonly string _toolStatePath = Directory.CreateTempSubdirectory("wp-catalog-pull-tool-state").FullName;
 	private readonly string _depotPath = Directory.CreateTempSubdirectory("wp-catalog-pull-depot").FullName;
-	private readonly string _trustCertPath = Path.Combine(Directory.CreateTempSubdirectory("wp-catalog-pull-trust").FullName, "catalog-trust.cert");
 	private readonly RSA _signingKey = RSA.Create(2048);
 	private readonly InPlaySecretRedactor _redactor = new();
 
@@ -135,7 +134,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		Directory.Delete(_keyDirectory, recursive: true);
 		Directory.Delete(_toolStatePath, recursive: true);
 		Directory.Delete(_depotPath, recursive: true);
-		Directory.Delete(Path.GetDirectoryName(_trustCertPath)!, recursive: true);
 	}
 
 	private async Task ResetEnrollmentAsync()
@@ -252,10 +250,10 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
-	/// Invented trust chain: one self-signed certificate over a per-run key. The SAME
-	/// certificate bytes are provisioned as the verifier's trust anchor (via
-	/// <see cref="ProvisionTrustCert"/>) and embedded in every signature envelope, so the
-	/// real verifier's fixed-time cert-equality check matches -- exactly the
+	/// Invented self-signed certificate over a per-run key, embedded in every signature
+	/// envelope. Issue #798: there is no independent trust anchor to provision -- the
+	/// real verifier RSA-verifies the signature against this SAME envelope-embedded
+	/// certificate (integrity/consistency only), exactly the
 	/// <c>BroadcomManagedToolCatalogVerifierTests</c> fixture shape. Nothing real.
 	/// </summary>
 	private sealed class CatalogSigner
@@ -270,8 +268,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 			using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
 			_certificatePem = certificate.ExportCertificatePem();
 		}
-
-		public string CertificatePem => _certificatePem;
 
 		public string EnvelopeFor(byte[] catalogBytes)
 		{
@@ -346,7 +342,7 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 	private CatalogPullJobHandler CreateHandler(IManagedToolMetadataPuller puller, IManagedToolCatalogVerifier verifier)
 	{
-		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath, CatalogTrustCertificatePath = _trustCertPath };
+		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath };
 		CatalogOptions catalogOptions = new() { DepotPath = _depotPath };
 		return new CatalogPullJobHandler(
 			_enrollment, new RecordingIdentityTool(), puller, verifier, _artifacts, _pullState, _secretStore, _credentials, _redactor,
@@ -355,23 +351,15 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 	/// <summary>
 	/// The REAL production verifier (the exact concrete type production DI binds
-	/// <c>IManagedToolCatalogVerifier</c> to), pointed at the invented trust certificate
-	/// that <see cref="ProvisionTrustCertFor"/> derives from the per-run signing key.
+	/// <c>IManagedToolCatalogVerifier</c> to). Issue #798: no independent trust
+	/// certificate is provisioned -- the verifier authenticates the signature against
+	/// the envelope's own embedded certificate.
 	/// </summary>
 	private BroadcomManagedToolCatalogVerifier CreateRealVerifier() =>
 		new(Options.Create(new ManagedToolOptions
 		{
 			ToolStatePath = _toolStatePath,
-			CatalogTrustCertificatePath = _trustCertPath,
 		}));
-
-	/// <summary>
-	/// Provisions the independently trusted certificate (the signer's own cert bytes) as
-	/// the verifier's trust anchor, so the real verifier's fixed-time cert-equality check
-	/// matches the cert the puller embeds in the <c>.sig</c> envelope.
-	/// </summary>
-	private void ProvisionTrustCert(CatalogSigner signer) =>
-		File.WriteAllText(_trustCertPath, signer.CertificatePem);
 
 	[Fact]
 	public async Task NoActivationCodeConfigured_FailsCleanly_NeverCallsThePuller()
@@ -396,7 +384,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		// production DI wires it, against an invented signed catalog fixture (Finding 2).
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -455,7 +442,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -518,7 +504,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 			""";
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), catalogWithSharedFileName, signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -539,7 +524,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		const string emptyCatalog = """{"patches": {"VCENTER": []}}""";
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), emptyCatalog, signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -584,7 +568,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		// path the success test exercises, driven to a genuine authentication failure.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 
 		// Seed a prior-good catalog on the active depot path.
 		string activeCatalogPath = Path.Combine(_depotPath, "PROD", "metadata", "productVersionCatalog", "v1", "productVersionCatalog.json");
@@ -617,7 +600,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		// verifier for a missing signature, never promoted or indexed.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -639,7 +621,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		// valid JSON, so the parser -- downstream of authentication -- fails it closed.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), "{not-valid-json", signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
@@ -668,7 +649,6 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	{
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		CatalogSigner signer = new(_signingKey);
-		ProvisionTrustCert(signer);
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
 		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
